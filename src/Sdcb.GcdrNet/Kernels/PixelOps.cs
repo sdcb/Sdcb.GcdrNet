@@ -17,8 +17,6 @@ internal static class PixelOps
         Span<float> dst, int h, int w, int padTop, int padLeft)
     {
         int hw = h * w;
-        var inv = new Vector<float>(1f / 255f);
-        int VL = Vector<float>.Count;
         for (int y = 0; y < h; y++)
         {
             int sy = Math.Max(0, y - padTop);

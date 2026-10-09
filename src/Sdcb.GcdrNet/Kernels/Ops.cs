@@ -14,10 +14,27 @@ internal static unsafe class Ops
 {
     // ======================== Conv ========================
     // src [1,IC,H,W]; w [OC,IC/g,kh,kw]; dst [1,OC,OH,OW]. N==1 assumed.
+    // `add` is an optional same-shape residual addend, applied before the activation.
     public static void Conv(ReadOnlySpan<float> src, int[] inShape,
         ReadOnlySpan<float> w, int[] wShape, ReadOnlySpan<float> bias,
-        Span<float> dst, int[] outShape, ConvP p)
+        Span<float> dst, int[] outShape, ConvP p, ReadOnlySpan<float> add = default)
     {
+        if (!add.IsEmpty && add.Length != dst.Length)
+            throw new NotSupportedException(
+                $"conv residual addend has {add.Length} elems, expected {dst.Length}.");
+        if (!add.IsEmpty)
+        {
+            // activation must run after the residual add: conv without act, then fused add+act
+            var q = new ConvP
+            {
+                Pads = p.Pads, Strides = p.Strides, Dilations = p.Dilations, Kernel = p.Kernel,
+                Group = p.Group, Act = ActivationKind.None, PadMode = p.PadMode,
+                PadValue = p.PadValue, BiasValue = p.BiasValue, KernelPlan = p.KernelPlan,
+            };
+            Conv(src, inShape, w, wShape, bias, dst, outShape, q);
+            AddInPlace(dst, add, p.Act);
+            return;
+        }
         int ic = inShape[1], ih = inShape[2], iw = inShape[3];
         int oc = wShape[0], kh = wShape[2], kw = wShape[3];
         int oh = outShape[2], ow = outShape[3];
@@ -62,6 +79,12 @@ internal static unsafe class Ops
     vec:
         if (group > 1)
         {
+            if (group != ic)   // grouped (non-depthwise) conv: scalar reference handles groups correctly
+            {
+                ConvScalar(src, ic, ih, iw, w, bias, dst, oc, oh, ow, kh, kw, sh, sw,
+                    pt, pl, group, p.PadMode, p.PadValue, p.Act);
+                return;
+            }
             ConvDepthwiseVec(src, ic, ih, iw, w, bias, dst, oh, ow, kh, kw,
                 pt, pl, p.PadMode, p.PadValue, p.Act);
             return;
@@ -73,6 +96,26 @@ internal static unsafe class Ops
         }
         ConvVecW(src, ic, ih, iw, w, bias, dst, oc, oh, ow, kh, kw, sh, sw,
             pt, pl, group, p.PadMode, p.PadValue, p.Act);
+    }
+
+    /// <summary>dst = act(dst + add) — residual epilogue for fused Conv+Add.</summary>
+    private static void AddInPlace(Span<float> dst, ReadOnlySpan<float> add, ActivationKind act)
+    {
+        int n = dst.Length, i = 0, VL = Vector<float>.Count;
+        var zero = Vector<float>.Zero;
+        for (; i + VL <= n; i += VL)
+        {
+            var v = Simd.VectorLoad(dst, i) + Simd.VectorLoad(add, i);
+            if (act == ActivationKind.Relu) v = Vector.Max(v, zero);
+            Simd.VectorStore(dst, i, v);
+        }
+        for (; i < n; i++)
+        {
+            float v = dst[i] + add[i];
+            dst[i] = act == ActivationKind.Relu ? MathF.Max(v, 0f) : v;
+        }
+        if (act != ActivationKind.None && act != ActivationKind.Relu)
+            throw new NotSupportedException($"conv residual epilogue does not support {act}.");
     }
 
     // ---- scalar reference conv (N==1, dense or grouped) ----
@@ -117,6 +160,7 @@ internal static unsafe class Ops
     private static int Reflect(int i, int dim)
     {
         // ONNX reflect (half-sample symmetric, no edge repeat): -1→1, dim→dim-2
+        if (dim <= 1) return 0;   // reflect is undefined on a singleton axis; don't spin
         while (i < 0 || i >= dim) i = i < 0 ? -i : 2 * dim - 2 - i;
         return i;
     }
@@ -138,7 +182,7 @@ internal static unsafe class Ops
         // interior x-range where all taps in-bounds (no pad needed)
         for (int o = 0; o < oc; o++)
         {
-            int g = o / (oc / group); // wait: for grouped, oc per group
+            int g = o / (oc / group); // output channel -> group index
             for (int y = 0; y < oh; y++)
             {
                 Span<float> drow = dst.Slice((o * oh + y) * ow, ow);
@@ -746,8 +790,9 @@ internal static unsafe class Ops
         int[] outShape, int[] perm)
     {
         int rank = inShape.Length;
-        // fast path: last-two-dim swap on any rank (most common here)
+        // fast path: last-two-dim swap on any rank (most common here); leading dims must be identity
         bool isSwapLast2 = perm.Length == rank && perm[^1] == rank - 2 && perm[^2] == rank - 1;
+        for (int i = 0; isSwapLast2 && i < rank - 2; i++) isSwapLast2 = perm[i] == i;
         if (isSwapLast2)
         {
             int a = inShape[rank - 2], b = inShape[rank - 1];
@@ -911,6 +956,10 @@ internal static unsafe class Ops
                         if ((uint)sy < (uint)h) s.Slice(sy * w, w).CopyTo(d.Slice(y * w, w));
                         else d.Slice(y * w, w).Clear();
                     }
+                }
+                else if (Math.Abs(off) >= w)
+                {
+                    d.Clear();   // shifted fully out of range -> all zeros
                 }
                 else
                 {

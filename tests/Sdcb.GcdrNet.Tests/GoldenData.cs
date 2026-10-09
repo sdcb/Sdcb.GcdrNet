@@ -25,8 +25,8 @@ internal static class Golden
     public static float[] F32(string tag, string name) =>
         FromFile<float>(Path.Combine(Dir, $"{tag}_{name}.f32"));
 
-    public static byte[] U8(string tag, string name) =>
-        File.ReadAllBytes(Path.Combine(Dir, $"{tag}_{name}.{name}"));
+    public static byte[] U8(string tag) =>
+        File.ReadAllBytes(Path.Combine(Dir, $"{tag}_final.u8"));
 
     public static byte[] Bgr(string tag) =>
         File.ReadAllBytes(Path.Combine(Dir, $"{tag}_src.bgr"));
@@ -68,21 +68,5 @@ internal static class Golden
         return (max, Math.Sqrt(sum / a.Length), (float)(amean / a.Length));
     }
 
-    public static string ModelDir { get; } = FindModels();
-
-    private static string FindModels()
-    {
-        var d = new DirectoryInfo(AppContext.BaseDirectory);
-        while (d != null)
-        {
-            string cand = Path.Combine(d.FullName, "models");
-            if (Directory.Exists(cand) && File.Exists(Path.Combine(cand, "gcdrnet_gcnet_sim.onnx")))
-                return cand;
-            d = d.Parent;
-        }
-        // fallback: sibling GCDRNet repo
-        string fb = @"C:\Users\sdfly\source\repos\GCDRNet\checkpoints\onnx";
-        if (Directory.Exists(fb)) return fb;
-        throw new DirectoryNotFoundException("ONNX model directory not found.");
-    }
+    public static string ModelDir { get; } = Path.Combine(Dir, "models");
 }

@@ -8,10 +8,10 @@ namespace Sdcb.GcdrNet.Tests;
 /// <summary>Standalone GPU kernel vs CPU kernel checks (bilinear, conv, gemm).</summary>
 public unsafe class VkKernelTests
 {
-    [Fact]
+    [SkippableFact]
     public void Bilinear_MatchesCpu()
     {
-        if (!VkOk()) return;
+        Skip.IfNot(VkOk(), "no Vulkan device");
         var dev = VkBackend.Default.Dev;
         var rng = new Random(42);
         int c = 4, ih = 3, iw = 4, oh = 6, ow = 8;

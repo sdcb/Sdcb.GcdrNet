@@ -17,6 +17,8 @@ public class VkDebugTests
     public void Nodes_Match(string which, string tag, string inputName)
     {
         if (Environment.GetEnvironmentVariable("GCDRNET_VKDBG") != "1") return;
+        try { _ = VkBackend.Default.Dev.DeviceName; }
+        catch { return; }   // no Vulkan device — env-gated debug test, skip quietly
 
         OnnxModel m = OnnxModel.Load(which == "gc" ? GcPath : DrPath);
         float[] input = Golden.F32(tag, inputName);

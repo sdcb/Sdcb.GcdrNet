@@ -32,6 +32,12 @@ public static class Program
             int reps = args.Length > 3 ? int.Parse(args[3]) : 10;
             return BenchVk(gcPath, drPath, h, w, reps);
         }
+        if (args.Length > 0 && args[0] == "--trace")
+        {
+            int h = args.Length > 1 ? int.Parse(args[1]) : 96;
+            int w = args.Length > 2 ? int.Parse(args[2]) : 128;
+            return Trace(gcPath, drPath, h, w);
+        }
         if (args.Length > 0 && args[0] == "--vkprof")
         {
             int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
@@ -82,6 +88,31 @@ public static class Program
         for (int i = 0; i < o2.Length; i++) max2 = MathF.Max(max2, MathF.Abs(o2[i] - drExpect[i]));
         Console.WriteLine($"drnet[{tag}] max diff = {max2:E3}");
         return max < 2e-3 && max2 < 2e-3 ? 0 : 3;
+    }
+
+    // run each node with progress printed — for hunting hangs at odd sizes
+    private static int Trace(string gcPath, string drPath, int h, int w)
+    {
+        foreach (var (path, c) in new[] { (gcPath, 3), (drPath, 6) })
+        {
+            var plan = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, h, w]);
+            using var s = new InferenceSession(plan);
+            new Random(0).NextBytes(MemoryMarshal.AsBytes(s.Input));
+            Console.WriteLine($"== {Path.GetFileName(path)} [{c}x{h}x{w}] {plan.Nodes.Length} nodes ==");
+            for (int i = 0; i < plan.Nodes.Length; i++)
+            {
+                var nd = plan.Nodes[i];
+                string io = $"{string.Join('x', plan.Values[nd.In[0]].Shape)}->{string.Join('x', plan.Values[nd.Out[0]].Shape)}";
+                if (nd.P is ConvP cp) io += $" w={string.Join('x', plan.Values[nd.In[1]].Shape)} g={cp.Group}";
+                Console.Write($"[{i,3}] {nd.Op} {nd.Name} {io}  ");
+                Console.Out.Flush();
+                long t = Stopwatch.GetTimestamp();
+                s.ExecNode(i);
+                Console.WriteLine($"{(Stopwatch.GetTimestamp() - t) * 1000.0 / Stopwatch.Frequency:F1} ms");
+                Console.Out.Flush();
+            }
+        }
+        return 0;
     }
 
     private static int Bench(string gcPath, string drPath, int h, int w, int reps)
