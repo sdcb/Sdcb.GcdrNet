@@ -12,6 +12,8 @@ public enum GcdrBackend
     Cpu,
     /// <summary>Vulkan compute on a discrete GPU.</summary>
     Vulkan,
+    /// <summary>Vulkan if a compute-capable device exists, else CPU.</summary>
+    Auto,
 }
 
 /// <summary>
@@ -63,7 +65,9 @@ public sealed class GcdrEnhancer : IDisposable
     public void Enhance(ReadOnlySpan<byte> bgrSrc, int width, int height, int srcStride,
         Span<byte> bgrDst, int dstStride)
     {
-        if (_backend == GcdrBackend.Vulkan)
+        bool useVk = _backend == GcdrBackend.Vulkan
+            || (_backend == GcdrBackend.Auto && VulkanOk());
+        if (useVk)
         {
             Sdcb.GcdrNet.Backends.Vulkan.VkBackend.Default
                 .PipeFor(_gcModel, _drModel, height, width)
@@ -98,6 +102,12 @@ public sealed class GcdrEnhancer : IDisposable
 
         // stage 4: crop pad → u8 BGR
         PixelOps.NchwToBgrCrop(dr.Output, h, w, ph, pw, bgrDst, width, height, dstStride);
+    }
+
+    private static bool VulkanOk()
+    {
+        try { _ = Sdcb.GcdrNet.Backends.Vulkan.VkBackend.Default.Dev.DeviceName; return true; }
+        catch { return false; }
     }
 
     /// <summary>Convenience: enhance a tightly-packed BGR HWC image, returns new array.</summary>

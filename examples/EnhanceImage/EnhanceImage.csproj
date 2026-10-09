@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Sdcb.GcdrNet.Examples.EnhanceImage</AssemblyName>
+    <RootNamespace>Sdcb.GcdrNet.Examples</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sdcb.GcdrNet\Sdcb.GcdrNet.csproj" />
+  </ItemGroup>
+</Project>
