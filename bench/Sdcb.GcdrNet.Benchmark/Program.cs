@@ -25,7 +25,20 @@ public static class Program
             int reps = args.Length > 3 ? int.Parse(args[3]) : 10;
             return Bench(gcPath, drPath, h, w, reps);
         }
-        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps]");
+        if (args.Length > 0 && args[0] == "--benchvk")
+        {
+            int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
+            int w = args.Length > 2 ? int.Parse(args[2]) : 1600;
+            int reps = args.Length > 3 ? int.Parse(args[3]) : 10;
+            return BenchVk(gcPath, drPath, h, w, reps);
+        }
+        if (args.Length > 0 && args[0] == "--vkprof")
+        {
+            int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
+            int w = args.Length > 2 ? int.Parse(args[2]) : 1600;
+            return VkProf(gcPath, drPath, h, w);
+        }
+        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps] | --benchvk [h] [w] [reps] | --vkprof [h] [w]");
         return 1;
     }
 
@@ -95,6 +108,44 @@ public static class Program
             foreach (var kv in s1.Profile().OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-16} {kv.Value.TotalMilliseconds,8:F1} ms");
             Console.WriteLine("--- dr profile ---");
             foreach (var kv in s2.Profile().OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-16} {kv.Value.TotalMilliseconds,8:F1} ms");
+        }
+        return 0;
+    }
+
+    private static int BenchVk(string gcPath, string drPath, int h, int w, int reps)
+    {
+        // full pipeline: BGR u8 -> enhance -> BGR u8, everything on GPU
+        using var enh = GcdrEnhancer.FromFiles(gcPath, drPath, GcdrBackend.Vulkan);
+        byte[] src = new byte[w * h * 3];
+        new Random(0).NextBytes(src);
+        byte[] dst = new byte[w * h * 3];
+        enh.Enhance(src, w, h, w * 3, dst, w * 3); // warmup + JIT + upload
+        double best = 1e9;
+        for (int i = 0; i < reps; i++)
+        {
+            long t = Stopwatch.GetTimestamp();
+            enh.Enhance(src, w, h, w * 3, dst, w * 3);
+            best = Math.Min(best, Stopwatch.GetTimestamp() - t);
+        }
+        Console.WriteLine($"vulkan e2e {w}x{h}: {best / Stopwatch.Frequency * 1000:F1} ms (incl. upload/download)");
+        return 0;
+    }
+
+    private static int VkProf(string gcPath, string drPath, int h, int w)
+    {
+        var be = Backends.Vulkan.VkBackend.Default;
+        foreach ((string tag, string mp, int cin) in new[] { ("gc", gcPath, 3), ("dr", drPath, 6) })
+        {
+            var m = OnnxModel.Load(mp);
+            using var s = be.NewSession(m, [1, cin, h, w]);
+            s.Run(); // warm
+            var agg = s.DebugProfile();
+            double tot = agg.Values.Sum();
+            Console.WriteLine($"--- {tag} gpu per-shader (total {tot:F1} ms) ---");
+            foreach (var kv in agg.OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-14} {kv.Value,8:F2} ms");
+            if (Environment.GetEnvironmentVariable("VKPROF_NODES") == "1")
+                foreach (var (name, ms) in s.PerDispatch!.OrderByDescending(x => x.Ms).Take(15))
+                    Console.WriteLine($"    {ms,8:F2} ms  {name}");
         }
         return 0;
     }

@@ -87,6 +87,12 @@ public sealed class InferenceSession : IDisposable
         return d;
     }
 
+    /// <summary>Debug/test: run a single node by index. Arena must be pre-initialized.</summary>
+    internal void ExecNode(int i) => Exec(_plan.Nodes[i]);
+
+    /// <summary>Debug/test: read an activation value's arena region.</summary>
+    internal ReadOnlySpan<float> ValueSpan(int valueId) => GetSpan(valueId);
+
     private void Exec(ExecNode n)
     {
         CValue[] values = _plan.Values;

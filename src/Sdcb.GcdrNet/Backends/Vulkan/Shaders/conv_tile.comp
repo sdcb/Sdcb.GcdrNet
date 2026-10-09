@@ -1,0 +1,132 @@
+#version 450
+// Tiled NCHW conv, 3D dispatch: gx=x-tile(16), gy=y-tile(8), gz=oc-tile(64).
+// Workgroup 256 thr; per thread 4 oc x 8 spatial outputs. K-chunk 32 staged in shared.
+// Compile-time kernel/stride via -DKH= -DKW= -DSH= -DSW= (defaults: runtime PC values).
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X  { float x[]; };
+layout(set = 0, binding = 1) readonly buffer W  { float w[]; };
+layout(set = 0, binding = 2) readonly buffer B  { float b[]; };   // per-OC bias (dummy if none)
+layout(set = 0, binding = 3) readonly buffer R  { float r[]; };   // same-shape residual (dummy if none)
+layout(set = 0, binding = 4) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PC {
+    uint ic, ih, iw;
+    uint oc, oh, ow;
+    uint kh, kw, sh, sw;
+    uint pt, pl;
+    uint flags;     // bit0 hasBias, bit1 reflectPad, bit2 relu, bit3 hasAdd
+} p;
+
+#ifndef KH
+#define KH (p.kh)
+#endif
+#ifndef KW
+#define KW (p.kw)
+#endif
+#ifndef SH
+#define SH (p.sh)
+#endif
+#ifndef SW
+#define SW (p.sw)
+#endif
+
+const uint BM = 64u;            // oc tile
+const uint BH = 8u, BW = 16u;   // spatial tile
+const uint BN = BH * BW;        // 128 spatial outputs per wg
+const uint BK = 32u;
+shared vec4 Asv[BK * BM / 4];
+shared vec4 Bsv[BK * BN / 4];
+
+int mirror(int i, int d) { while (i < 0 || i >= d) i = i < 0 ? -i : 2 * d - 2 - i; return i; }
+
+void main()
+{
+    uint oc0 = gl_WorkGroupID.z * BM;
+    uint oy0 = gl_WorkGroupID.y * BH;
+    uint ox0 = gl_WorkGroupID.x * BW;
+    uint K = p.ic * KH * KW;
+    uint tid = gl_LocalInvocationID.x;
+    uint ty = tid >> 4, tx = tid & 15u;    // ty: oc rows (4 each), tx: spatial (8 each)
+
+    float acc[4][8];
+    for (int i = 0; i < 4; i++) for (int j = 0; j < 8; j++) acc[i][j] = 0.0;
+
+    bool reflect = (p.flags & 2u) != 0u;
+    uint khkw = KH * KW;
+
+    for (uint k0 = 0u; k0 < K; k0 += BK)
+    {
+        // As[k][m] = w[(oc0+m)*K + k0+k]
+        for (uint e = tid; e < BK * BM; e += 256u)
+        {
+            uint k = e >> 6, m = e & 63u;
+            uint gm = oc0 + m, gk = k0 + k;
+            Asv[e >> 2][e & 3u] = (gm < p.oc && gk < K) ? w[gm * K + gk] : 0.0;
+        }
+        // Bs[k][n]: n = ey*BW + ex (ey=n>>4, ex=n&15)
+        for (uint e = tid; e < BK * BN; e += 256u)
+        {
+            uint k = e / BN, n = e - (e / BN) * BN;
+            uint gk = k0 + k;
+            uint ey = n >> 4, ex = n & 15u;
+            float v = 0.0;
+            if (gk < K)
+            {
+                uint oy = oy0 + ey, ox = ox0 + ex;
+                if (oy < p.oh && ox < p.ow)
+                {
+                    uint kx = gk % KW, ky = (gk / KW) % KH, ic = gk / khkw;
+                    int sy = int(oy * SH + ky) - int(p.pt);
+                    int sx = int(ox * SW + kx) - int(p.pl);
+                    if (reflect)
+                    {
+                        if (uint(sy) >= p.ih) sy = mirror(sy, int(p.ih));
+                        if (uint(sx) >= p.iw) sx = mirror(sx, int(p.iw));
+                        v = x[(ic * p.ih + uint(sy)) * p.iw + uint(sx)];
+                    }
+                    else if (uint(sy) < p.ih && uint(sx) < p.iw)
+                        v = x[(ic * p.ih + uint(sy)) * p.iw + uint(sx)];
+                }
+            }
+            Bsv[e >> 2][e & 3u] = v;
+        }
+        barrier();
+
+        for (uint k = 0u; k < BK; k++)
+        {
+            vec4 av = Asv[k * 16u + ty];                    // As[k][ty*4 .. +3]
+            vec4 bv0 = Bsv[k * 32u + tx * 2u];              // Bs[k][tx*8 .. +3]
+            vec4 bv1 = Bsv[k * 32u + tx * 2u + 1u];         // Bs[k][tx*8+4 .. +7]
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++)
+                    acc[i][j] += av[i] * bv0[j];
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++)
+                    acc[i][j + 4] += av[i] * bv1[j];
+        }
+        barrier();
+    }
+
+    bool hasBias = (p.flags & 1u) != 0u;
+    bool relu = (p.flags & 4u) != 0u;
+    bool hasAdd = (p.flags & 8u) != 0u;
+    uint ohw = p.oh * p.ow;
+    for (int i = 0; i < 4; i++)
+    {
+        uint gm = oc0 + ty * 4u + uint(i);
+        if (gm >= p.oc) continue;
+        float bias = hasBias ? b[gm] : 0.0;
+        for (int j = 0; j < 8; j++)
+        {
+            uint n = tx * 8u + uint(j);
+            uint oy = oy0 + (n >> 4), ox = ox0 + (n & 15u);
+            if (oy >= p.oh || ox >= p.ow) continue;
+            uint di = gm * ohw + oy * p.ow + ox;
+            float v = acc[i][j] + bias;
+            if (hasAdd) v += r[di];
+            if (relu) v = max(v, 0.0);
+            o[di] = v;
+        }
+    }
+}

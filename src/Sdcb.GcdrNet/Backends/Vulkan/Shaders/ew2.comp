@@ -1,0 +1,31 @@
+#version 450
+// Elementwise binary + fused activation, general rank<=4 broadcast.
+// dst flat index decomposed by out dims (d0..d3); operand index = sum(dk * stride_k).
+// op: 0 add 1 sub 2 mul 3 div;  act: 0 none 1 relu 2 sigmoid
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer A { float a[]; };
+layout(set = 0, binding = 1) readonly buffer B { float b[]; };
+layout(set = 0, binding = 2) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PC {
+    uint n, s0, s1, s2;                 // out strides (s3 = 1 implied)
+    uint as0, as1, as2, as3;
+    uint bs0, bs1, bs2, bs3;
+    uint op, act;
+} p;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+    uint d0 = i / p.s0, r0 = i % p.s0;
+    uint d1 = r0 / p.s1, r1 = r0 % p.s1;
+    uint d2 = r1 / p.s2, d3 = r1 % p.s2;
+    float va = a[d0 * p.as0 + d1 * p.as1 + d2 * p.as2 + d3 * p.as3];
+    float vb = b[d0 * p.bs0 + d1 * p.bs1 + d2 * p.bs2 + d3 * p.bs3];
+    float v = p.op == 0u ? va + vb : p.op == 1u ? va - vb : p.op == 2u ? va * vb : va / vb;
+    if (p.act == 1u) v = max(v, 0.0);
+    else if (p.act == 2u) v = 1.0 / (1.0 + exp(-v));
+    o[i] = v;
+}

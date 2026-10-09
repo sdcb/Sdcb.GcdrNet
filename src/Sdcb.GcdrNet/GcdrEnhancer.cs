@@ -5,6 +5,15 @@ using Sdcb.GcdrNet.Onnx;
 
 namespace Sdcb.GcdrNet;
 
+/// <summary>Compute backend selection for <see cref="GcdrEnhancer"/>.</summary>
+public enum GcdrBackend
+{
+    /// <summary>CPU: Scalar → Vector&lt;float&gt; → AVX2 dispatch.</summary>
+    Cpu,
+    /// <summary>Vulkan compute on a discrete GPU.</summary>
+    Vulkan,
+}
+
 /// <summary>
 /// GCDRNet two-stage document enhancer: GC-Net shading estimation → division
 /// correction → DR-Net detail restoration. BGR uint8 in, BGR uint8 out.
@@ -13,21 +22,25 @@ namespace Sdcb.GcdrNet;
 public sealed class GcdrEnhancer : IDisposable
 {
     private readonly OnnxModel _gcModel, _drModel;
+    private readonly GcdrBackend _backend;
     private readonly ConcurrentDictionary<int, InferenceSession> _gcSessions = new();
     private readonly ConcurrentDictionary<int, InferenceSession> _drSessions = new();
     private readonly ConcurrentBag<InferenceSession> _pool = new();
 
-    private GcdrEnhancer(OnnxModel gc, OnnxModel dr)
+    private GcdrEnhancer(OnnxModel gc, OnnxModel dr, GcdrBackend backend)
     {
         _gcModel = gc;
         _drModel = dr;
+        _backend = backend;
     }
 
-    public static GcdrEnhancer FromFiles(string gcnetOnnxPath, string drnetOnnxPath) =>
-        new(OnnxModel.Load(gcnetOnnxPath), OnnxModel.Load(drnetOnnxPath));
+    public static GcdrEnhancer FromFiles(string gcnetOnnxPath, string drnetOnnxPath,
+        GcdrBackend backend = GcdrBackend.Cpu) =>
+        new(OnnxModel.Load(gcnetOnnxPath), OnnxModel.Load(drnetOnnxPath), backend);
 
-    public static GcdrEnhancer FromBytes(ReadOnlySpan<byte> gcnetOnnx, ReadOnlySpan<byte> drnetOnnx) =>
-        new(OnnxModel.Load(gcnetOnnx.ToArray()), OnnxModel.Load(drnetOnnx.ToArray()));
+    public static GcdrEnhancer FromBytes(ReadOnlySpan<byte> gcnetOnnx, ReadOnlySpan<byte> drnetOnnx,
+        GcdrBackend backend = GcdrBackend.Cpu) =>
+        new(OnnxModel.Load(gcnetOnnx.ToArray()), OnnxModel.Load(drnetOnnx.ToArray()), backend);
 
     /// <summary>Compile both models for a given padded input size.</summary>
     private InferenceSession SessionFor(bool gc, int h, int w)
@@ -50,6 +63,13 @@ public sealed class GcdrEnhancer : IDisposable
     public void Enhance(ReadOnlySpan<byte> bgrSrc, int width, int height, int srcStride,
         Span<byte> bgrDst, int dstStride)
     {
+        if (_backend == GcdrBackend.Vulkan)
+        {
+            Sdcb.GcdrNet.Backends.Vulkan.VkBackend.Default
+                .PipeFor(_gcModel, _drModel, height, width)
+                .Enhance(bgrSrc, srcStride, bgrDst, dstStride);
+            return;
+        }
         int ph = (-height) & 31, pw = (-width) & 31;
         int h = height + ph, w = width + pw;
 

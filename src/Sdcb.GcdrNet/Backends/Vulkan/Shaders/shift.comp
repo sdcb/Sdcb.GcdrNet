@@ -1,0 +1,31 @@
+#version 450
+// ChannelShift (fused shift-MLP): per channel group g, out[c,y,x] = in[c,y+off]
+// (axis=2) or in[c,y,x+off] (axis=3), zero-fill.  Groups: contiguous [gs..ge).
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PC {
+    uint c, h, w, axis;
+    uint ge0, ge1, ge2, ge3, ge4;     // group end channel indices
+    int  of0, of1, of2, of3, of4;     // per-group offsets
+} p;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.c * p.h * p.w) return;
+    uint ox = i % p.w, oy = (i / p.w) % p.h, ch = i / (p.h * p.w);
+    int off = ch < p.ge0 ? p.of0 : ch < p.ge1 ? p.of1 : ch < p.ge2 ? p.of2 : ch < p.ge3 ? p.of3 : p.of4;
+    if (p.axis == 2u)
+    {
+        int sy = int(oy) + off;
+        o[i] = uint(sy) < p.h ? x[(ch * p.h + uint(sy)) * p.w + ox] : 0.0;
+    }
+    else
+    {
+        int sx = int(ox) + off;
+        o[i] = uint(sx) < p.w ? x[(ch * p.h + oy) * p.w + uint(sx)] : 0.0;
+    }
+}
