@@ -1,0 +1,26 @@
+#version 450
+// BGR u8 HWC -> NCHW float /255 with top/left replicate padding.
+// out[c,y,x] = bgr[clamp(y-pt,0,h-1), clamp(x-pl,0,w-1), c] / 255
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer BGR { uint bgr[]; };  // packed u8
+layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PC {
+    uint oh, ow;        // padded out dims
+    uint ih, iw;        // src image dims
+    uint pt, pl;        // pad top/left
+    uint stride;        // src row stride in bytes
+} p;
+
+float fetchByte(uint byteIdx) { return float((bgr[byteIdx >> 2] >> ((byteIdx & 3u) * 8u)) & 0xFFu); }
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= 3u * p.oh * p.ow) return;
+    uint ox = i % p.ow, oy = (i / p.ow) % p.oh, c = i / (p.oh * p.ow);
+    uint sy = uint(clamp(int(oy) - int(p.pt), 0, int(p.ih) - 1));
+    uint sx = uint(clamp(int(ox) - int(p.pl), 0, int(p.iw) - 1));
+    o[i] = fetchByte(sy * p.stride + sx * 3u + c) / 255.0;
+}

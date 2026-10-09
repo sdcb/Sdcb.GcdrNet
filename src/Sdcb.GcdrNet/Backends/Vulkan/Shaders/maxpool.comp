@@ -1,0 +1,34 @@
+#version 450
+// NCHW maxpool + optional relu.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PC {
+    uint c, ih, iw, oh, ow;
+    uint kh, kw, sh, sw, pt, pl;
+    uint relu;
+} p;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= p.c * p.oh * p.ow) return;
+    uint ox = id % p.ow, oy = (id / p.ow) % p.oh, ch = id / (p.oh * p.ow);
+    float m = -3.4e38;
+    for (uint ky = 0u; ky < p.kh; ky++)
+    {
+        int sy = int(oy * p.sh + ky) - int(p.pt);
+        if (uint(sy) >= p.ih) continue;
+        for (uint kx = 0u; kx < p.kw; kx++)
+        {
+            int sx = int(ox * p.sw + kx) - int(p.pl);
+            if (uint(sx) >= p.iw) continue;
+            m = max(m, x[(ch * p.ih + uint(sy)) * p.iw + uint(sx)]);
+        }
+    }
+    if (m == -3.4e38) m = 0.0;
+    if (p.relu != 0u && m < 0.0) m = 0.0;
+    o[id] = m;
+}

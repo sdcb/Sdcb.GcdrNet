@@ -1,0 +1,37 @@
+#version 450
+// NCHW float -> u8 BGR HWC, cropping (pt,pl) margins. One thread packs 4 output
+// bytes (may straddle pixels/channels) into one aligned uint write.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { uint o[]; };     // packed u8
+
+layout(push_constant) uniform PC {
+    uint h, w;          // padded src dims
+    uint ih, iw;        // dst image dims
+    uint pt, pl;        // crop top/left
+    uint nwords;        // ceil(ih*iw*3 / 4)
+} p;
+
+void main()
+{
+    uint w4 = gl_GlobalInvocationID.x;
+    if (w4 >= p.nwords) return;
+    uint packed = 0u;
+    for (uint j = 0u; j < 4u; j++)
+    {
+        uint byteIdx = w4 * 4u + j;
+        uint byteTotal = p.ih * p.iw * 3u;
+        uint val = 0u;
+        if (byteIdx < byteTotal)
+        {
+            uint px = byteIdx / 3u, c = byteIdx - px * 3u;
+            uint dy = px / p.iw, dx = px % p.iw;
+            uint sy = dy + p.pt, sx = dx + p.pl;
+            float f = x[(c * p.h + sy) * p.w + sx] * 255.0 + 0.5;
+            val = uint(clamp(f, 0.0, 255.0));
+        }
+        packed |= val << (j * 8u);
+    }
+    o[w4] = packed;
+}

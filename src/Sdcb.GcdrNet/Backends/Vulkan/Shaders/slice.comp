@@ -1,0 +1,25 @@
+#version 450
+// Generic rank<=4 strided slice: dst[k0,k1,k2,k3] = src[start_k + k*step_k].
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PC {
+    uint n;
+    uint os0, os1, os2;              // out strides (os3 = 1)
+    uint st0, st1, st2, st3;         // start per out dim
+    uint sp0, sp1, sp2, sp3;         // step per out dim
+    uint is0, is1, is2, is3;         // in strides
+} p;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+    uint d0 = i / p.os0, r0 = i % p.os0;
+    uint d1 = r0 / p.os1, r1 = r0 % p.os1;
+    uint d2 = r1 / p.os2, d3 = r1 % p.os2;
+    o[i] = x[(p.st0 + d0 * p.sp0) * p.is0 + (p.st1 + d1 * p.sp1) * p.is1
+           + (p.st2 + d2 * p.sp2) * p.is2 + (p.st3 + d3 * p.sp3) * p.is3];
+}

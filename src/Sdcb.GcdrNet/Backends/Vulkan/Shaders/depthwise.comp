@@ -1,0 +1,48 @@
+#version 450
+// Depthwise conv: out[c,oy,ox] = bias[c] + sum_{ky,kx} w[c,ky,kx] * x[c, oy*sh+ky-pt, ox*sw+kx-pl]
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X  { float x[]; };
+layout(set = 0, binding = 1) readonly buffer W  { float w[]; };
+layout(set = 0, binding = 2) readonly buffer B  { float b[]; };
+layout(set = 0, binding = 3) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PC {
+    uint c, ih, iw, oh, ow;
+    uint kh, kw, sh, sw, pt, pl;
+    uint flags;         // bit0 hasBias, bit1 reflect, bit2 relu
+    float padVal;
+} p;
+
+int mirror(int i, int d) { while (i < 0 || i >= d) i = i < 0 ? -i : 2 * d - 2 - i; return i; }
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= p.c * p.oh * p.ow) return;
+    uint ox = id % p.ow, oy = (id / p.ow) % p.oh, ch = id / (p.oh * p.ow);
+    bool refl = (p.flags & 2u) != 0u;
+    float acc = ((p.flags & 1u) != 0u) ? b[ch] : 0.0;
+    for (uint ky = 0u; ky < p.kh; ky++)
+    {
+        int sy = int(oy * p.sh + ky) - int(p.pt);
+        for (uint kx = 0u; kx < p.kw; kx++)
+        {
+            int sx = int(ox * p.sw + kx) - int(p.pl);
+            if (uint(sy) >= p.ih || uint(sx) >= p.iw)
+            {
+                if (refl)
+                {
+                    if (uint(sy) >= p.ih) sy = mirror(sy, int(p.ih));
+                    if (uint(sx) >= p.iw) sx = mirror(sx, int(p.iw));
+                    acc += w[(ch * p.kh + ky) * p.kw + kx] * x[(ch * p.ih + uint(sy)) * p.iw + uint(sx)];
+                }
+                else acc += w[(ch * p.kh + ky) * p.kw + kx] * p.padVal;
+            }
+            else
+                acc += w[(ch * p.kh + ky) * p.kw + kx] * x[(ch * p.ih + uint(sy)) * p.iw + uint(sx)];
+        }
+    }
+    if ((p.flags & 4u) != 0u) acc = max(acc, 0.0);
+    o[id] = acc;
+}

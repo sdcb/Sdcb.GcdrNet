@@ -123,12 +123,17 @@ internal static class GraphCompiler
                 var hist = nodes.GroupBy(m => m.Op).OrderByDescending(g => g.Count());
                 Console.Error.WriteLine($"[plan] {nodes.Count} nodes, arena {arenaFloats * 4.0 / 1e6:F1} MB");
                 foreach (var h in hist) Console.Error.WriteLine($"  {h.Key,-14} x{h.Count()}");
-                foreach (var m in nodes.Where(m => m.Op is ExecOp.Relu or ExecOp.Elementwise))
+                foreach (var m in nodes.Where(m => m.Op is ExecOp.Relu or ExecOp.Elementwise or ExecOp.Transpose))
                 {
                     var prod = nodes.Where(q => q.Out.Intersect(m.In).Any())
                         .Select(q => q.Op.ToString());
                     var sz = m.Out.Select(v => values[v].Shape.Aggregate(1, (a, b) => a * b));
-                    Console.Error.WriteLine($"  {m.Op} {m.Name} <- [{string.Join(",", prod)}] n={string.Join(",", sz)}");
+                    Console.Error.WriteLine($"  {m.Op} {m.Name} <- [{string.Join(",", prod)}] n={string.Join(",", sz)}" +
+                        (m.Op == ExecOp.Transpose && m.P is TransposeP tp
+                            ? $" perm={string.Join(",", tp.Perm)} in={string.Join("x", values[m.In[0]].Shape)} out={string.Join("x", values[m.Out[0]].Shape)}"
+                            : m.Op == ExecOp.Elementwise
+                                ? $" a={string.Join("x", values[m.In[0]].Shape)} b={string.Join("x", values[m.In[1]].Shape)}"
+                                : ""));
                 }
             }
             return new ExecPlan
