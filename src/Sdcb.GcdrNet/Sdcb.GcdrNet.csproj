@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Sdcb.GcdrNet</AssemblyName>
+    <RootNamespace>Sdcb.GcdrNet</RootNamespace>
+    <Description>Pure C# GCDRNet inference engine: document shadow removal / appearance enhancement without onnxruntime.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- SPIR-V binaries are committed next to the .comp sources; regenerate with
+         src/Sdcb.GcdrNet/Backends/Vulkan/tools/build-shaders.bat (glslc, dev-time only). -->
+    <EmbeddedResource Include="Backends\Vulkan\Shaders\*.spv" />
+    <None Remove="Backends\Vulkan\Shaders\*.comp" />
+    <None Remove="Backends\Vulkan\Shaders\*.spv" />
+  </ItemGroup>
+</Project>

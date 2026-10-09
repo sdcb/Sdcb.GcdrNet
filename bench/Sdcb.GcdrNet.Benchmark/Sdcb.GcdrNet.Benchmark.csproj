@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Sdcb.GcdrNet.Benchmark</AssemblyName>
+    <RootNamespace>Sdcb.GcdrNet.Benchmark</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sdcb.GcdrNet\Sdcb.GcdrNet.csproj" />
+  </ItemGroup>
+</Project>
