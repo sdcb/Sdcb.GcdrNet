@@ -40,7 +40,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         _pDiv6 = dev.GetPipeline("div6", 3, 4);
         _pPost = dev.GetPipeline("nchw2bgr", 2, 7 * 4);
         _cmd = dev.NewCommandBuffer();
-        Record(_iw * 3);   // default tightly-packed stride; re-record per call if different
+        Record((uint)(_iw * 3));   // _bgrIn is always tightly packed (we de-stride on upload)
     }
 
     private static byte[] Pc(params uint[] u)
@@ -50,7 +50,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         return b;
     }
 
-    private void Record(int srcStride)
+    private void Record(uint srcStride)
     {
         uint h = (uint)_h, w = (uint)_w;
         var begin = new Vk.VkCommandBufferBeginInfo { SType = VkConst.StCommandBufferBeginInfo };
@@ -96,12 +96,6 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
                     new Span<byte>(_bgrInMap + y * _iw * 3, _iw * 3));
         _bgrIn.Flush(0, inBytes);
 
-        if (_lastStride != srcStride)   // stride baked into push constants
-        {
-            Record(srcStride);
-            _lastStride = srcStride;
-        }
-
         _dev.Submit(_cmd, _fence);
         _dev.WaitFence(_fence);
         _bgrOut.Invalidate(0, inBytes);
@@ -113,8 +107,6 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
                 new ReadOnlySpan<byte>(_bgrOutMap + y * _iw * 3, _iw * 3)
                     .CopyTo(bgrDst.Slice(y * dstStride));
     }
-    private int _lastStride = -1;
-
     public void Dispose()
     {
         _dev.WaitFence(_fence);

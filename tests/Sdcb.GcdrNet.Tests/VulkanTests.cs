@@ -72,6 +72,32 @@ public class VulkanTests
         Assert.True(maxd <= 2, $"pipeline-vk[{tag}] max u8 diff {maxd}, changed px {diffs}/{dst.Length}");
     }
 
+    [SkippableTheory]
+    [InlineData("small", 13, 17)]
+    [InlineData("pad", 8, 5)]
+    public void Pipeline_Strided_Vulkan(string tag, int srcPad, int dstPad)
+    {
+        Skip.IfNot(VkAvailable());
+        var (_, _, _, _, oh, ow) = Golden.Dims(tag);
+        byte[] tight = Golden.Bgr(tag);
+        byte[] expectU8 = File.ReadAllBytes(Path.Combine(Golden.Dir, $"{tag}_final.u8"));
+
+        int ss = ow * 3 + srcPad, ds = ow * 3 + dstPad;
+        byte[] src = new byte[ss * oh];
+        byte[] dst = new byte[ds * oh];
+        for (int y = 0; y < oh; y++)
+            Array.Copy(tight, y * ow * 3, src, y * ss, ow * 3);
+
+        using var enh = GcdrEnhancer.FromFiles(GcPath, DrPath, GcdrBackend.Vulkan);
+        enh.Enhance(src, ow, oh, ss, dst, ds);
+
+        int maxd = 0;
+        for (int y = 0; y < oh; y++)
+            for (int x = 0; x < ow * 3; x++)
+                maxd = Math.Max(maxd, Math.Abs(dst[y * ds + x] - expectU8[y * ow * 3 + x]));
+        Assert.True(maxd <= 2, $"pipeline-vk-strided[{tag}] max u8 diff {maxd}");
+    }
+
     private static bool VkAvailable()
     {
         try { _ = VkBackend.Default.Dev.DeviceName; return true; }
