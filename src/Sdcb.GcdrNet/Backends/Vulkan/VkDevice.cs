@@ -17,8 +17,6 @@ internal unsafe sealed class VkDevice : IDisposable
     public bool CoherentDeviceLocal;   // DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT exists (ReBAR)
     public uint MaxSharedMemory;
     public ulong MaxStorageRange = uint.MaxValue;
-    public uint DeviceLocalHostVisibleType = uint.MaxValue;
-    public uint HostVisibleCoherentType = uint.MaxValue;
     public bool PushDescriptors;
     private unsafe delegate* unmanaged[Cdecl]<IntPtr, uint, IntPtr, uint, uint, Vk.VkWriteDescriptorSet*, void> _pushDesc;
     public double TimestampPeriodNs = 1;
@@ -28,20 +26,21 @@ internal unsafe sealed class VkDevice : IDisposable
     public readonly object Sync = new();
     /// <summary>vkQueueSubmit on the single compute queue is externally synchronized.</summary>
     public readonly object QueueLock = new();
-    private readonly Dictionary<string, VkPipeline> _pipes = new();
+    private readonly Dictionary<(string name, int bindings, int pcBytes), VkPipeline> _pipes = new();
 
     /// <summary>Process-wide pipeline cache: every graph/session shares one
-    /// VkPipeline per (shader name). Set layouts carry PUSH_DESCRIPTOR_BIT when
-    /// the extension is available.</summary>
+    /// VkPipeline per (shader, binding-count, push-const-size). Set layouts carry
+    /// PUSH_DESCRIPTOR_BIT when the extension is available.</summary>
     public VkPipeline GetPipeline(string name, int bindings, int pcBytes)
     {
+        var key = (name, bindings, pcBytes);
         lock (_pipes)
         {
-            if (_pipes.TryGetValue(name, out VkPipeline? p)) return p;
+            if (_pipes.TryGetValue(key, out VkPipeline? p)) return p;
             p = NewPipeline(NewShaderModule(VkShaders.Load(name)), bindings, pcBytes, PushDescriptors);
             p.Name = name;
             p.Bindings = bindings;
-            _pipes[name] = p;
+            _pipes[key] = p;
             return p;
         }
     }
@@ -176,14 +175,12 @@ internal unsafe sealed class VkDevice : IDisposable
         for (int i = 0; i < (int)d.MemProps.MemoryTypeCount; i++)
         {
             uint f = d.MemProps.TypeAt(i).PropertyFlags;
-            if ((f & (VkConst.MemDeviceLocal | VkConst.MemHostVisible | VkConst.MemHostCoherent)) == (VkConst.MemDeviceLocal | VkConst.MemHostVisible | VkConst.MemHostCoherent)
-                && d.DeviceLocalHostVisibleType == uint.MaxValue)
-                d.DeviceLocalHostVisibleType = (uint)i;
-            if ((f & (VkConst.MemHostVisible | VkConst.MemHostCoherent)) == (VkConst.MemHostVisible | VkConst.MemHostCoherent)
-                && d.HostVisibleCoherentType == uint.MaxValue)
-                d.HostVisibleCoherentType = (uint)i;
+            if ((f & (VkConst.MemDeviceLocal | VkConst.MemHostVisible | VkConst.MemHostCoherent)) == (VkConst.MemDeviceLocal | VkConst.MemHostVisible | VkConst.MemHostCoherent))
+            {
+                d.CoherentDeviceLocal = true;
+                break;
+            }
         }
-        d.CoherentDeviceLocal = d.DeviceLocalHostVisibleType != uint.MaxValue;
 
         Vk.VkCommandPoolCreateInfo cpci = new()
         {
@@ -527,7 +524,20 @@ internal unsafe sealed class VkDevice : IDisposable
 
     public void Dispose()
     {
-        if (Device != IntPtr.Zero) { Vk.vkDeviceWaitIdle(Device); Vk.vkDestroyDevice(Device, null); Device = IntPtr.Zero; }
+        if (Device != IntPtr.Zero)
+        {
+            Vk.vkDeviceWaitIdle(Device);
+            if (_descPool != IntPtr.Zero) { Vk.vkDestroyDescriptorPool(Device, _descPool, null); _descPool = IntPtr.Zero; }
+            if (_commandPool != IntPtr.Zero) { Vk.vkDestroyCommandPool(Device, _commandPool, null); _commandPool = IntPtr.Zero; }
+            lock (_pipes)
+                foreach (VkPipeline p in _pipes.Values)
+                {
+                    Vk.vkDestroyPipeline(Device, p.Pipeline, null);
+                    Vk.vkDestroyPipelineLayout(Device, p.Layout, null);
+                    Vk.vkDestroyDescriptorSetLayout(Device, p.SetLayout, null);
+                }
+            Vk.vkDestroyDevice(Device, null); Device = IntPtr.Zero;
+        }
         if (Instance != IntPtr.Zero) { Vk.vkDestroyInstance(Instance, null); Instance = IntPtr.Zero; }
     }
 }

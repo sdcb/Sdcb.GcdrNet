@@ -51,6 +51,7 @@ public class VulkanTests
     [SkippableTheory]
     [InlineData("small")]
     [InlineData("pad")]
+    [InlineData("mid")]
     public void Pipeline_MatchesGoldenU8_Vulkan(string tag)
     {
         Skip.IfNot(VkAvailable());

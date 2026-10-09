@@ -3,3 +3,4 @@ obj/
 .vs/
 artifacts/
 *.user
+vstest*.log

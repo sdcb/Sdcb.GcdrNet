@@ -339,6 +339,8 @@ public sealed unsafe class VkInferenceSession : IDisposable
         if (_stageInMap != null) { _stageIn.Unmap(); _stageInMap = null; }
         if (_stageOutMap != null) { _stageOut.Unmap(); _stageOutMap = null; }
         _dev.DestroyFence(_fence);
+        _dev.FreeCommandBuffer(_cmd);
+        // descriptor sets live in the device pool; pool teardown frees them
         Arena.Free(); _stageIn.Free(); _stageOut.Free();
     }
 }

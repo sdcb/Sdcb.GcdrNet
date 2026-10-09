@@ -60,19 +60,13 @@ internal static class GraphCompiler
             return ids;
         }
 
+        private int _curNi;   // onnx node index currently being emitted (for SrcNode)
+
         private int Emit(ExecOp op, int[] ins, CValue output, object? p, OnnxNodeData n)
         {
             int outId = AddValue(output);
-            _nodes.Add(new ExecNode { Op = op, In = ins, Out = [outId], P = p, SrcNode = _nodes.Count, Name = n.Name });
+            _nodes.Add(new ExecNode { Op = op, In = ins, Out = [outId], P = p, SrcNode = _curNi, Name = n.Name });
             return outId;
-        }
-
-        private int EmitMulti(ExecOp op, int[] ins, CValue[] outputs, object? p, OnnxNodeData n)
-        {
-            int[] ids = new int[outputs.Length];
-            for (int i = 0; i < outputs.Length; i++) ids[i] = AddValue(outputs[i]);
-            _nodes.Add(new ExecNode { Op = op, In = ins, Out = ids, P = p, SrcNode = _nodes.Count, Name = n.Name });
-            return ids[0];
         }
 
         public ExecPlan Run(ReadOnlySpan<int> inputShape)
@@ -99,6 +93,7 @@ internal static class GraphCompiler
             for (int ni = 0; ni < g.Nodes.Count; ni++)
             {
                 OnnxNodeData n = g.Nodes[ni];
+                _curNi = ni;
                 EmitNode(n);
             }
 
@@ -163,7 +158,7 @@ internal static class GraphCompiler
                 {
                     int src = n.In[0];
                     ExecNode? pad = nodes.FirstOrDefault(m => m.Out.Length == 1 && m.Out[0] == src && m.Op == ExecOp.Pad);
-                    if (pad != null && SoleConsumer(nodes, src, pad) && pad.P is PadP pp &&
+                    if (pad != null && SoleUse(nodes, src, i) && pad.P is PadP pp &&
                         PadsOnlySpatial(pp.Pads, values[src].Shape.Length))
                     {
                         cp.Pads = [pp.Pads[2], pp.Pads[3], pp.Pads[2 + values[src].Shape.Length], pp.Pads[3 + values[src].Shape.Length]];
@@ -214,6 +209,26 @@ internal static class GraphCompiler
                     i--;
                 }
             }
+            // Conv -> Add residual (skip connections): fold same-shape addend into conv epilogue
+            for (int i = 0; i + 1 < nodes.Count; i++)
+            {
+                ExecNode a = nodes[i], b = nodes[i + 1];
+                if (a.Op != ExecOp.Conv || b.Op != ExecOp.Elementwise ||
+                    ((EwP)b.P!).Op != EwOp.Add ||
+                    ((EwP)b.P!).Act is not (ActivationKind.None or ActivationKind.Relu))
+                    continue;
+                var cp = (ConvP)a.P!;
+                if (cp.Act != ActivationKind.None || cp.Group > 1) continue; // depthwise shader has no residual path
+                int outV = a.Out[0];
+                int other = b.In[0] == outV ? b.In[1] : b.In[1] == outV ? b.In[0] : -1;
+                if (other < 0 || !SoleUse(nodes, outV, i + 1)) continue;
+                if (!values[other].Shape.SequenceEqual(values[outV].Shape)) continue;
+                cp.AddValue = other;
+                cp.Act = ((EwP)b.P!).Act;   // epilogue: +residual then activation (matches conv shader)
+                Redirect(nodes, values, b.Out[0], outV);
+                nodes.RemoveAt(i + 1);
+                i--;
+            }
             FuseGelu(nodes, values);
             FuseShift(nodes, values);
         }
@@ -227,18 +242,19 @@ internal static class GraphCompiler
                 values[newValue].Name = values[oldValue].Name;
         }
 
-        /// <summary>True when value `v`'s only consumer is node index `useIdx`.</summary>
+        /// <summary>True when value `v`'s only consumer is node index `useIdx`, once.</summary>
         private static bool SoleUse(List<ExecNode> nodes, int v, int useIdx)
         {
             int count = 0;
-            foreach (ExecNode m in nodes)
-                foreach (int inp in m.In)
-                    if (inp == v) { if (++count > 1) return false; }
+            for (int i = 0; i < nodes.Count; i++)
+                foreach (int inp in nodes[i].In)
+                    if (inp == v)
+                    {
+                        if (i != useIdx) return false;
+                        if (++count > 1) return false;
+                    }
             return count == 1;
         }
-
-        /// <summary>True when `pad`'s output feeds exactly one node.</summary>
-        private static bool SoleConsumer(List<ExecNode> nodes, int v, ExecNode pad) => SoleUse(nodes, v, -1) || true;
 
         private static bool PadsOnlySpatial(int[] pads, int rank)
         {
@@ -463,6 +479,29 @@ internal static class GraphCompiler
                 {
                     int b = values[iv].Buf;
                     if (b >= 0) { use[b] = Math.Max(use[b], ni); def[b] = Math.Min(def[b], ni); }
+                }
+                // value ids carried in params (conv bias/residual, gemm bias) count as uses
+                int aux = n.P switch
+                {
+                    ConvP c => Math.Max(c.BiasValue, c.AddValue),
+                    GemmP g => g.BiasValue,
+                    _ => -1,
+                };
+                if (aux >= 0)
+                {
+                    // note: for ConvP, BiasValue and AddValue may differ — scan both
+                    if (n.P is ConvP cp2)
+                        foreach (int iv in new[] { cp2.BiasValue, cp2.AddValue })
+                        {
+                            if (iv < 0) continue;
+                            int b = values[iv].Buf;
+                            if (b >= 0) { use[b] = Math.Max(use[b], ni); def[b] = Math.Min(def[b], ni); }
+                        }
+                    else
+                    {
+                        int b = values[aux].Buf;
+                        if (b >= 0) { use[b] = Math.Max(use[b], ni); def[b] = Math.Min(def[b], ni); }
+                    }
                 }
                 foreach (int ov in n.Out)
                 {
@@ -729,7 +768,8 @@ internal static class GraphCompiler
                 case "Neg" or "Abs" or "Floor" or "Ceil":
                 {
                     long[] a = In(0).Ints!;
-                    long[] r = a.Select(v => op == "Neg" ? -v : Math.Abs(v)).ToArray();
+                    // Floor/Ceil on ints are identity
+                    long[] r = a.Select(v => op == "Neg" ? -v : op == "Abs" ? Math.Abs(v) : v).ToArray();
                     Out(r, In(0).Shape);
                     return;
                 }
@@ -853,10 +893,12 @@ internal static class GraphCompiler
         {
             CValue x = V(Input(0, n));
             float[] scales;
+            int[]? sizesI = null;
             if (n.Inputs.Count > 3 && n.Inputs[3].Length > 0)
             {
-                // sizes input (int tensor)
+                // sizes input (int tensor): authoritative output shape
                 long[] sizes = V(Input(3, n)).Ints!;
+                sizesI = sizes.Select(s => (int)s).ToArray();
                 scales = sizes.Select((s, i) => (float)s / x.Shape[i]).ToArray();
             }
             else
@@ -865,9 +907,10 @@ internal static class GraphCompiler
             }
             if (n.StringAttr("mode") != "linear")
                 throw new NotSupportedException("Resize mode != linear.");
-            int[] outShape = (int[])x.Shape.Clone();
-            for (int i = 0; i < outShape.Length; i++)
-                outShape[i] = (int)MathF.Floor(x.Shape[i] * scales[i]);
+            int[] outShape = sizesI ?? (int[])x.Shape.Clone();
+            if (sizesI == null)
+                for (int i = 0; i < outShape.Length; i++)
+                    outShape[i] = (int)MathF.Floor(x.Shape[i] * scales[i]);
             Emit(ExecOp.ResizeBilinear, [Input(0, n)], ActivationValue(n.Outputs[0], outShape),
                 new ResizeP { Scales = scales }, n);
         }
@@ -950,8 +993,8 @@ internal static class GraphCompiler
             long[] spec = V(Input(1, n)).Ints!;
             bool allowZero = n.IntAttr("allowzero") == 1;
             int[] shape = ResolveReshape(x.Shape, spec, allowZero, checked((int)x.ElementCount));
-            // zero-copy alias
-            AddValue(new CValue { Name = n.Outputs[0], Shape = shape, DType = 1, Buf = x.Buf });
+            // zero-copy alias (consts keep their payload so consumers see a materialized tensor)
+            AddValue(new CValue { Name = n.Outputs[0], Shape = shape, DType = 1, Buf = x.Buf, Floats = x.Floats });
         }
 
         private void EmitSqueeze(OnnxNodeData n)
@@ -966,7 +1009,7 @@ internal static class GraphCompiler
                 foreach (long a in axes.OrderByDescending(v => v)) dims.RemoveAt((int)(a < 0 ? a + dims.Count : a));
                 shape = dims.ToArray();
             }
-            AddValue(new CValue { Name = n.Outputs[0], Shape = shape, DType = 1, Buf = x.Buf });
+            AddValue(new CValue { Name = n.Outputs[0], Shape = shape, DType = 1, Buf = x.Buf, Floats = x.Floats });
         }
 
         private void EmitUnsqueeze(OnnxNodeData n)
@@ -975,7 +1018,7 @@ internal static class GraphCompiler
             long[] axes = V(Input(1, n)).Ints!;
             var dims = x.Shape.ToList();
             foreach (long a in axes.OrderBy(v => v)) dims.Insert((int)(a < 0 ? a + dims.Count + 1 : a), 1);
-            AddValue(new CValue { Name = n.Outputs[0], Shape = dims.ToArray(), DType = 1, Buf = x.Buf });
+            AddValue(new CValue { Name = n.Outputs[0], Shape = dims.ToArray(), DType = 1, Buf = x.Buf, Floats = x.Floats });
         }
 
         private void EmitElementwise(OnnxNodeData n, string op)

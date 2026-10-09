@@ -103,8 +103,9 @@ public sealed class InferenceSession : IDisposable
                 var p = (ConvP)n.P!;
                 CValue x = values[n.In[0]], w = values[n.In[1]], o = values[n.Out[0]];
                 ReadOnlySpan<float> bias = p.BiasValue >= 0 ? GetIn(p.BiasValue) : ReadOnlySpan<float>.Empty;
+                ReadOnlySpan<float> add = p.AddValue >= 0 ? GetIn(p.AddValue) : ReadOnlySpan<float>.Empty;
                 Ops.Conv(GetIn(n.In[0]), x.Shape, GetIn(n.In[1]), w.Shape, bias,
-                    GetSpan(n.Out[0]), o.Shape, p);
+                    GetSpan(n.Out[0]), o.Shape, p, add);
                 break;
             }
             case ExecOp.MaxPool:

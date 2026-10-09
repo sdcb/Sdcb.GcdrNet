@@ -37,6 +37,7 @@ internal static unsafe class Avx2Kernels
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int Reflect(int i, int dim)
     {
+        if (dim <= 1) return 0;
         while (i < 0 || i >= dim) i = i < 0 ? -i : 2 * dim - 2 - i;
         return i;
     }
@@ -940,6 +941,12 @@ internal static unsafe class Avx2Kernels
                         for (; x + 8 <= w; x += 8) St(dr + x, z);
                         for (; x < w; x++) dr[x] = 0f;
                     }
+                }
+                else if (Math.Abs(off) >= w)
+                {
+                    int x = 0;
+                    for (; x + 8 <= w; x += 8) St(dr + x, F32x8.Zero);
+                    for (; x < w; x++) dr[x] = 0f;
                 }
                 else if (off >= 0)
                 {

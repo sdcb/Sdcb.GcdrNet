@@ -29,7 +29,7 @@ internal sealed class VkDispatch
 /// and the node list compiled to <see cref="VkDispatch"/> records. Sessions own
 /// the activation arena and resolve slot ids to their live buffer handles.
 /// </summary>
-internal sealed class VkGraphModel
+internal sealed class VkGraphModel : IDisposable
 {
     private readonly VkDevice _dev;
     private readonly ExecPlan _plan;
@@ -300,7 +300,7 @@ internal sealed class VkGraphModel
                 int[] ostr = Strides(os4), istr = Strides(is4);
                 // perm indexes padded rank-4 (original perm on tail dims)
                 int[] perm4 = PermuteTo4(p.Perm, shapeIn(0).Length);
-                if (perm4.SequenceEqual([0, 2, 1, 3]) && is4[0] == 1)
+                if (perm4.SequenceEqual([0, 2, 1, 3]) && is4[0] == 1 && is4[3] == 1)
                 {
                     // pure 2D swap of the last two dims: [1,R,C] -> [1,C,R]
                     uint rr = (uint)is4[1], cc = (uint)(is4[2] * is4[3]);
@@ -320,6 +320,14 @@ internal sealed class VkGraphModel
                 {
                     // [1,A,B,C] -> [1,B,C,A]: matrix [A, B*C] -> [B*C, A]
                     uint rr = (uint)is4[1], cc = (uint)(is4[2] * is4[3]);
+                    yield return ND("transpose0231", [Bind(n.In[0]), Bind(n.Out[0])],
+                        PcOf(rr, cc), (cc + 31) / 32, (rr + 31) / 32);
+                    break;
+                }
+                if (perm4.SequenceEqual([0, 3, 1, 2]) && is4[0] == 1)
+                {
+                    // [1,A,B,C] -> [1,C,A,B]: matrix [A*B, C] -> [C, A*B]
+                    uint rr = (uint)(is4[1] * is4[2]), cc = (uint)is4[3];
                     yield return ND("transpose0231", [Bind(n.In[0]), Bind(n.Out[0])],
                         PcOf(rr, cc), (cc + 31) / 32, (rr + 31) / 32);
                     break;

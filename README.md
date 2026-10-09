@@ -75,7 +75,8 @@ dotnet test tests/Sdcb.GcdrNet.Tests -c Release
 
 Golden outputs come from onnxruntime runs of the simplified models (max diff ≤ 2e-3;
 Vulkan node-by-node vs CPU within ~1e-4). CPU kernel changes should be re-checked under
-`HYMT2SHARP_FORCE_PORTABLE=1` (Vector tier), `DOTNET_EnableAVX=0`, `DOTNET_EnableAVX512=0`.
+`GCDRNET_ISA=vector` (portable `Vector<float>` tier), `DOTNET_EnableAVX=0`,
+and `DOTNET_EnableAVX512=0`.
 
 ### Notes
 
@@ -136,4 +137,4 @@ dotnet test tests/Sdcb.GcdrNet.Tests -c Release
 ```
 
 golden 由 onnxruntime 对简化模型跑出（阈值 ≤2e-3）；改 CPU 内核请在
-`HYMT2SHARP_FORCE_PORTABLE=1`、`DOTNET_EnableAVX=0`、`DOTNET_EnableAVX512=0` 下复测。
+`GCDRNET_ISA=vector`、`DOTNET_EnableAVX=0`、`DOTNET_EnableAVX512=0` 下复测。

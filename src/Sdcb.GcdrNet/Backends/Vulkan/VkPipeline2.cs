@@ -80,7 +80,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         uint nwords = ((uint)_ih * (uint)_iw * 3u + 3u) / 4u;
         VkInferenceSession.RecordOne(_dev, _cmd, _pPost,
             [(_dr.Arena, _dr.OutputOffset, _dr.OutputBytes), (_bgrOut, 0UL, _bgrOut.Size)],
-            Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, nwords),   // wait: PC order
+            Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, nwords),   // PC layout must match nchw2bgr.comp
             (nwords + 255) / 256, 1);
         Vk.Check(Vk.vkEndCommandBuffer(_cmd), "vkEndCommandBuffer");
     }
@@ -109,7 +109,8 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     }
     public void Dispose()
     {
-        _dev.WaitFence(_fence);
+        // Enhance() is synchronous (already waits the fence); callers must not race Dispose
+        _dev.FreeCommandBuffer(_cmd);
         _bgrIn.Unmap(); _bgrOut.Unmap();
         _dev.DestroyFence(_fence);
         _bgrIn.Free(); _bgrOut.Free();
