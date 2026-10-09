@@ -1,0 +1,42 @@
+<Project>
+  <PropertyGroup>
+    <GcdrNetVersion Condition="'$(GcdrNetVersion)' == ''">0.1.0</GcdrNetVersion>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
+    <RootNamespace>Sdcb.$(MSBuildProjectName)</RootNamespace>
+    <AssemblyName>Sdcb.$(MSBuildProjectName)</AssemblyName>
+    <PackageId>Sdcb.$(MSBuildProjectName)</PackageId>
+    <Authors>sdcb</Authors>
+    <Company>Sdcb</Company>
+    <PackageProjectUrl>https://github.com/sdcb/Sdcb.GcdrNet</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/sdcb/Sdcb.GcdrNet.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageTags>Sdcb;GCDRNet;document;shadow-removal;image-enhancement;SIMD</PackageTags>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'GcdrNet'">
+    <Version>$(GcdrNetVersion)</Version>
+    <IsPackable>true</IsPackable>
+    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX2/Vector/Scalar) and Vulkan backends; no onnxruntime dependency.</Description>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsPackable)' == 'true'">
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="README.md" Visible="false" />
+  </ItemGroup>
+</Project>
