@@ -215,6 +215,60 @@ public class EngineTests
         Assert.True(max < 1e-4f, $"conv+add max diff {max}");
     }
 
+    [SkippableTheory]
+    [InlineData(16, 16, 9, 11, 0, 0f, false, 0)]   // constant pad
+    [InlineData(24, 20, 13, 6, 1, 0f, true, 1)]    // reflect, residual, relu, oc lane tail, odd tiles
+    [InlineData(32, 48, 4, 4, 0, 0.5f, false, 3)]  // nonzero pad value, gelu
+    [InlineData(64, 16, 17, 23, 1, 0f, true, 0)]
+    public void Conv_Winograd_MatchesDirect(int ic, int oc, int h, int w, int mode, float padValue,
+        bool residual, int act)
+    {
+        var rng = new Random(ic * 31 + oc);
+        float[] x = rng.Array(h * w * ic);           // NHWC
+        float[] wt = rng.Array(oc * ic * 9);
+        float[] b = rng.Array(oc);
+        float[] res = residual ? rng.Array(h * w * oc) : [];
+        var p = new ConvP
+        {
+            Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3],
+            PadMode = (PadMode)mode, PadValue = padValue, Act = (ActivationKind)act,
+        };
+        Skip.IfNot(Nhwc.WinogradEligible(p, [oc, ic, 3, 3], ic), "Winograd disabled or ISA tier without it");
+        NhwcConvPlan direct = Nhwc.Pack(wt, [oc, ic, 3, 3], b, 1, ic);
+        NhwcConvPlan wino = Nhwc.Pack(wt, [oc, ic, 3, 3], b, 1, ic);
+        wino.WinoU = Nhwc.PackWinograd(wt, oc, ic);
+        float[] want = new float[h * w * oc], got = new float[h * w * oc];
+        Nhwc.Conv(x, h, w, ic, want, h, w, oc, p, direct, res);
+        Nhwc.Conv(x, h, w, ic, got, h, w, oc, p, wino, res);
+        var (max, _, _) = Golden.Diff(want, got);
+        float scale = want.Max(MathF.Abs);
+        Assert.True(max < 1e-4f * scale, $"winograd max diff {max} (|out| max {scale})");
+    }
+
+    [Fact]
+    public void Pipeline_SizeSwitching_MatchesFresh_Cpu()
+    {
+        // one size-agnostic worker reuses (dirty, larger) arenas across sizes and the
+        // per-size plans share packed weights: every size must match a fresh enhancer
+        string[] tags = ["mid", "small", "pad", "mid", "small"];
+        var fresh = new Dictionary<string, byte[]>();
+        foreach (string tag in tags.Distinct())
+        {
+            var (_, _, _, _, oh, ow) = Golden.Dims(tag);
+            using var e = GcdrEnhancer.FromFiles(GcPath, DrPath);
+            fresh[tag] = e.Enhance(Golden.Bgr(tag), ow, oh);
+        }
+
+        using var enh = GcdrEnhancer.FromFiles(GcPath, DrPath);
+        foreach (string tag in tags)
+        {
+            var (_, _, _, _, oh, ow) = Golden.Dims(tag);
+            byte[] dst = enh.Enhance(Golden.Bgr(tag), ow, oh);
+            Assert.True(dst.AsSpan().SequenceEqual(fresh[tag]), $"size-switch[{tag}] differs from a fresh worker");
+        }
+        Assert.Equal(1, enh.PoolStats.workers);
+    }
+
     [Theory]
     [InlineData("small", 13, 17)]
     [InlineData("pad", 8, 5)]
