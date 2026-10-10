@@ -1,0 +1,39 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// maxpool.comp with 4 channels per invocation (c % 4 == 0): same per-element math,
+// a quarter of the index arithmetic and load instructions (bandwidth-bound iGPUs).
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { ET4 x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { ET4 o[]; };
+
+layout(push_constant) uniform PC {
+    uint c, ih, iw, oh, ow;
+    uint kh, kw, sh, sw, pt, pl;
+    uint relu;
+} p;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    uint c4 = p.c >> 2;
+    if (id >= c4 * p.oh * p.ow) return;
+    uint ch = id % c4, px = id / c4;
+    uint ox = px % p.ow, oy = px / p.ow;
+    vec4 m = vec4(-3.4e38);
+    for (uint ky = 0u; ky < p.kh; ky++)
+    {
+        int sy = int(oy * p.sh + ky) - int(p.pt);
+        if (uint(sy) >= p.ih) continue;
+        for (uint kx = 0u; kx < p.kw; kx++)
+        {
+            int sx = int(ox * p.sw + kx) - int(p.pl);
+            if (uint(sx) >= p.iw) continue;
+            m = max(m, vec4(x[(uint(sy) * p.iw + uint(sx)) * c4 + ch]));
+        }
+    }
+    if (m.x == -3.4e38) m = vec4(0.0);
+    if (p.relu != 0u) m = mix(m, vec4(0.0), lessThan(m, vec4(0.0)));   // as the scalar m < 0 test
+    o[id] = ET4(m);
+}

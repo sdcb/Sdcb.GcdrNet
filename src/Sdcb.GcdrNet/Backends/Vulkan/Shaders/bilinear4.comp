@@ -1,0 +1,44 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// bilinear.comp with 4 channels per invocation (c % 4 == 0), same per-element math.
+// flags: bit0 relu on the resized value, bit1 add same-shape A, bit2 relu on A.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { ET4 x[]; };
+layout(set = 0, binding = 1) readonly buffer A { ET4 a[]; };    // addend (dummy if none)
+layout(set = 0, binding = 2) writeonly buffer O { ET4 o[]; };
+
+layout(push_constant) uniform PC {
+    uint c, ih, iw, oh, ow, flags;
+    float shy, shx;     // scales
+} p;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    uint c4 = p.c >> 2;
+    if (id >= c4 * p.oh * p.ow) return;
+    uint ch = id % c4, px = id / c4;
+    uint ox = px % p.ow, oy = px / p.ow;
+
+    float fy = (float(oy) + 0.5) / p.shy - 0.5;
+    float fx = (float(ox) + 0.5) / p.shx - 0.5;
+    int fy0 = int(floor(fy)), fx0 = int(floor(fx));
+    float dy = fy - float(fy0), dx = fx - float(fx0);
+    uint y0 = uint(clamp(fy0, 0, int(p.ih) - 1)), x0 = uint(clamp(fx0, 0, int(p.iw) - 1));
+    uint y1 = uint(clamp(fy0 + 1, 0, int(p.ih) - 1)), x1 = uint(clamp(fx0 + 1, 0, int(p.iw) - 1));
+
+    vec4 v00 = vec4(x[(y0 * p.iw + x0) * c4 + ch]);
+    vec4 v01 = vec4(x[(y0 * p.iw + x1) * c4 + ch]);
+    vec4 v10 = vec4(x[(y1 * p.iw + x0) * c4 + ch]);
+    vec4 v11 = vec4(x[(y1 * p.iw + x1) * c4 + ch]);
+    vec4 v = mix(mix(v00, v01, dx), mix(v10, v11, dx), dy);
+    if ((p.flags & 1u) != 0u) v = max(v, vec4(0.0));
+    if ((p.flags & 2u) != 0u)
+    {
+        vec4 s = vec4(a[id]);
+        v += (p.flags & 4u) != 0u ? max(s, vec4(0.0)) : s;
+    }
+    o[id] = ET4(v);
+}

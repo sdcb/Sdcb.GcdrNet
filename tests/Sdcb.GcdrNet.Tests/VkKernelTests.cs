@@ -9,10 +9,12 @@ namespace Sdcb.GcdrNet.Tests;
 public unsafe class VkKernelTests
 {
     [SkippableTheory]
-    [InlineData(0u)]   // plain
-    [InlineData(7u)]   // relu(resize) + relu(addend)
-    [InlineData(2u)]   // resize + addend
-    public void Bilinear_MatchesCpu(uint flags)
+    [InlineData(0u, "bilinear")]   // plain
+    [InlineData(7u, "bilinear")]   // relu(resize) + relu(addend)
+    [InlineData(2u, "bilinear")]   // resize + addend
+    [InlineData(0u, "bilinear4")]  // 4-channel variant (integrated GPUs)
+    [InlineData(7u, "bilinear4")]
+    public void Bilinear_MatchesCpu(uint flags, string shader)
     {
         Skip.IfNot(VkOk(), "no Vulkan device");
         var dev = VkBackend.Default.Dev;
@@ -31,8 +33,82 @@ public unsafe class VkKernelTests
         byte[] pcb = new byte[32];
         Buffer.BlockCopy(new uint[] { (uint)c, (uint)ih, (uint)iw, (uint)oh, (uint)ow, flags }, 0, pcb, 0, 24);
         Buffer.BlockCopy(new float[] { 2f, 2f }, 0, pcb, 24, 8);
-        float[] got = RunGpu(dev, "bilinear", [src, add], dstCpu.Length, pcb, (uint)(dstCpu.Length + 255) / 256);
-        AssertClose(got, dstCpu, 1e-4f, "bilinear");
+        uint lanes = shader == "bilinear4" ? 4u : 1u;
+        float[] got = RunGpu(dev, shader, [src, add], dstCpu.Length, pcb, ((uint)dstCpu.Length / lanes + 255) / 256);
+        AssertClose(got, dstCpu, 1e-4f, shader);
+    }
+
+    [SkippableTheory]
+    [InlineData("maxpool", 2, 2, 0, 0u)]
+    [InlineData("maxpool4", 2, 2, 0, 0u)]
+    [InlineData("maxpool4", 3, 2, 1, 1u)]   // padded taps, fused relu
+    public void MaxPool_MatchesCpu(string shader, int k, int st, int pad, uint relu)
+    {
+        Skip.IfNot(VkOk(), "no Vulkan device");
+        var dev = VkBackend.Default.Dev;
+        var rng = new Random(5);
+        int c = 8, ih = 9, iw = 11, oh = (ih + 2 * pad - k) / st + 1, ow = (iw + 2 * pad - k) / st + 1;
+        float[] x = Rand(rng, ih * iw * c), cpu = new float[oh * ow * c];
+        Nhwc.MaxPool(x, ih, iw, c, cpu, oh, ow,
+            new PoolP { Kernel = [k, k], Strides = [st, st], Pads = [pad, pad, pad, pad], FuseRelu = relu != 0 });
+        byte[] pc = new byte[48];
+        Buffer.BlockCopy(new uint[] { (uint)c, (uint)ih, (uint)iw, (uint)oh, (uint)ow, (uint)k, (uint)k, (uint)st, (uint)st,
+            (uint)pad, (uint)pad, relu }, 0, pc, 0, 48);
+        uint lanes = shader == "maxpool4" ? 4u : 1u;
+        float[] got = RunGpu(dev, shader, [x], cpu.Length, pc, ((uint)cpu.Length / lanes + 255) / 256);
+        AssertClose(got, cpu, 1e-6f, shader);
+    }
+
+    [SkippableTheory]
+    [InlineData("shift", 2)]
+    [InlineData("shift4", 2)]
+    [InlineData("shift4", 3)]
+    public void Shift_MatchesCpu(string shader, int axis)
+    {
+        Skip.IfNot(VkOk(), "no Vulkan device");
+        var dev = VkBackend.Default.Dev;
+        var rng = new Random(6);
+        int c = 16, h = 7, w = 9;
+        int[] ge = [4, 8, 12, 16], of = [-2, -1, 1, 2];
+        float[] x = Rand(rng, h * w * c), cpu = new float[h * w * c];
+        Nhwc.ChannelShift(x, h, w, c, cpu, new ShiftP { Axis = axis, Offsets = of, GroupEnds = ge });
+        var pcu = new List<uint> { (uint)c, (uint)h, (uint)w, (uint)axis };
+        for (int i = 0; i < 5; i++) pcu.Add((uint)(i < ge.Length ? ge[i] : c));
+        for (int i = 0; i < 5; i++) pcu.Add((uint)(i < of.Length ? of[i] : 0));
+        byte[] pc = new byte[pcu.Count * 4];
+        Buffer.BlockCopy(pcu.ToArray(), 0, pc, 0, pc.Length);
+        uint lanes = shader == "shift4" ? 4u : 1u;
+        float[] got = RunGpu(dev, shader, [x], cpu.Length, pc, ((uint)cpu.Length / lanes + 255) / 256);
+        AssertClose(got, cpu, 1e-6f, shader);
+    }
+
+    [SkippableTheory]
+    [InlineData("depthwise", true, 1)]
+    [InlineData("depthwise4", true, 1)]
+    [InlineData("depthwise4", false, 3)]   // constant pad, gelu
+    public void Depthwise_MatchesCpu(string shader, bool reflect, int act)
+    {
+        Skip.IfNot(VkOk(), "no Vulkan device");
+        var dev = VkBackend.Default.Dev;
+        var rng = new Random(8);
+        int c = 12, h = 10, w = 13;
+        float[] x = Rand(rng, h * w * c), wt = Rand(rng, c * 9), b = Rand(rng, c), cpu = new float[h * w * c];
+        var p = new ConvP
+        {
+            Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3], Group = c,
+            PadMode = reflect ? PadMode.Reflect : PadMode.Constant, Act = (ActivationKind)act,
+        };
+        Nhwc.Conv(x, h, w, c, cpu, h, w, c, p, Nhwc.Pack(wt, [c, 1, 3, 3], b, c, c), default);
+        float[] wp = new float[9 * c];   // [tap][C]
+        for (int ch = 0; ch < c; ch++)
+            for (int t = 0; t < 9; t++) wp[t * c + ch] = wt[ch * 9 + t];
+        uint flags = 1u | (reflect ? 2u : 0u) | (act == 1 ? 4u : 0u) | (act == 3 ? 16u : 0u);
+        byte[] pc = new byte[52];
+        Buffer.BlockCopy(new uint[] { (uint)c, (uint)h, (uint)w, (uint)h, (uint)w, 3u, 3u, 1u, 1u, 1u, 1u, flags }, 0, pc, 0, 48);
+        Buffer.BlockCopy(new float[] { 0f }, 0, pc, 48, 4);
+        uint lanes = shader == "depthwise4" ? 4u : 1u;
+        float[] got = RunGpu(dev, shader, [x, wp, b], cpu.Length, pc, ((uint)cpu.Length / lanes + 255) / 256);
+        AssertClose(got, cpu, 2e-3f, shader);   // GPU erf polynomial vs CPU erf for gelu
     }
 
     [SkippableTheory]
