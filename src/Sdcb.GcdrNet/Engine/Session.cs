@@ -8,10 +8,13 @@ namespace Sdcb.GcdrNet.Engine;
 /// A reusable inference session over a compiled <see cref="ExecPlan"/>.
 /// Not thread-safe; create one per thread or serialize externally.
 /// </summary>
-public sealed class InferenceSession : IDisposable
+public sealed unsafe class InferenceSession : IDisposable
 {
     private readonly ExecPlan _plan;
-    private readonly float[] _arena;
+    // native so Dispose frees it deterministically: multi-GB LOH arenas of evicted
+    // sessions otherwise pile up until a (rare, on big-RAM hosts) gen2 GC
+    private nint _arena;
+    private readonly long _arenaBytes;
     private readonly int[] _offsets;
     private readonly long[] _nodeTicks;
     private readonly int _inputValue, _outputValue;
@@ -21,7 +24,11 @@ public sealed class InferenceSession : IDisposable
     internal InferenceSession(ExecPlan plan)
     {
         _plan = plan;
-        _arena = new float[plan.ArenaFloats];
+        _arenaBytes = (long)plan.ArenaFloats * sizeof(float);
+        // calloc: large blocks come straight from fresh OS pages (already zero, faulted in lazily
+        // by the parallel kernels) instead of a single-threaded multi-GB memset up front
+        _arena = (nint)NativeMemory.AllocZeroed((nuint)Math.Max(_arenaBytes, 64));
+        if (_arenaBytes > 0) GC.AddMemoryPressure(_arenaBytes);
         _offsets = plan.BufOffset;
         _inputValue = plan.InputValue;
         _outputValue = plan.OutputValue;
@@ -58,7 +65,7 @@ public sealed class InferenceSession : IDisposable
     {
         CValue v = _plan.Values[valueId];
         if (v.Buf >= 0)
-            return _arena.AsSpan(_offsets[v.Buf], checked((int)v.ElementCount));
+            return new Span<float>(Arena + _offsets[v.Buf], checked((int)v.ElementCount));
         if (v.Floats != null) return v.Floats;
         throw new InvalidOperationException($"Value '{v.Name}' has no float storage.");
     }
@@ -205,7 +212,7 @@ public sealed class InferenceSession : IDisposable
                 {
                     CValue cv = values[n.In[k]];
                     ins[k] = cv.Buf >= 0
-                        ? new FBuf(_arena, _offsets[cv.Buf], checked((int)cv.ElementCount))
+                        ? new FBuf(Arena + _offsets[cv.Buf], checked((int)cv.ElementCount))
                         : new FBuf(cv.Floats!, 0, checked((int)cv.ElementCount));
                     shapes[k] = cv.PhysShape;
                 }
@@ -281,5 +288,21 @@ public sealed class InferenceSession : IDisposable
         }
     }
 
-    public void Dispose() { }
+    private float* Arena => _arena != 0 ? (float*)_arena : throw new ObjectDisposedException(nameof(InferenceSession));
+
+    public void Dispose()
+    {
+        Free();
+        GC.SuppressFinalize(this);
+    }
+
+    ~InferenceSession() => Free();
+
+    private void Free()
+    {
+        nint p = Interlocked.Exchange(ref _arena, 0);
+        if (p == 0) return;
+        NativeMemory.Free((void*)p);
+        if (_arenaBytes > 0) GC.RemoveMemoryPressure(_arenaBytes);
+    }
 }

@@ -231,7 +231,13 @@ public sealed class GcdrEnhancer : IDisposable
         {
             // pool may already be evicted/disposed — don't park into a dead pool
             if (_disposed) { t.Dispose(); return; }
-            if (Interlocked.Increment(ref _idleCount) <= _max) { _idle.Enqueue(t); return; }
+            if (Interlocked.Increment(ref _idleCount) <= _max)
+            {
+                _idle.Enqueue(t);
+                // raced with Dispose after the check above: drain so nothing is parked in a dead pool
+                if (_disposed) while (_idle.TryDequeue(out T? d)) d.Dispose();
+                return;
+            }
             Interlocked.Decrement(ref _idleCount);
             t.Dispose();
         }

@@ -131,13 +131,15 @@ internal sealed class CValue
 }
 
 /// <summary>A buffer reference into either the activation arena or a const array.</summary>
-internal readonly struct FBuf
+internal readonly unsafe struct FBuf
 {
-    public readonly float[] Data;
+    public readonly float[]? Data;
+    public readonly float* Ptr;
     public readonly int Offset;
     public readonly int Length;
     public FBuf(float[] data, int offset, int length) { Data = data; Offset = offset; Length = length; }
-    public Span<float> Span => Data.AsSpan(Offset, Length);
+    public FBuf(float* ptr, int length) { Ptr = ptr; Length = length; }
+    public Span<float> Span => Data != null ? Data.AsSpan(Offset, Length) : new Span<float>(Ptr, Length);
 }
 
 /// <summary>One executable step: op + value ids.</summary>
