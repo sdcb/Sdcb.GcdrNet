@@ -53,7 +53,7 @@ internal sealed class VkGraphModel : IDisposable
     internal int Es => F16 ? 2 : 4;
 
     /// <summary>How a const is laid out on the device (decided by its consumer).</summary>
-    private enum CK { Raw, F32, ConvW, DwW, ConvWT }
+    private enum CK { Raw, F32, ConvW, DwW, ConvWT, GemmNK }
 
     /// <param name="constKey">Sharing key for the const store (the source model): graphs of the
     /// same model at other sizes reuse its uploaded weights. Null = private store.</param>
@@ -82,7 +82,8 @@ internal sealed class VkGraphModel : IDisposable
                     Need(cp.AddValue, CK.Raw);
                     break;
                 case GemmP gp:
-                    Need(n.In[0], CK.Raw); Need(n.In[1], CK.Raw); Need(gp.BiasValue, CK.F32);
+                    Need(n.In[0], CK.Raw); Need(n.In[1], UseCoopGemm(dev, f16, plan, n, gp) ? CK.GemmNK : CK.Raw);
+                    Need(gp.BiasValue, CK.F32);
                     break;
                 case LnP:
                     Need(n.In[0], CK.Raw); Need(n.In[1], CK.F32); Need(n.In[2], CK.F32);
@@ -117,6 +118,7 @@ internal sealed class VkGraphModel : IDisposable
                 {
                     CK.ConvW => PackConv(cv),
                 CK.ConvWT => PackConvT(cv),
+                CK.GemmNK => PackGemmNK(cv, plan.Nodes.First(m => m.P is GemmP && m.In[1] == v)),
                     CK.DwW => PackDw(cv),
                     _ => cv.Floats!,
                 };
@@ -190,6 +192,33 @@ internal sealed class VkGraphModel : IDisposable
         int[] si = plan.Values[n.In[0]].PhysShape, so = plan.Values[n.Out[0]].PhysShape;   // [1,h,w,c]
         long m = (long)so[1] * so[2];
         return so[3] % 8 == 0 && (m + 127) / 128 <= 65535;   // cin % 8 != 0 -> scalar-gather stem variant
+    }
+
+    // Gemm B -> [N][K] (k fastest), the conv_cm weight layout
+    private static float[] PackGemmNK(CValue b, ExecNode n)
+    {
+        var gp = (GemmP)n.P!;
+        if (gp.TransB) return b.Floats!;   // already [N][K]
+        int k = b.Shape[0], nn = b.Shape[1];
+        float[] src = b.Floats!, dst = new float[src.Length];
+        for (int i = 0; i < k; i++)
+            for (int j = 0; j < nn; j++) dst[j * k + i] = src[i * nn + j];
+        return dst;
+    }
+
+    /// <summary>Tensor-core Gemm (a 1x1 conv over M "pixels" through conv_cm.comp): fp16 storage
+    /// on a coopmat device, const B, K/N in 16 B quads, relu/gelu/none epilogue.</summary>
+    private static bool UseCoopGemm(VkDevice dev, bool f16, ExecPlan plan, ExecNode n, GemmP gp)
+    {
+        if (!dev.CoopMat16 || !f16 || plan.Values[n.In[1]].Floats is null || plan.Values[n.In[1]].Shape.Length != 2) return false;
+        // B packed per value: only when no other node reads it (its transB could differ)
+        if (plan.Nodes.Count(m => m.In.Contains(n.In[1])) != 1) return false;
+        if (gp.Act is not (ActivationKind.None or ActivationKind.Relu or ActivationKind.Gelu)) return false;
+        CValue a = plan.Values[n.In[0]];
+        int k = a.Shape[^1], nn = plan.Values[n.Out[0]].Shape[^1];
+        if (a.PhysShape[^1] != k) return false;
+        long m = a.ElementCount / k;
+        return k % 8 == 0 && nn % 8 == 0 && (m + 127) / 128 <= 65535;
     }
 
     // ONNX [C][1][KH][KW] -> [tap][C]
@@ -414,6 +443,18 @@ internal sealed class VkGraphModel : IDisposable
                 if ((uint)shapeIn(0)[^1] != k) throw new NotSupportedException("Vulkan Gemm: K not innermost");
                 uint m = (uint)(V[n.In[0]].ElementCount / k);
                 uint nn = (uint)V[n.Out[0]].Shape[^1];
+                if (UseCoopGemm(_dev, F16, _plan, n, p))
+                {
+                    (string cm, uint bn) = nn % 128 == 0 ? ("conv_cm", 128u) : nn % 64 == 0 ? ("conv_cm_n64", 64u) : ("conv_cm_n32", 32u);
+                    uint cflags = (p.BiasValue >= 0 ? 1u : 0u)
+                        | ((p.Act == ActivationKind.Relu ? 1u : p.Act == ActivationKind.Gelu ? 2u : 0u) << 4);
+                    // [M,K] x [N,K]^T as a 1x1 conv over a 1 x M image
+                    yield return ND(cm,
+                        [Bind(n.In[0]), Bind(n.In[1], CK.GemmNK), B(p.BiasValue, CK.F32), B(-1), Bind(n.Out[0])],
+                        PcOf(m, nn, k, cflags, m, m, 1u, k, 1u, 1u, 1u, 0u, 0u, k),
+                        (m + 127) / 128, (nn + bn - 1) / bn, name: "gemm_cm");
+                    break;
+                }
                 uint gflags = (p.TransB ? 1u : 0u) | (p.BiasValue >= 0 ? 2u : 0u)
                     | (p.Act == ActivationKind.Relu ? 4u : 0u)
                     | (p.Act == ActivationKind.Gelu ? 8u : 0u);

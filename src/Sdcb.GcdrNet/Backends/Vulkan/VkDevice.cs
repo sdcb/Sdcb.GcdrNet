@@ -137,13 +137,14 @@ internal unsafe sealed class VkDevice : IDisposable
         byte* wantPush = stackalloc byte[] { (byte)'V', (byte)'K', (byte)'_', (byte)'K', (byte)'H', (byte)'R',
             (byte)'_', (byte)'p', (byte)'u', (byte)'s', (byte)'h', (byte)'_', (byte)'d', (byte)'e', (byte)'s', (byte)'c',
             (byte)'r', (byte)'i', (byte)'p', (byte)'t', (byte)'o', (byte)'r', 0 };
-        bool hasPush = false, hasCoop = false, hasF16Int8 = false;
+        bool hasPush = false, hasCoop = false, hasF16Int8 = false, hasVmm = false;
         for (int i = 0; i < (int)next; i++)
         {
             string en = new((sbyte*)exts[i].ExtensionName);
             if (en == "VK_KHR_push_descriptor") hasPush = true;
             else if (en == "VK_KHR_cooperative_matrix") hasCoop = true;
             else if (en == "VK_KHR_shader_float16_int8") hasF16Int8 = true;
+            else if (en == "VK_KHR_vulkan_memory_model") hasVmm = true;
         }
         if (Environment.GetEnvironmentVariable("GCDRNET_VK_NOPUSH") == "1") hasPush = false;
 
@@ -171,26 +172,30 @@ internal unsafe sealed class VkDevice : IDisposable
         Vk.vkGetPhysicalDeviceFeatures2(d.PhysDevice, &feats2);
         d.StorageBuffer16 = feat16.StorageBuffer16BitAccess != 0;
 
-        // tensor-core path: coopmat + shaderFloat16 on top of 16-bit storage, 32-lane subgroups
+        // tensor-core path: coopmat + shaderFloat16 on top of 16-bit storage, 32-lane subgroups;
+        // coopmat SPIR-V uses the Vulkan memory model, so that feature is required as well
         Vk.VkPhysicalDeviceShaderFloat16Int8Features f16q = new() { SType = VkConst.StPhysicalDeviceShaderFloat16Int8Features };
         Vk.VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopQ = new() { SType = VkConst.StPhysicalDeviceCooperativeMatrixFeaturesKHR };
-        bool wantCm = hasCoop && hasF16Int8 && d.StorageBuffer16 && d.SubgroupSize == 32
+        Vk.VkPhysicalDeviceVulkanMemoryModelFeatures vmmQ = new() { SType = VkConst.StPhysicalDeviceVulkanMemoryModelFeatures };
+        bool wantCm = hasCoop && hasF16Int8 && hasVmm && d.StorageBuffer16 && d.SubgroupSize == 32
             && Environment.GetEnvironmentVariable("GCDRNET_VK_COOPMAT") != "0";
         if (wantCm)
         {
             f16q.PNext = &coopQ;
+            coopQ.PNext = &vmmQ;
             Vk.VkPhysicalDeviceFeatures2 fq = new() { SType = VkConst.StPhysicalDeviceFeatures2, PNext = &f16q };
             Vk.vkGetPhysicalDeviceFeatures2(d.PhysDevice, &fq);
-            wantCm = f16q.ShaderFloat16 != 0 && coopQ.CooperativeMatrix != 0 && Coop16(d);
+            wantCm = f16q.ShaderFloat16 != 0 && coopQ.CooperativeMatrix != 0 && vmmQ.VulkanMemoryModel != 0 && Coop16(d);
         }
 
-        byte** extsToEnable = stackalloc byte*[3];
+        byte** extsToEnable = stackalloc byte*[4];
         uint nExt = 0;
         if (hasPush) extsToEnable[nExt++] = wantPush;
-        byte* pCm = stackalloc byte[32], pF16 = stackalloc byte[32];
+        byte* pCm = stackalloc byte[32], pF16 = stackalloc byte[32], pVmm = stackalloc byte[32];
         System.Text.Encoding.ASCII.GetBytes("VK_KHR_cooperative_matrix\0", new Span<byte>(pCm, 32));
         System.Text.Encoding.ASCII.GetBytes("VK_KHR_shader_float16_int8\0", new Span<byte>(pF16, 32));
-        if (wantCm) { extsToEnable[nExt++] = pCm; extsToEnable[nExt++] = pF16; }
+        System.Text.Encoding.ASCII.GetBytes("VK_KHR_vulkan_memory_model\0", new Span<byte>(pVmm, 32));
+        if (wantCm) { extsToEnable[nExt++] = pCm; extsToEnable[nExt++] = pF16; extsToEnable[nExt++] = pVmm; }
         Vk.VkPhysicalDeviceShaderFloat16Int8Features f16en = new()
         {
             SType = VkConst.StPhysicalDeviceShaderFloat16Int8Features, ShaderFloat16 = 1,
@@ -199,6 +204,11 @@ internal unsafe sealed class VkDevice : IDisposable
         {
             SType = VkConst.StPhysicalDeviceCooperativeMatrixFeaturesKHR, CooperativeMatrix = 1,
         };
+        Vk.VkPhysicalDeviceVulkanMemoryModelFeatures vmmEn = new()
+        {
+            SType = VkConst.StPhysicalDeviceVulkanMemoryModelFeatures, VulkanMemoryModel = 1,
+        };
+        coopEn.PNext = &vmmEn;
         f16en.PNext = &coopEn;
         feat16.PNext = wantCm ? &f16en : null;
 

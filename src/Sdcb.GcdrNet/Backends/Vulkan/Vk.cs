@@ -168,6 +168,13 @@ internal static unsafe partial class Vk
 
     // VK_KHR_shader_float16_int8 (Vulkan 1.2: shaderFloat16/shaderInt8)
     [StructLayout(LayoutKind.Sequential)]
+    public struct VkPhysicalDeviceVulkanMemoryModelFeatures
+    {
+        public uint SType; public void* PNext;
+        public uint VulkanMemoryModel, VulkanMemoryModelDeviceScope, VulkanMemoryModelAvailabilityVisibilityChains;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct VkPhysicalDeviceShaderFloat16Int8Features
     {
         public uint SType; public void* PNext;
@@ -506,6 +513,7 @@ internal static class VkConst
     public const uint StPhysicalDeviceFeatures2 = 49;
     public const uint StPhysicalDevice16BitStorageFeatures = 1000083000u;
     public const uint StPhysicalDeviceShaderFloat16Int8Features = 1000082000u;
+    public const uint StPhysicalDeviceVulkanMemoryModelFeatures = 1000211000u;
     public const uint StPhysicalDeviceCooperativeMatrixFeaturesKHR = 1000506000u;
     public const uint StCooperativeMatrixPropertiesKHR = 1000506001u;
     public const uint StPhysicalDeviceSubgroupProperties = 1000094000u;
