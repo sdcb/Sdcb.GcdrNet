@@ -19,23 +19,27 @@ public enum GcdrBackend
 /// <summary>
 /// GCDRNet two-stage document enhancer: GC-Net shading estimation → division
 /// correction → DR-Net detail restoration. BGR uint8 in, BGR uint8 out.
-/// Thread-safe: sessions/pipelines are pooled per input size (rent/return).
+/// Thread-safe: CPU sessions are pooled per input size, Vulkan workers in one
+/// size-agnostic pool (rent/return).
 /// </summary>
 public sealed class GcdrEnhancer : IDisposable
 {
     private readonly OnnxModel _gcModel, _drModel;
     private readonly GcdrBackend _backend;
 
-    // per-size pools: bounded by MaxSizes distinct sizes, MaxPerSize idle instances
-    // per size, and a memory budget — arena floats scale ~1KB/px across both
-    // sessions, so a handful of multi-MP pipelines would otherwise exhaust the
-    // device (12GB) or the host before the count cap ever matters
+    // CPU per-size pools: bounded by MaxSizes distinct sizes, MaxPerSize idle
+    // instances per size, and a memory budget — arena floats scale ~1KB/px across
+    // both sessions, so a handful of multi-MP sizes would otherwise exhaust the
+    // host before the count cap ever matters
     private const int MaxSizes = 8, MaxPerSize = 4;
-    private const long VkPoolBudget = 3L << 30;   // ~3 GB device memory across vk pools
     private const long CpuPoolBudget = 4L << 30;  // ~4 GB host memory per cpu pool dict
     private readonly ConcurrentDictionary<long, SizePool<InferenceSession>> _gcPool = new();
     private readonly ConcurrentDictionary<long, SizePool<InferenceSession>> _drPool = new();
-    private readonly ConcurrentDictionary<long, SizePool<Backends.Vulkan.VkGcdrPipeline>> _vkPool = new();
+    // Vulkan workers are size-agnostic (budgeted grow-only arenas, re-record on size
+    // change): one pool serves every size; idle workers beyond the first are kept
+    // only while their device memory fits the budget
+    private const long VkIdleBudget = 3L << 30;
+    private SizePool<Backends.Vulkan.VkGcdrPipeline>? _vkPool;
     private long _poolsCreated, _workersCreated, _poolsEvicted;
 
     /// <summary>Pool diagnostics: distinct size pools created, worker instances created, pools evicted.</summary>
@@ -82,23 +86,19 @@ public sealed class GcdrEnhancer : IDisposable
         return p;
     }
 
-    private SizePool<Backends.Vulkan.VkGcdrPipeline> VkPool(int ih, int iw)
+    private SizePool<Backends.Vulkan.VkGcdrPipeline> VkPool()
     {
-        long key = Key(ih, iw);
-        if (_vkPool.TryGetValue(key, out var p)) return p;
+        if (_vkPool is { } p) return p;
         p = new SizePool<Backends.Vulkan.VkGcdrPipeline>(MaxPerSize,
-            () => { Interlocked.Increment(ref _workersCreated); return Backends.Vulkan.VkBackend.Default.NewPipe(_gcModel, _drModel, ih, iw); });
-        if (!_vkPool.TryAdd(key, p)) { p.Dispose(); return _vkPool[key]; }
+            () => { Interlocked.Increment(ref _workersCreated); return Backends.Vulkan.VkBackend.Default.NewWorker(_gcModel, _drModel); },
+            w => w.DeviceBytes, VkIdleBudget);
+        if (Interlocked.CompareExchange(ref _vkPool, p, null) is { } won) { p.Dispose(); return won; }
         Interlocked.Increment(ref _poolsCreated);
-        EvictIfNeeded(_vkPool, key, VkPoolBudget, VkBytesPerPx);
         return p;
     }
 
-    /// <summary>Per-pool footprint estimate for the eviction budget: activations ~1KB/px
-    /// (fp32; ~0.5KB/px with Vulkan fp16 storage) + 32MB base.</summary>
+    /// <summary>Per-pool footprint estimate for the eviction budget: activations ~1KB/px + 32MB base.</summary>
     private static long Footprint(long key, int bytesPerPx) => ((key >> 16) * (key & 0xFFFF) + 1) * bytesPerPx + (32L << 20);
-
-    private static int VkBytesPerPx => Backends.Vulkan.VkBackend.Default.F16 ? 512 : 1024;
 
     /// <summary>Bounded size cache: evict pools until total estimated footprint fits the
     /// budget and count ≤ MaxSizes. A single over-budget pool is kept.</summary>
@@ -133,11 +133,11 @@ public sealed class GcdrEnhancer : IDisposable
             || (_backend == GcdrBackend.Auto && VulkanOk());
         if (useVk)
         {
-            var pool = VkPool(height, width);
+            var pool = VkPool();
             var pipe = pool.Rent();
             try
             {
-                pipe.Enhance(bgrSrc, srcStride, bgrDst, dstStride);
+                pipe.Enhance(bgrSrc, height, width, srcStride, bgrDst, dstStride);
                 DebugAfterEnhance?.Invoke(pipe);
             }
             finally { pool.Return(pipe); }
@@ -206,24 +206,36 @@ public sealed class GcdrEnhancer : IDisposable
     {
         foreach (var s in _gcPool.Values) s.Dispose();
         foreach (var s in _drPool.Values) s.Dispose();
-        foreach (var s in _vkPool.Values) s.Dispose();
-        _gcPool.Clear(); _drPool.Clear(); _vkPool.Clear();
+        Interlocked.Exchange(ref _vkPool, null)?.Dispose();
+        _gcPool.Clear(); _drPool.Clear();
     }
 
-    /// <summary>Bounded rent/return pool of stateful workers for one input size.</summary>
+    /// <summary>Bounded rent/return pool of stateful workers (at most <c>max</c> idle and,
+    /// with a <c>weight</c>, at most <c>budget</c> idle bytes beyond the first idle worker).</summary>
     private sealed class SizePool<T> : IDisposable where T : IDisposable
     {
         private readonly ConcurrentQueue<T> _idle = new();
         private readonly Func<T> _factory;
         private readonly int _max;
+        private readonly Func<T, long>? _weight;
+        private readonly long _budget;
         private int _idleCount;
+        private long _idleBytes;
         private volatile bool _disposed;
 
-        public SizePool(int max, Func<T> factory) { _max = max; _factory = factory; }
+        public SizePool(int max, Func<T> factory, Func<T, long>? weight = null, long budget = long.MaxValue)
+        {
+            _max = max; _factory = factory; _weight = weight; _budget = budget;
+        }
 
         public T Rent()
         {
-            if (_idle.TryDequeue(out T? t)) { Interlocked.Decrement(ref _idleCount); return t; }
+            if (_idle.TryDequeue(out T? t))
+            {
+                Interlocked.Decrement(ref _idleCount);
+                if (_weight is not null) Interlocked.Add(ref _idleBytes, -_weight(t));
+                return t;
+            }
             return _factory();
         }
 
@@ -231,8 +243,11 @@ public sealed class GcdrEnhancer : IDisposable
         {
             // pool may already be evicted/disposed — don't park into a dead pool
             if (_disposed) { t.Dispose(); return; }
-            if (Interlocked.Increment(ref _idleCount) <= _max)
+            long w = _weight?.Invoke(t) ?? 0;
+            if (Interlocked.Increment(ref _idleCount) <= _max
+                && (Volatile.Read(ref _idleCount) == 1 || Interlocked.Read(ref _idleBytes) + w <= _budget))
             {
+                Interlocked.Add(ref _idleBytes, w);
                 _idle.Enqueue(t);
                 // raced with Dispose after the check above: drain so nothing is parked in a dead pool
                 if (_disposed) while (_idle.TryDequeue(out T? d)) d.Dispose();
@@ -247,6 +262,7 @@ public sealed class GcdrEnhancer : IDisposable
             _disposed = true;
             while (_idle.TryDequeue(out T? t)) t.Dispose();
             _idleCount = 0;
+            _idleBytes = 0;
         }
     }
 }
