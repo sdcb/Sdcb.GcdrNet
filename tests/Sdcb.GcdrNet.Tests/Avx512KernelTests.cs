@@ -58,6 +58,28 @@ public class Avx512KernelTests
     }
 
     [SkippableTheory]
+    [InlineData(16, 16, 9, 11, 0, 0f, false, 0)]
+    [InlineData(24, 20, 13, 6, 1, 0f, true, 1)]   // ic % 16 != 0: 8-lane input transform
+    [InlineData(32, 48, 22, 18, 0, 0.5f, false, 3)]
+    [InlineData(64, 16, 17, 23, 1, 0f, true, 0)]
+    [InlineData(128, 64, 30, 41, 1, 0f, false, 1)] // several tile chunks per image
+    public void Conv_Winograd_MatchesAvx2(int ic, int oc, int h, int w, int mode, float padValue, bool residual, int act)
+    {
+        var rng = new Random(ic * 17 + oc);
+        float[] x = rng.Array(h * w * ic), wt = rng.Array(oc * ic * 9), b = rng.Array(oc);
+        float[] res = residual ? rng.Array(h * w * oc) : [];
+        var p = new ConvP
+        {
+            Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3],
+            PadMode = (PadMode)mode, PadValue = padValue, Act = (ActivationKind)act,
+        };
+        Skip.IfNot(Nhwc.WinogradEligible(p, [oc, ic, 3, 3], ic), "Winograd disabled");
+        NhwcConvPlan kp = Nhwc.Pack(wt, [oc, ic, 3, 3], b, 1, ic);
+        kp.WinoU = Nhwc.PackWinograd(wt, oc, ic);
+        Both(dst => Nhwc.Conv(x, h, w, ic, dst, h, w, oc, p, kp, res), h * w * oc);
+    }
+
+    [SkippableTheory]
     [InlineData(57, 128, 128, false, 0)]
     [InlineData(23, 160, 48, true, 3)]   // odd block count, transB, gelu
     [InlineData(5, 64, 20, false, 1)]    // fewer rows than a tile, lane tail
