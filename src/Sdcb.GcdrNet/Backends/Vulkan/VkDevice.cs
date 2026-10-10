@@ -34,6 +34,10 @@ internal unsafe sealed class VkDevice : IDisposable
     public bool CoopLite;
     /// <summary>VK_EXT_subgroup_size_control range (1..128 when the extension is absent).</summary>
     public uint SubgroupMin = 1, SubgroupMax = 128;
+    /// <summary>Memory-bound NHWC shaders (maxpool, bilinear, depthwise, shift) take 4 channels per
+    /// invocation when c % 4 == 0 — integrated GPUs, where they are bandwidth/issue bound
+    /// (GCDRNET_VK_VEC4=0 disables; discrete GPUs keep the per-element shaders).</summary>
+    public bool Vec4Eltwise;
     /// <summary>Largest DEVICE_LOCAL heap (bytes).</summary>
     public ulong DeviceLocalHeap;
     /// <summary>Integrated GPU: "device-local" memory is system RAM shared with the CPU.</summary>
@@ -314,6 +318,7 @@ internal unsafe sealed class VkDevice : IDisposable
             }
         }
         d.UnifiedMemory = props.DeviceType == VkConst.PhysDeviceIntegrated;
+        d.Vec4Eltwise = d.UnifiedMemory && Environment.GetEnvironmentVariable("GCDRNET_VK_VEC4") != "0";
         for (int i = 0; i < (int)d.MemProps.MemoryHeapCount; i++)
         {
             var hp = d.MemProps.HeapAt(i);
@@ -349,7 +354,7 @@ internal unsafe sealed class VkDevice : IDisposable
             Console.Error.WriteLine($"[vk] device={d.DeviceName} type={props.DeviceType} vendor=0x{d.VendorId:x4} qfamily={d.QueueFamily} " +
                 $"sg={d.SubgroupSize} sgRange={d.SubgroupMin}-{d.SubgroupMax} sgcCompute={sgcCompute} push={d.PushDescriptors} " +
                 $"coopmat={d.CoopMat16} coopSg={(d.CoopSubgroupSize == 0 ? "default" : d.CoopSubgroupSize.ToString())} " +
-                $"fullSg={d._fullSubgroups} lite={d.CoopLite} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
+                $"fullSg={d._fullSubgroups} lite={d.CoopLite} vec4={d.Vec4Eltwise} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
             for (int i = 0; i < (int)d.MemProps.MemoryHeapCount; i++)
             {
                 var hp = d.MemProps.HeapAt(i);
