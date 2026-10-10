@@ -1,0 +1,248 @@
+#version 450
+
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+
+// Tensor-core implicit-GEMM dense KxK conv on NHWC fp16 activations
+// (after SimdPaddleOCR's convk_cm_sg32):
+//   OUT[m = oy*outW + ox, n] = act(sum_k A[m, k] * W[n, k] + bias[n] + res[m, n])
+//   k = (dy*kW + dx)*cin + ci (tap-major), A gathered from the input (no im2col),
+//   zero padding or reflect padding (flag), fp16 in memory, fp32 accumulation.
+// SGX*SGY 32-lane subgroups, each owning a TSM*16 x TSN*16 strip of 16x16
+// accumulators; A/B k-slices of 32 halves are staged through double-buffered
+// shared memory with coalesced 16 B loads. Requires cin % 8 == 0 (a 16 B quad
+// never straddles a tap), nDim % 8 == 0 and 16 B aligned bindings. W is the
+// [N][kDim] tap-major repack (kDim = kH*kW*cin rounded up to 8, zero-filled).
+// SCALARK: any cin (the RGB/6-channel stems) — each k element of a quad is
+// gathered individually, k >= kReal reads as zero.
+// flags: bit0 bias, bit1 residual, bit2 reflect pad, bits[4:6] act (0 none, 1 relu, 2 gelu)
+
+#ifndef TSM
+#define TSM 4u
+#endif
+#ifndef TSN
+#define TSN 2u
+#endif
+#ifndef SGX
+#define SGX 4u
+#endif
+#ifndef SGY
+#define SGY 2u
+#endif
+#ifndef NTHR
+#define NTHR 256
+#endif
+#define SGSZ 32u
+
+layout(local_size_x = NTHR) in;
+
+const uint STRM = TSM * 16u;
+const uint STRN = TSN * 16u;
+const uint BM = SGY * STRM;
+const uint BN = SGX * STRN;
+const uint BKV = 8u;               // k-slice in vec4 units (32 halves)
+const uint LDS = BKV + 2u;         // padded smem row stride (vec4 units)
+const uint BKQ = BKV / 2u;         // 16 B quads per slice row
+const uint RSTEP = NTHR / BKQ;
+const uint LA = BM / RSTEP;
+const uint LB = BN / RSTEP;
+
+layout(set = 0, binding = 0) readonly buffer X8 { uvec4 x8[]; };
+layout(set = 0, binding = 0) readonly buffer X1 { float16_t x1[]; };
+layout(set = 0, binding = 1) readonly buffer W8 { uvec4 w8[]; };
+layout(set = 0, binding = 2) readonly buffer Bias { float bias[]; };
+layout(set = 0, binding = 3) readonly buffer Res8 { uvec4 res8[]; };
+layout(set = 0, binding = 4) writeonly buffer O8 { uvec4 o8[]; };
+
+layout(push_constant) uniform PC {
+    uint mDim; uint nDim; uint kDim; uint flags;
+    uint outW; uint inW; uint inH; uint cin; uint kW;
+    uint sH; uint sW; uint pT; uint pL; uint kReal;
+} p;
+
+shared f16vec4 sA[2u * BM * LDS];
+shared f16vec4 sB[2u * BN * LDS];
+shared float stage[NTHR / SGSZ * 16 * 16];
+
+float ferf(float v)
+{
+    float s = v < 0.0 ? -1.0 : 1.0;
+    float ax = abs(v);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+    return (1.0 - poly * exp(-ax * ax)) * s;
+}
+
+float actf(float v, uint act)
+{
+    if (act == 1u) return max(v, 0.0);
+    if (act == 2u) return 0.5 * v * (1.0 + ferf(v * 0.7071067811865475));
+    return v;
+}
+
+int mirror(int i, int d) { if (d <= 1) return 0; while (i < 0 || i >= d) i = i < 0 ? -i : 2 * d - 2 - i; return i; }
+
+int rowY[LA], rowX[LA];
+bool rowOk[LA];
+
+void loadSlice(out uvec4 ra[LA], out uvec4 rb[LB], out uint va, out uint vb,
+    uint kt, uint n0, uint r0, uint kq, bool reflect)
+{
+    uint q = kt * BKQ + kq;            // global 16 B quad index along k
+    uint kv2 = p.kDim >> 3;
+    bool kok = q < kv2;
+    uint qc = min(q, kv2 - 1u);
+    va = 0u; vb = 0u;
+    uint k8 = qc * 8u;
+#ifdef SCALARK
+    [[unroll]] for (uint i = 0u; i < LA; i++) {
+        float16_t h[8];
+        [[unroll]] for (uint e = 0u; e < 8u; e++) {
+            uint k = k8 + e;
+            uint tap = k / p.cin, ci = k - tap * p.cin;
+            uint dy = tap / p.kW, dx = tap - dy * p.kW;
+            int iy = rowY[i] + int(dy), ix = rowX[i] + int(dx);
+            bool inb = iy >= 0 && iy < int(p.inH) && ix >= 0 && ix < int(p.inW);
+            if (reflect && rowOk[i] && !inb) { iy = mirror(iy, int(p.inH)); ix = mirror(ix, int(p.inW)); inb = true; }
+            bool ok = kok && rowOk[i] && inb && k < p.kReal;
+            h[e] = x1[ok ? (uint(iy) * p.inW + uint(ix)) * p.cin + ci : 0u];
+            h[e] = ok ? h[e] : float16_t(0.0);
+        }
+        ra[i] = uvec4(packFloat2x16(f16vec2(h[0], h[1])), packFloat2x16(f16vec2(h[2], h[3])),
+                      packFloat2x16(f16vec2(h[4], h[5])), packFloat2x16(f16vec2(h[6], h[7])));
+        va |= kok && rowOk[i] ? 1u << i : 0u;
+    }
+#else
+    uint tap = k8 / p.cin, ci = k8 - tap * p.cin;
+    uint dy = tap / p.kW, dx = tap - dy * p.kW;
+    uint cq = p.cin >> 3;
+    [[unroll]] for (uint i = 0u; i < LA; i++) {
+        int iy = rowY[i] + int(dy), ix = rowX[i] + int(dx);
+        bool inb = iy >= 0 && iy < int(p.inH) && ix >= 0 && ix < int(p.inW);
+        if (reflect && rowOk[i] && !inb) { iy = mirror(iy, int(p.inH)); ix = mirror(ix, int(p.inW)); inb = true; }
+        bool ok = kok && rowOk[i] && inb;
+        uint px = ok ? uint(iy) * p.inW + uint(ix) : 0u;
+        ra[i] = x8[px * cq + (ci >> 3)];
+        va |= ok ? 1u << i : 0u;
+    }
+#endif
+    [[unroll]] for (uint i = 0u; i < LB; i++) {
+        uint gn = n0 + r0 + i * RSTEP;
+        bool rok = gn < p.nDim;
+        gn = min(gn, p.nDim - 1u);
+        rb[i] = w8[gn * kv2 + qc];
+        vb |= rok && kok ? 1u << i : 0u;
+    }
+}
+
+void storeSlice(uvec4 ra[LA], uvec4 rb[LB], uint va, uint vb, uint buf, uint r0, uint kq)
+{
+    [[unroll]] for (uint i = 0u; i < LA; i++) {
+        uint o = buf * BM * LDS + (r0 + i * RSTEP) * LDS + kq * 2u;
+        bool ok = (va & (1u << i)) != 0u;
+        sA[o] = ok ? f16vec4(unpackFloat2x16(ra[i].x), unpackFloat2x16(ra[i].y)) : f16vec4(0.0hf);
+        sA[o + 1u] = ok ? f16vec4(unpackFloat2x16(ra[i].z), unpackFloat2x16(ra[i].w)) : f16vec4(0.0hf);
+    }
+    [[unroll]] for (uint i = 0u; i < LB; i++) {
+        uint o = buf * BN * LDS + (r0 + i * RSTEP) * LDS + kq * 2u;
+        bool ok = (vb & (1u << i)) != 0u;
+        sB[o] = ok ? f16vec4(unpackFloat2x16(rb[i].x), unpackFloat2x16(rb[i].y)) : f16vec4(0.0hf);
+        sB[o + 1u] = ok ? f16vec4(unpackFloat2x16(rb[i].z), unpackFloat2x16(rb[i].w)) : f16vec4(0.0hf);
+    }
+}
+
+void main()
+{
+    uint tid = gl_LocalInvocationID.x;
+    uint sg = gl_SubgroupID;
+    uint lane = gl_SubgroupInvocationID;
+    uint sgx = sg & (SGX - 1u), sgy = sg / SGX;
+    uint m0 = gl_WorkGroupID.x * BM;
+    uint n0 = gl_WorkGroupID.y * BN;
+
+    uint act = (p.flags >> 4) & 7u;
+    bool hasBias = (p.flags & 1u) != 0u;
+    bool hasRes = (p.flags & 2u) != 0u;
+    bool reflect = (p.flags & 4u) != 0u;
+
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc[TSM][TSN];
+    [[unroll]] for (uint i = 0u; i < TSM; i++)
+        [[unroll]] for (uint j = 0u; j < TSN; j++)
+            acc[i][j] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0f);
+
+    uint kq = tid % BKQ;
+    uint r0 = tid / BKQ;
+    [[unroll]] for (uint i = 0u; i < LA; i++) {
+        uint gm = m0 + r0 + i * RSTEP;
+        uint oy = gm / p.outW, ox = gm - oy * p.outW;
+        rowOk[i] = gm < p.mDim;
+        rowY[i] = int(oy * p.sH) - int(p.pT);
+        rowX[i] = int(ox * p.sW) - int(p.pL);
+    }
+    uint nk = (p.kDim + 31u) / 32u;
+
+    uvec4 ra[LA], rb[LB];
+    uint va, vb;
+    loadSlice(ra, rb, va, vb, 0u, n0, r0, kq, reflect);
+    storeSlice(ra, rb, va, vb, 0u, r0, kq);
+    barrier();
+
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> ma[TSM];
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> mb[TSN];
+    uint aw = sgy * STRM * LDS, bw = sgx * STRN * LDS;
+    for (uint kt = 0u; kt < nk; kt++) {
+        uint cur = kt & 1u;
+        bool more = kt + 1u < nk;
+        if (more) loadSlice(ra, rb, va, vb, kt + 1u, n0, r0, kq, reflect);
+        uint ab = cur * BM * LDS + aw, bb = cur * BN * LDS + bw;
+        [[unroll]] for (uint kk = 0u; kk < BKV; kk += 4u) {
+            [[unroll]] for (uint i = 0u; i < TSM; i++)
+                coopMatLoad(ma[i], sA, ab + i * 16u * LDS + kk, LDS, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint j = 0u; j < TSN; j++)
+                coopMatLoad(mb[j], sB, bb + j * 16u * LDS + kk, LDS, gl_CooperativeMatrixLayoutColumnMajor);
+            [[unroll]] for (uint i = 0u; i < TSM; i++)
+                [[unroll]] for (uint j = 0u; j < TSN; j++)
+                    acc[i][j] = coopMatMulAdd(ma[i], mb[j], acc[i][j]);
+        }
+        if (more) storeSlice(ra, rb, va, vb, cur ^ 1u, r0, kq);
+        barrier();
+    }
+
+    // epilogue through a per-subgroup row-major stage: each lane owns 8
+    // consecutive columns of one row, so bias / residual / outputs move as 16 B
+    uint mm = lane >> 1, nb = (lane & 1u) * 8u;
+    [[unroll]] for (uint i = 0u; i < TSM; i++) {
+        [[unroll]] for (uint j = 0u; j < TSN; j++) {
+            coopMatStore(acc[i][j], stage, sg * 256u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+            uint gmr = m0 + sgy * STRM + i * 16u + mm;
+            uint gnc = n0 + sgx * STRN + j * 16u + nb;
+            uint sb = sg * 256u + mm * 16u + nb;
+            if (gmr < p.mDim && gnc < p.nDim) {
+                float v[8];
+                [[unroll]] for (uint l = 0u; l < 8u; l++) v[l] = stage[sb + l];
+                if (hasBias)
+                    [[unroll]] for (uint l = 0u; l < 8u; l++) v[l] += bias[gnc + l];
+                uint oi = (gmr * p.nDim + gnc) >> 3;
+                if (hasRes) {
+                    uvec4 rq = res8[oi];
+                    [[unroll]] for (uint l = 0u; l < 8u; l += 2u) {
+                        vec2 r2 = vec2(unpackFloat2x16(rq[l >> 1]));
+                        v[l] += r2.x; v[l + 1u] += r2.y;
+                    }
+                }
+                uvec4 oq;
+                [[unroll]] for (uint l = 0u; l < 8u; l += 2u)
+                    oq[l >> 1] = packFloat2x16(f16vec2(actf(v[l], act), actf(v[l + 1u], act)));
+                o8[oi] = oq;
+            }
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+        }
+    }
+}

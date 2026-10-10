@@ -79,10 +79,16 @@ public sealed class GcdrEnhancer : IDisposable
     {
         long key = Key(h, w);
         if (_cpuPlans.TryGetValue(key, out var p)) return p;
-        ExecPlan gc = GraphCompiler.Compile(_gcModel, [1, 3, h, w], CpuPlan);
-        CpuKernels.Pack(gc, _gcKernels);
+        // the two nets compile independently: build them side by side
+        var tgc = Task.Run(() =>
+        {
+            ExecPlan g = GraphCompiler.Compile(_gcModel, [1, 3, h, w], CpuPlan);
+            CpuKernels.Pack(g, _gcKernels);
+            return g;
+        });
         ExecPlan dr = GraphCompiler.Compile(_drModel, [1, 6, h, w], CpuPlan);
         CpuKernels.Pack(dr, _drKernels);
+        ExecPlan gc = tgc.GetAwaiter().GetResult();
         p = (gc, dr);
         if (!_cpuPlans.TryAdd(key, p)) return _cpuPlans.TryGetValue(key, out var won) ? won : p;
         Interlocked.Increment(ref _poolsCreated);
