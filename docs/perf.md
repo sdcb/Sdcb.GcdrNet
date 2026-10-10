@@ -32,16 +32,31 @@ ISA 档位通过 JIT 开关强制降级，与 `test-all.ps1` 的矩阵一致。
 ## 结果汇总
 
 轮数：Vulkan / AVX2 / Vector 各 **3 轮**取均值；Scalar 单轮 ~18 分钟，只跑 **1 轮**。
-49 张合计 183.4 MP。
+49 张合计 183.4 MP。内存列来自单独的 1 轮（Scalar 未测），口径见下。
 
-| 后端          | 轮数 | pass1 总耗时 | pass1 均值/张 | pass1 MP/s | pass2 均值/张 | pass2 MP/s | 相对 AVX2 | PSNR     |
-| ------------- | ---- | ------------ | ------------- | ---------- | ------------- | ---------- | --------- | -------- |
-| Vulkan        | 3    | 5.66 s       | **115.6 ms**  | **32.38**  | 104.0 ms      | 35.97      | 12.7× 快  | 24.68 dB |
-| CPU AVX2+FMA  | 3    | 72.18 s      | **1473.1 ms** | **2.54**   | 1472.1 ms     | 2.54       | 1.00×     | 24.65 dB |
-| CPU Vector    | 3    | 127.06 s     | **2593.1 ms** | **1.44**   | 2662.6 ms     | 1.41       | 1.76× 慢  | 24.65 dB |
-| CPU Scalar    | 1    | 559.23 s     | **11412.9 ms**| **0.33**   | 11085.0 ms    | 0.34       | 7.75× 慢  | 24.65 dB |
+| 后端          | 轮数 | pass1 总耗时 | pass1 均值/张  | pass2 均值/张 | 相对 AVX2 | PSNR     | ΔWS          | peak WS     |
+| ------------- | ---- | ------------ | -------------- | ------------- | --------- | -------- | ------------ | ----------- |
+| Vulkan        | 3    | 5.66 s       | **115.6 ms**   | 104.0 ms      | 12.7× 快  | 24.68 dB | **+2128 MB** | **2796 MB** |
+| CPU AVX2+FMA  | 3    | 72.18 s      | **1473.1 ms**  | 1472.1 ms     | 1.00×     | 24.65 dB | **+4380 MB** | **4918 MB** |
+| CPU Vector    | 3    | 127.06 s     | **2593.1 ms**  | 2662.6 ms     | 1.76× 慢  | 24.65 dB | **+4391 MB** | **4932 MB** |
+| CPU Scalar    | 1    | 559.23 s     | **11412.9 ms** | 11085.0 ms    | 7.75× 慢  | 24.65 dB | —            | —           |
 
 CPU 三档逐级比：AVX2 → Vector **1.76×**，Vector → Scalar **4.40×**。
+
+内存口径（working set，参考 SimdPaddleOCR）：harness 在**引擎初始化前后**各采一次进程
+working set（`Process.Refresh()` 后读 `WorkingSet64`），之后**每张图** `Enhance` 返回后采一次
+（不在计时内、不触发 GC）。
+
+- **ΔWS**：loaded（`GcdrEnhancer.FromFiles` 之后）→ pass1 最后一张（50_shadow）。
+- **peak WS**：warmup + pass1 + pass2 所有采样点的最大值。
+- 三个后端 init → loaded 都是 26 → 49 MB（+22 MB）；managed Δ（pass1 前后各一次
+  `GC.GetTotalMemory(true)`，仅这两次强制 GC）Vulkan +381 MB，CPU −1 MB。
+- Vulkan 的 working set 不含设备本地显存，显存看 `vkDevice`（`vkAllocateMemory` 计数）：
+  live 2791 MB / peak 3011 MB。
+- CPU 的 ws 基本等于"当前尺寸 gc+dr 两个 session 的 arena"（5 MP 约 4.4 GB，小图降到
+  ~1 GB），随图片尺寸起落，不再累积。
+- 内存这一轮的耗时（Vulkan 117.4 / AVX2 1513.6 / Vector 2674.1 ms/张）没有计入耗时列，
+  与 3 轮均值相差约 +2–3%。
 
 ## 逐轮明细（pass1 / pass2 总耗时，ms）
 
@@ -52,30 +67,7 @@ CPU 三档逐级比：AVX2 → Vector **1.76×**，Vector → Scalar **4.40×**�
 | CPU Vector   | 126100.2 / 129648.5 | 129072.2 / 130914.9 | 126013.0 / 130840.0 | ±1.2%         |
 | CPU Scalar   | 559233.0 / 543165.4 | —                   | —                   | —             |
 
-## 内存（working set，参考 SimdPaddleOCR 口径）
-
-单独跑 1 轮（Vulkan / AVX2 / Vector；Scalar 跳过）。harness 在**引擎初始化前后**各采一次
-进程 working set（`Process.Refresh()` 后读 `WorkingSet64`），之后**每张图** `Enhance`
-返回后采一次（不在计时内、不触发 GC）：
-
-- **init → loaded**：`GcdrEnhancer.FromFiles` 前后（模型加载）。
-- **ΔWS**：loaded → pass1 最后一张（50_shadow）。
-- **peak WS**：warmup + pass1 + pass2 所有采样点的最大值。
-- **managed Δ**：pass1 前后各一次 `GC.GetTotalMemory(true)`（仅这两次强制 GC）。
-
-| 后端       | init → loaded     | 首张（warmup）后 | ΔWS（loaded → last） | peak WS     | managed Δ | vkDevice live / peak |
-| ---------- | ----------------- | ---------------- | -------------------- | ----------- | --------- | -------------------- |
-| Vulkan     | 26 → 49 MB (+22)  | 413 MB           | **+2128 MB**         | **2796 MB** | +381 MB   | 2791 / 3011 MB       |
-| CPU AVX2   | 26 → 49 MB (+22)  | 4528 MB          | **+4380 MB**         | **4918 MB** | −1 MB     | —                    |
-| CPU Vector | 26 → 49 MB (+22)  | 4528 MB          | **+4391 MB**         | **4932 MB** | −1 MB     | —                    |
-
-- Vulkan 的 working set 不含设备本地显存，显存看 `vkDevice`（`vkAllocateMemory` 计数）。
-- CPU 的 ws 基本等于"当前尺寸 gc+dr 两个 session 的 arena"（5 MP 约 4.4 GB，小图降到
-  ~1 GB），随图片尺寸起落，不再累积。
-- 这一轮的耗时（Vulkan 117.4 / AVX2 1513.6 / Vector 2674.1 ms/张）没有计入上方性能表，
-  与 3 轮均值相差约 +2–3%。
-
-### CPU arena 内存修复（前 → 后）
+## CPU arena 内存修复（前 → 后）
 
 修复前 CPU 的 ws 会一路涨到 20 GB 以上：
 
@@ -91,7 +83,8 @@ CPU 三档逐级比：AVX2 → Vector **1.76×**，Vector → Scalar **4.40×**�
   兜底 + `GC.AddMemoryPressure`）；`SizePool.Return` 与 `Dispose` 的竞态补了一次排空。
 - **代价**：AVX2 1473 → 1514 ms/张、Vector 2593 → 2674 ms/张（约 +3%，新尺寸 arena 走 OS 新页
   缺页）；输出 hash 与修复前一致，PSNR 不变，测试在 AVX2 和 Vector 两档下都通过。
-- 上方性能表的 3 轮数据是修复前测的。Scalar 本轮没有重测。
+- 汇总表的 3 轮耗时是修复前测的。Scalar 本轮没有重测。
+
 ## 观察
 
 - **Vulkan**：pass2 比 pass1 快 ~10%（冷管线创建 ~470–660 ms/49 张）；
