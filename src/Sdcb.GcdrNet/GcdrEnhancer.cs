@@ -60,6 +60,11 @@ public sealed class GcdrEnhancer : IDisposable
         GcdrBackend backend = GcdrBackend.Cpu) =>
         new(OnnxModel.Load(gcnetOnnx.ToArray()), OnnxModel.Load(drnetOnnx.ToArray()), backend);
 
+    // pipeline sessions keep I/O in plan layout: the glue kernels below read/write
+    // channels-last directly, so the plan has no boundary relayouts
+    private static readonly CompileOptions CpuPlan = new(CompileOptions.DefaultNhwc, PhysicalIo: true);
+    private static bool CpuNhwc => CpuPlan.Nhwc;
+
     private static long Key(int h, int w) => (long)h * 65536 + w;
 
     private SizePool<InferenceSession> CpuPool(bool gc, int h, int w)
@@ -70,7 +75,7 @@ public sealed class GcdrEnhancer : IDisposable
         var model = gc ? _gcModel : _drModel;
         int c = gc ? 3 : 6;
         p = new SizePool<InferenceSession>(MaxPerSize,
-            () => { Interlocked.Increment(ref _workersCreated); return new InferenceSession(GraphCompiler.Compile(model, [1, c, h, w])); });
+            () => { Interlocked.Increment(ref _workersCreated); return new InferenceSession(GraphCompiler.Compile(model, [1, c, h, w], CpuPlan)); });
         if (!pools.TryAdd(key, p)) { p.Dispose(); return pools[key]; }
         Interlocked.Increment(ref _poolsCreated);
         EvictIfNeeded(pools, key, CpuPoolBudget);
@@ -144,9 +149,10 @@ public sealed class GcdrEnhancer : IDisposable
         InferenceSession dr = drPool.Rent();
         try
         {
-            // stage 0: fill GC input — BGR u8 → float NCHW /255, top/left replicate pad
+            // stage 0: fill GC input — BGR u8 → float /255, top/left replicate pad
             Span<float> x = gc.Input;
-            PixelOps.BgrToNchwPad(bgrSrc, width, height, srcStride, x, h, w, ph, pw);
+            if (CpuNhwc) PixelOps.BgrToNhwcPad(bgrSrc, width, height, srcStride, x, h, w, ph, pw);
+            else PixelOps.BgrToNchwPad(bgrSrc, width, height, srcStride, x, h, w, ph, pw);
 
             // stage 1: GC-Net → shading map
             gc.Run();
@@ -158,14 +164,19 @@ public sealed class GcdrEnhancer : IDisposable
             // stage 2: corrected = clamp(x / max(shadow,1e-6), 0,1); concat into DR input
             Span<float> x6 = dr.Input;
             int hw = h * w;
-            x.CopyTo(x6.Slice(0, 3 * hw));
-            PixelOps.DivClampInto(x, shadow, x6.Slice(3 * hw, 3 * hw));
+            if (CpuNhwc) PixelOps.DivConcatNhwc(x, shadow, x6);
+            else
+            {
+                x.CopyTo(x6.Slice(0, 3 * hw));
+                PixelOps.DivClampInto(x, shadow, x6.Slice(3 * hw, 3 * hw));
+            }
 
             // stage 3: DR-Net
             dr.Run();
 
             // stage 4: crop pad → u8 BGR
-            PixelOps.NchwToBgrCrop(dr.Output, h, w, ph, pw, bgrDst, width, height, dstStride);
+            if (CpuNhwc) PixelOps.NhwcToBgrCrop(dr.Output, h, w, ph, pw, bgrDst, width, height, dstStride);
+            else PixelOps.NchwToBgrCrop(dr.Output, h, w, ph, pw, bgrDst, width, height, dstStride);
         }
         finally
         {
