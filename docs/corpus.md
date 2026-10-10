@@ -30,7 +30,9 @@
   图 ~11dB 是模型对该样本的能力边界，不是 bug。
 - **内存**：引擎初始化前后 + 每张图后采样 working set（逐图 `ws` 列；汇总
   ΔWS = loaded→pass1 末张、peak = 全部采样最大值）/ managed delta / `VkDevice` live+peak
-  （单点计数 `vkAllocateMemory`，直接反映 worker arena 驻留）。
+  （单点计数 `vkAllocateMemory`，直接反映 worker arena 驻留）。harness 的源图/输出/真值三块
+  BGR 缓冲只增不减地复用，否则每张 5 MP 图 ~45 MB 的 LOH 垃圾会在 gen2 GC 前堆进 working set，
+  把引擎自己的占用淹没。
 - **池统计**：`pools created / workers / evicted`——CPU 按尺寸建池、按估算字节预算驱逐
   （~1KB/px），50 个不同尺寸下驱逐是常态；Vulkan worker 与尺寸无关（只增不减的 arena，
   换尺寸只重录命令缓冲），只有 1 个池、不驱逐。下方结果段落是复用前的历史记录。
@@ -42,9 +44,9 @@
 | `GCDR_FROM`         | 从第 N 张开始（默认 1，跳过 warmup 后）          |
 | `GCDR_ONLY`         | 按文件名子串过滤                                 |
 | `GCDR_DUMP`         | 把每张 BGR 输出落盘到指定目录                    |
-| `GCDR_INTER=1`      | 记录 gcIn/gcOut/drIn 中间量 hash，pass2 报分歧层 |
+| `GCDR_INTER=1`      | 记录 gcIn/gcOut/drIn 中间量 hash，pass2 报分歧层（gc 与 dr 共用一块 arena 后 gcIn/gcOut 读到的是被 dr 覆盖后的内容，只有 drIn 仍有意义） |
 | `GCDR_DUMPPIPE=1`   | 配合 INTER，输出 pipeline/arena 诊断             |
-| `GCDR_ZERO_ARENA=1` | 管线录制前 `vkCmdFillBuffer` 清零两个 arena      |
+| `GCDR_ZERO_ARENA=1` | 管线录制前 `vkCmdFillBuffer` 清零 arena          |
 
 ## 结果（RTX 3080 Ti + 16 线程 AVX2，NN 序）
 

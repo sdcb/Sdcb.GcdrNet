@@ -480,10 +480,13 @@ public static class Program
         int from = int.TryParse(Environment.GetEnvironmentVariable("GCDR_FROM"), out int f0) ? f0 : 1;
         string? only = Environment.GetEnvironmentVariable("GCDR_ONLY");
         var run = images.Skip(from).Where(i => only == null || i.name.Contains(only)).ToArray();
+        // grow-only image buffers: per-image LOH garbage would otherwise pile up in the
+        // working set (~45 MB per 5 MP image until a gen2 GC) and drown the engine's share
+        byte[]? srcBuf = null, dstBuf = null, gtBuf = null;
         foreach ((string name, int w, int h) in run)
         {
-            byte[] bgr = DecodeBgr(Path.Combine(corpusDir, name));
-            byte[] dst = new byte[bgr.Length];
+            int len = DecodeBgr(Path.Combine(corpusDir, name), ref srcBuf);
+            Span<byte> bgr = srcBuf.AsSpan(0, len), dst = Grow(ref dstBuf, len);
             curName = name; curW = w; curH = h;
             long t = Stopwatch.GetTimestamp();
             enh.Enhance(bgr, w, h, w * 3, dst, w * 3);
@@ -496,12 +499,13 @@ public static class Program
             hashes[name] = hsh;
             string? dumpDir = Environment.GetEnvironmentVariable("GCDR_DUMP");
             if (dumpDir != null)
-                File.WriteAllBytes(Path.Combine(dumpDir, name.Replace(".webp", ".bgr")), dst);
+                File.WriteAllBytes(Path.Combine(dumpDir, name.Replace(".webp", ".bgr")), dst.ToArray());
             string quality = $"  {hsh:x8}";
             string gt = Path.Combine(corpusDir, name[..name.IndexOf('_')] + "_gt.webp");
             if (File.Exists(gt))
             {
-                byte[] refBgr = DecodeBgr(gt);
+                int glen = DecodeBgr(gt, ref gtBuf);
+                ReadOnlySpan<byte> refBgr = gtBuf.AsSpan(0, glen);
                 if (refBgr.Length == dst.Length)
                 {
                     double se = 0, ae = 0;
@@ -520,8 +524,8 @@ public static class Program
         double warmMs = 0; int flaky = 0;
         foreach ((string name, int w, int h) in run)
         {
-            byte[] bgr = DecodeBgr(Path.Combine(corpusDir, name));
-            byte[] dst = new byte[bgr.Length];
+            int len = DecodeBgr(Path.Combine(corpusDir, name), ref srcBuf);
+            Span<byte> bgr = srcBuf.AsSpan(0, len), dst = Grow(ref dstBuf, len);
             curName = name; curW = w; curH = h;
             long t = Stopwatch.GetTimestamp();
             enh.Enhance(bgr, w, h, w * 3, dst, w * 3);
@@ -550,9 +554,23 @@ public static class Program
 
     private static byte[] DecodeBgr(string path)
     {
+        byte[]? buf = null;
+        int len = DecodeBgr(path, ref buf);
+        return buf!.Length == len ? buf : buf[..len];
+    }
+
+    private static Span<byte> Grow(ref byte[]? buf, int len)
+    {
+        if (buf is null || buf.Length < len) buf = new byte[len];
+        return buf.AsSpan(0, len);
+    }
+
+    /// <summary>Decodes into a grow-only buffer; returns the BGR byte count.</summary>
+    private static int DecodeBgr(string path, ref byte[]? buf)
+    {
         using var bmp = SkiaSharp.SKBitmap.Decode(path);
         int w = bmp.Width, h = bmp.Height;
-        var bgr = new byte[w * h * 3];
+        var bgr = Grow(ref buf, w * h * 3);
         IntPtr px = bmp.GetPixels();
         int rb = bmp.RowBytes;
         unsafe
@@ -567,7 +585,7 @@ public static class Program
                 }
             }
         }
-        return bgr;
+        return w * h * 3;
     }
 
     private static int Check(string dir, string gcPath, string drPath, string tag)
