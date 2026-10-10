@@ -5,4 +5,3 @@ artifacts/
 *.user
 vstest*.log
 .windsurf/
-tests/testdata/realdae/*_gt.webp

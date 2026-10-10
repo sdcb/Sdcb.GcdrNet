@@ -76,10 +76,9 @@ dotnet test tests/Sdcb.GcdrNet.Tests -c Release
 Golden outputs come from onnxruntime runs of the simplified models (CPU ≤ 1e-4 /
 Vulkan ≤ 5e-4); regenerate with `dotnet run --project tools/GenGolden` (pure C#:
 OnnxRuntime oracle + SkiaSharp decode). `tests/testdata/realdae/` holds a 50-image
-RealDAE corpus (`NN_<color|shadow|bleed>.webp` inputs, committed) plus paired
-`NN_gt.webp` ground truths which are local-only data (gitignored); `CorpusTests`
-smoke-tests decode→enhance, and the benchmark's `--corpus [cpu|vulkan]` mode
-reports per-image ms, MP/s, memory and PSNR/MAE vs the `_gt` pairs.
+RealDAE corpus (`NN_<color|shadow|bleed>.webp` + paired `NN_gt.webp` ground truths);
+`CorpusTests` smoke-tests decode→enhance, and the benchmark's `--corpus [cpu|vulkan]`
+mode reports per-image ms, MP/s, memory and PSNR/MAE vs the `_gt` pairs.
 Kernel dispatch follows the runtime's
 `IsSupported` flags, so ISA tiers are exercised via the standard runtime knobs —
 `test-all.ps1` runs `DOTNET_EnableAVX2=0` (128-bit `Vector<float>`),
@@ -146,10 +145,10 @@ dotnet test tests/Sdcb.GcdrNet.Tests -c Release
 
 golden 由 onnxruntime 对简化模型跑出（CPU 阈值 ≤1e-4 / Vulkan ≤5e-4）；
 重新生成用 `dotnet run --project tools/GenGolden`（纯 C#，OnnxRuntime oracle +
-SkiaSharp 解码）。`tests/testdata/realdae/` 存 50 张 RealDAE 语料输入
-（`NN_<color|shadow|bleed>.webp`，已入库）及配对 `NN_gt.webp` 基准图（本地
-数据，已 gitignore）；`CorpusTests` 做 decode→enhance 冒烟，benchmark
-`--corpus [cpu|vulkan]` 按图报耗时、MP/s、内存及对照 `_gt` 的 PSNR/MAE。
+SkiaSharp 解码）。`tests/testdata/realdae/` 存 50 张 RealDAE 语料
+（`NN_<color|shadow|bleed>.webp` 及配对 `NN_gt.webp` 基准图）；`CorpusTests`
+做 decode→enhance 冒烟，benchmark `--corpus [cpu|vulkan]` 按图报耗时、MP/s、
+内存及对照 `_gt` 的 PSNR/MAE。
 内核分发直接跟随 runtime 的 `IsSupported` 标志，
 改 CPU 内核请用 `test-all.ps1` 跑 ISA 矩阵：
 `DOTNET_EnableAVX2=0`（128 位 Vector）、`DOTNET_EnableAVX=0`（SSE 无 FMA）、
