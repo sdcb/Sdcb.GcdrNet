@@ -117,8 +117,13 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     }
 
     /// <summary>Per-worker device-arena budget (gc + dr). Within it the arena is grow-only
-    /// (12.5% headroom on the first allocation, 25% on regrowth) so mixed sizes don't reallocate.</summary>
-    internal const ulong ArenaBudget = 3UL << 30;
+    /// (12.5% headroom on the first allocation, 25% on regrowth) so mixed sizes don't reallocate.
+    /// 3 GB; on integrated GPUs the "device-local" heap is system RAM shared with the CPU, so
+    /// the budget is also capped at a quarter of that heap.</summary>
+    internal ulong ArenaBudget => BudgetFor(_dev);
+
+    internal static ulong BudgetFor(VkDevice dev) =>
+        dev.UnifiedMemory && dev.DeviceLocalHeap > 0 ? Math.Min(3UL << 30, dev.DeviceLocalHeap / 4) : 3UL << 30;
 
     /// <summary>Device bytes held by this worker (arena + BGR staging).</summary>
     internal long DeviceBytes => (long)((_arena?.Size ?? 0) + (_bgrIn?.Size ?? 0) + (_bgrOut?.Size ?? 0));

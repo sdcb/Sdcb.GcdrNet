@@ -40,7 +40,8 @@ public sealed class GcdrEnhancer : IDisposable
     // Vulkan workers are size-agnostic (budgeted grow-only arenas, re-record on size
     // change): one pool serves every size; idle workers beyond the first are kept
     // only while their device memory fits the budget
-    private const long VkIdleBudget = 3L << 30;
+    // (3 GB; integrated GPUs: at most a quarter of the shared device-local heap)
+    private static long VkIdleBudget => (long)Backends.Vulkan.VkGcdrPipeline.BudgetFor(Backends.Vulkan.VkBackend.Default.Dev);
     private SizePool<Backends.Vulkan.VkGcdrPipeline>? _vkPool;
     private long _poolsCreated, _workersCreated, _poolsEvicted;
 
