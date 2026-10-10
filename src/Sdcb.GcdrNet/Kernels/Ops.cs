@@ -43,13 +43,6 @@ internal static unsafe class Ops
         int pt = p.Pads[0], pl = p.Pads[1], pb = p.Pads[2], pr = p.Pads[3];
         int group = p.Group;
 
-        if (!Vector.IsHardwareAccelerated)
-        {
-            ConvScalar(src, ic, ih, iw, w, bias, dst, oc, oh, ow, kh, kw, sh, sw,
-                pt, pl, group, p.PadMode, p.PadValue, p.Act);
-            return;
-        }
-
         bool symmetricPad = pt == pb && pl == pr;
         if (Avx2.IsSupported && Fma.IsSupported)
         {
@@ -62,22 +55,33 @@ internal static unsafe class Ops
             if (group == 1 && kh == 3 && kw == 3 && oc % 4 == 0 && symmetricPad)
             {
                 if (sh == 1 && sw == 1)
+                {
                     Avx2Kernels.Conv3x3S1(src, ic, ih, iw, w, bias, dst, oc, oh, ow,
                         pt, pl, p.PadMode, p.PadValue, p.Act);
-                else if (sh == 2 && sw == 2)
+                    return;
+                }
+                if (sh == 2 && sw == 2)
+                {
                     Avx2Kernels.Conv3x3S2(src, ic, ih, iw, w, bias, dst, oc, oh, ow,
                         pt, pl, p.PadMode, p.PadValue, p.Act);
-                else goto vec;
-                return;
+                    return;
+                }
             }
             if (group == 1 && kh == 1 && kw == 1 && sh == 1 && sw == 1 && pt == 0 && pl == 0 && pb == 0 && pr == 0)
             {
                 Avx2Kernels.Conv1x1(src, ic, ih * iw, w, bias, dst, oc, p.Act);
                 return;
             }
+            // unspecialized shape: fall through to the Vector<float> tier
+        }
+        else if (!Vector.IsHardwareAccelerated)
+        {
+            ConvScalar(src, ic, ih, iw, w, bias, dst, oc, oh, ow, kh, kw, sh, sw,
+                pt, pl, group, p.PadMode, p.PadValue, p.Act);
+            return;
         }
 
-    vec:
+        // Vector<float> tier
         if (group > 1)
         {
             if (group != ic)   // grouped (non-depthwise) conv: scalar reference handles groups correctly
