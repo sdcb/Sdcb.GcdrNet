@@ -34,7 +34,7 @@ The model is a two-stage pipeline:
 | Path | Time | vs PyTorch baseline |
 |---|---|---|
 | Vulkan e2e (incl. upload/download + pre/post) | **~30.8 ms** | PyTorch pure inference 30.5 ms; with pre/post 57.2 ms |
-| Vulkan corpus (49 RealDAE, 0.7–5.2 MP, cold per-size) | **~139 ms/img, 27.5 MP/s** | PSNR 24.5 dB vs `_gt` (49 pairs); ~5.3 GB live VRAM |
+| Vulkan corpus (49 RealDAE mixed sizes) | **~139 ms/img, 27.5 MP/s** | methodology + per-image numbers: [docs/corpus.md](docs/corpus.md) |
 | CPU AVX2 (16 threads) e2e | ~758 ms | — |
 
 ### Quick start
@@ -117,7 +117,7 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 | 路径 | 耗时 | 对比 PyTorch |
 |---|---|---|
 | Vulkan 端到端（含上下行+前后处理） | **~30.8 ms** | PyTorch 纯推理 30.5 ms / 含前后处理 57.2 ms |
-| Vulkan corpus（49 张 RealDAE，0.7–5.2 MP，各尺寸冷管线） | **~139 ms/张，27.5 MP/s** | 对照 `_gt` PSNR 24.5 dB（49 对）；显存驻留 ~5.3 GB |
+| Vulkan corpus（49 张 RealDAE 混合尺寸） | **~139 ms/张，27.5 MP/s** | 口径与逐图数据见 [docs/corpus.md](docs/corpus.md) |
 | CPU AVX2（16 线程）端到端 | ~758 ms | — |
 
 ### 快速上手
