@@ -354,6 +354,7 @@ internal sealed class VkGraphModel : IDisposable
             case ExecOp.Conv:
             {
                 var p = (ConvP)n.P!;
+                if (p.Pool is not null) throw new NotSupportedException("Vulkan: fused conv+pool is a CPU-plan op.");
                 RequireNhwc(n.In[0]); RequireNhwc(n.Out[0]);
                 if (p.AddValue >= 0) RequireNhwc(p.AddValue);
                 int[] si = shapeIn(0), sw_ = V[n.In[1]].Shape, so = shapeOut();   // [1,h,w,c]
@@ -483,6 +484,7 @@ internal sealed class VkGraphModel : IDisposable
             case ExecOp.UpHead:
             {
                 var p = (UpHeadP)n.P!;
+                if (p.SkipConv is not null) throw new NotSupportedException("Vulkan: UpHead skip recompute is a CPU-plan op.");
                 RequireNhwc(n.In[0]); RequireNhwc(n.In[1]); RequireNhwc(n.Out[0]);
                 int[] si = shapeIn(0), so = shapeOut();
                 uint c = (uint)si[3], oc = (uint)so[3];

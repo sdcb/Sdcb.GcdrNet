@@ -43,6 +43,8 @@ internal sealed class ConvP
     public int BiasValue = -1;       // value id of per-channel bias, -1 none
     public int AddValue = -1;        // value id of same-shape residual addend, -1 none
     public object? KernelPlan;       // packed weights / kernel choice, filled at plan build
+    // CPU NHWC plans: fused 2x2/2 max pool epilogue — Out[0] is the pooled tensor
+    public PoolP? Pool;
 }
 
 internal sealed class PoolP
@@ -93,6 +95,9 @@ internal sealed class UpHeadP
     public bool SkipRelu;
     public ActivationKind Act;
     public object? KernelPlan;      // backend-private packed weights
+    // CPU NHWC plans: In[1] is the input of this (still scheduled) conv and the skip is
+    // recomputed row by row, so the full-resolution skip tensor need not stay live
+    public ConvP? SkipConv;
 }
 
 internal sealed class PadP
@@ -188,9 +193,11 @@ internal sealed class ExecPlan
 }
 
 /// <summary>Plan compilation options.</summary>
-internal sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false)
+internal sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false, bool CpuFusions = true)
 {
     /// <summary>GCDRNET_NHWC=0 forces the legacy all-NCHW plan (A/B oracle).</summary>
     public static bool DefaultNhwc { get; } = Environment.GetEnvironmentVariable("GCDRNET_NHWC") != "0";
     public static CompileOptions Default => new(DefaultNhwc);
+    /// <summary>GCDRNET_NOFUSE_MEM=1 disables the CPU memory fusions (conv+pool, skip recompute).</summary>
+    public static bool MemFusions { get; } = Environment.GetEnvironmentVariable("GCDRNET_NOFUSE_MEM") != "1";
 }

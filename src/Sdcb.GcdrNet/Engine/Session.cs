@@ -241,6 +241,12 @@ public sealed unsafe class InferenceSession : IDisposable
             {
                 var p = (ConvP)n.P!;
                 int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape;
+                if (p.Pool is not null)
+                {
+                    Nhwc.ConvPool(GetIn(n.In[0]), i[1], i[2], i[3], GetSpan(n.Out[0]), o[1], o[2], o[3],
+                        p, (NhwcConvPlan)p.KernelPlan!);
+                    return true;
+                }
                 ReadOnlySpan<float> add = p.AddValue >= 0 ? GetIn(p.AddValue) : ReadOnlySpan<float>.Empty;
                 Nhwc.Conv(GetIn(n.In[0]), i[1], i[2], i[3], GetSpan(n.Out[0]), o[1], o[2], o[3],
                     p, (NhwcConvPlan)p.KernelPlan!, add);
@@ -264,9 +270,9 @@ public sealed unsafe class InferenceSession : IDisposable
             case ExecOp.UpHead:
             {
                 var p = (UpHeadP)n.P!;
-                int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape;
+                int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape, k = values[n.In[1]].PhysShape;
                 Nhwc.UpHead(GetIn(n.In[0]), i[1], i[2], i[3], GetIn(n.In[1]), GetSpan(n.Out[0]), o[1], o[2],
-                    p.Scales[2], p.Scales[3], p, (UpHeadPlan)p.KernelPlan!);
+                    p.Scales[2], p.Scales[3], p, (UpHeadPlan)p.KernelPlan!, k[1], k[2], k[3]);
                 return true;
             }
             case ExecOp.Pad:

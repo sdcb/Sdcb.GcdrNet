@@ -64,95 +64,126 @@ internal static unsafe partial class Nhwc
         return u;
     }
 
+    /// <summary>Per-call Winograd constants shared by every tile block.</summary>
+    private readonly unsafe struct WinoArgs
+    {
+        public readonly float* Src, U, Bias, PadVec;
+        public readonly int Ih, Iw, Ic, Oh, Ow, Oc, Tw, T, Nb, PadT, PadL;
+        public readonly bool Reflect, Avx;
+        public readonly ActivationKind Act;
+
+        public WinoArgs(float* src, float* u, float* bias, float* padVec, int ih, int iw, int ic,
+            int oh, int ow, int oc, int nb, ConvP p)
+        {
+            Src = src; U = u; Bias = bias; PadVec = padVec;
+            Ih = ih; Iw = iw; Ic = ic; Oh = oh; Ow = ow; Oc = oc; Nb = nb;
+            Tw = (ow + 3) / 4;
+            T = Math.Clamp(65536 / (36 * ic) / Tile * Tile, Tile, 60);   // V block ~256 KB
+            PadT = p.Pads[0]; PadL = p.Pads[1];
+            Reflect = p.PadMode == PadMode.Reflect;
+            Avx = UseAvx;
+            Act = p.Act;
+        }
+    }
+
     private static void WinogradConv(ReadOnlySpan<float> src, int ih, int iw, int ic,
         Span<float> dst, int oh, int ow, int oc, ConvP p, NhwcConvPlan kp, ReadOnlySpan<float> add)
     {
-        int th = (oh + 3) / 4, tw = (ow + 3) / 4, nt = th * tw;
-        int T = Math.Clamp(65536 / (36 * ic) / Tile * Tile, Tile, 60);   // V block ~256 KB
-        int chunks = (nt + T - 1) / T;
-        int nb = kp.Blocks, padT = p.Pads[0], padL = p.Pads[1];
-        bool reflect = p.PadMode == PadMode.Reflect, hasAdd = !add.IsEmpty, avx = UseAvx;
         float[] padVec = new float[ic];
         Array.Fill(padVec, p.PadValue);
-        ActivationKind act = p.Act;
-        int vSize = 36 * T * ic, mSize = 36 * T * Ob;
-        fixed (float* sp0 = src, dp0 = dst, ap0 = add, up0 = kp.WinoU, bp0 = kp.Bias, pv0 = padVec)
+        bool hasAdd = !add.IsEmpty;
+        fixed (float* sp = src, dp0 = dst, ap0 = add, up = kp.WinoU, bp = kp.Bias, pv = padVec)
         {
-            float* sp = sp0, dp = dp0, ap = ap0, up = up0, bp = bp0, pv = pv0;
+            var a = new WinoArgs(sp, up, bp, pv, ih, iw, ic, oh, ow, oc, kp.Blocks, p);
+            int nt = (oh + 3) / 4 * a.Tw, chunks = (nt + a.T - 1) / a.T;
+            float* dp = dp0, ap = hasAdd ? ap0 : null;
             For(chunks, (long)oh * ow * oc * ic, chunk =>
             {
-                int need = vSize + mSize + 16 * Ob + Ob;
-                float[] buf = t_wino is { } tb && tb.Length >= need ? tb : (t_wino = new float[need]);
-                fixed (float* b0 = buf)
-                {
-                    float* V = b0, M = b0 + vSize, tmp = M + mSize, zero = tmp + 16 * Ob;
-                    new Span<float>(zero, Ob).Clear();
-                    int t0 = chunk * T, tn = Math.Min(T, nt - t0);
-                    float** dp6 = stackalloc float*[36];
-                    for (int t = 0; t < tn; t++)
-                    {
-                        int ty = (t0 + t) / tw, tx = (t0 + t) % tw;
-                        int iy0 = ty * 4 - padT, ix0 = tx * 4 - padL;
-                        for (int i = 0; i < 6; i++)
-                        {
-                            int r = SrcIdx(iy0 + i, ih, reflect);
-                            for (int j = 0; j < 6; j++)
-                            {
-                                int c = SrcIdx(ix0 + j, iw, reflect);
-                                dp6[i * 6 + j] = r < 0 || c < 0 ? pv : sp + ((long)r * iw + c) * ic;
-                            }
-                        }
-                        InputTransform(dp6, ic, V + (long)t * ic, (long)T * ic);
-                    }
+                int t0 = chunk * a.T;
+                WinoTiles(a, t0, Math.Min(a.T, nt - t0), dp, ap, 0);
+            });
+        }
+    }
 
-                    float** ptrs = stackalloc float*[Tile];
-                    for (int blk = 0; blk < nb; blk++)
+    /// <summary>
+    /// Tiles [t0, t0+tn) (raster order, tn &lt;= T) of one Winograd conv, written to
+    /// <paramref name="dp"/> whose row 0 is output row <paramref name="rowBase"/> (rows past
+    /// Oh are skipped). Every tile's math is independent of how tiles are grouped.
+    /// </summary>
+    private static void WinoTiles(in WinoArgs a, int t0, int tn, float* dp, float* ap, int rowBase)
+    {
+        int ic = a.Ic, T = a.T, tw = a.Tw, nb = a.Nb, oc = a.Oc, ow = a.Ow, oh = a.Oh;
+        bool avx = a.Avx, hasAdd = ap != null;
+        int vSize = 36 * T * ic, mSize = 36 * T * Ob;
+        int need = vSize + mSize + 16 * Ob + Ob;
+        float[] buf = t_wino is { } tb && tb.Length >= need ? tb : (t_wino = new float[need]);
+        fixed (float* b0 = buf)
+        {
+            float* V = b0, M = b0 + vSize, tmp = M + mSize, zero = tmp + 16 * Ob;
+            new Span<float>(zero, Ob).Clear();
+            float** dp6 = stackalloc float*[36];
+            for (int t = 0; t < tn; t++)
+            {
+                int ty = (t0 + t) / tw, tx = (t0 + t) % tw;
+                int iy0 = ty * 4 - a.PadT, ix0 = tx * 4 - a.PadL;
+                for (int i = 0; i < 6; i++)
+                {
+                    int r = SrcIdx(iy0 + i, a.Ih, a.Reflect);
+                    for (int j = 0; j < 6; j++)
                     {
-                        int lanes = Math.Min(Ob, oc - blk * Ob);
-                        for (int xi = 0; xi < 36; xi++)
+                        int c = SrcIdx(ix0 + j, a.Iw, a.Reflect);
+                        dp6[i * 6 + j] = r < 0 || c < 0 ? a.PadVec : a.Src + ((long)r * a.Iw + c) * ic;
+                    }
+                }
+                InputTransform(dp6, ic, V + (long)t * ic, (long)T * ic);
+            }
+
+            float** ptrs = stackalloc float*[Tile];
+            for (int blk = 0; blk < nb; blk++)
+            {
+                int lanes = Math.Min(Ob, oc - blk * Ob);
+                for (int xi = 0; xi < 36; xi++)
+                {
+                    float* wb = a.U + ((long)xi * nb + blk) * ic * Ob;
+                    float* vx = V + (long)xi * T * ic, mx = M + (long)xi * T * Ob;
+                    for (int r0 = 0; r0 < tn; r0 += Tile)
+                    {
+                        int rows = Math.Min(Tile, tn - r0);
+                        for (int i = 0; i < Tile; i++) ptrs[i] = vx + (long)(r0 + Math.Min(i, rows - 1)) * ic;
+                        if (avx) TileAvx(ptrs, rows, 1, ic, wb, zero, mx + (long)r0 * Ob, null, Ob, Ob, ActivationKind.None);
+                        else TileVec(ptrs, rows, 1, ic, wb, zero, mx + (long)r0 * Ob, null, Ob, Ob, ActivationKind.None);
+                    }
+                }
+                float* bb = a.Bias + blk * Ob;
+                for (int t = 0; t < tn; t++)
+                {
+                    int ty = (t0 + t) / tw, tx = (t0 + t) % tw;
+                    OutputTransform(M + (long)t * Ob, (long)T * Ob, tmp);
+                    for (int py = 0; py < 4; py++)
+                    {
+                        int oy = ty * 4 + py;
+                        if (oy >= oh) break;
+                        for (int px = 0; px < 4; px++)
                         {
-                            float* wb = up + ((long)xi * nb + blk) * ic * Ob;
-                            float* vx = V + (long)xi * T * ic, mx = M + (long)xi * T * Ob;
-                            for (int r0 = 0; r0 < tn; r0 += Tile)
-                            {
-                                int rows = Math.Min(Tile, tn - r0);
-                                for (int i = 0; i < Tile; i++) ptrs[i] = vx + (long)(r0 + Math.Min(i, rows - 1)) * ic;
-                                if (avx) TileAvx(ptrs, rows, 1, ic, wb, zero, mx + (long)r0 * Ob, null, Ob, Ob, ActivationKind.None);
-                                else TileVec(ptrs, rows, 1, ic, wb, zero, mx + (long)r0 * Ob, null, Ob, Ob, ActivationKind.None);
-                            }
-                        }
-                        float* bb = bp + blk * Ob;
-                        for (int t = 0; t < tn; t++)
-                        {
-                            int ty = (t0 + t) / tw, tx = (t0 + t) % tw;
-                            OutputTransform(M + (long)t * Ob, (long)T * Ob, tmp);
-                            for (int py = 0; py < 4; py++)
-                            {
-                                int oy = ty * 4 + py;
-                                if (oy >= oh) break;
-                                for (int px = 0; px < 4; px++)
+                            int ox = tx * 4 + px;
+                            if (ox >= ow) break;
+                            long o = ((long)(oy - rowBase) * ow + ox) * oc + blk * Ob;
+                            float* tp = tmp + (py * 4 + px) * Ob;
+                            if (avx)
+                                Store16(dp + o, hasAdd ? ap + o : null,
+                                    Avx.Add(Avx.LoadVector256(tp), Avx.LoadVector256(bb)),
+                                    Avx.Add(Avx.LoadVector256(tp + 8), Avx.LoadVector256(bb + 8)), lanes, a.Act);
+                            else
+                                for (int l = 0; l < lanes; l++)
                                 {
-                                    int ox = tx * 4 + px;
-                                    if (ox >= ow) break;
-                                    long o = ((long)oy * ow + ox) * oc + blk * Ob;
-                                    float* tp = tmp + (py * 4 + px) * Ob;
-                                    if (avx)
-                                        Store16(dp + o, hasAdd ? ap + o : null,
-                                            Avx.Add(Avx.LoadVector256(tp), Avx.LoadVector256(bb)),
-                                            Avx.Add(Avx.LoadVector256(tp + 8), Avx.LoadVector256(bb + 8)), lanes, act);
-                                    else
-                                        for (int l = 0; l < lanes; l++)
-                                        {
-                                            float v = tp[l] + bb[l];
-                                            if (hasAdd) v += ap[o + l];
-                                            dp[o + l] = ActS(v, act);
-                                        }
+                                    float v = tp[l] + bb[l];
+                                    if (hasAdd) v += ap[o + l];
+                                    dp[o + l] = ActS(v, a.Act);
                                 }
-                            }
                         }
                     }
                 }
-            });
+            }
         }
     }
 

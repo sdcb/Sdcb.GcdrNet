@@ -75,6 +75,35 @@ public class EngineTests
     }
 
     [Fact]
+    public void MemFusions_BitIdentical_AndShrinkArena()
+    {
+        // conv+maxpool and UpHead skip recompute must be present in CPU NHWC plans, must
+        // not change a single bit of the output, and must shrink the arena
+        foreach (var (path, c) in new[] { (GcPath, 3), (DrPath, 6) })
+        {
+            OnnxModel m = OnnxModel.Load(path);
+            int[] shape = [1, c, 96, 128];
+            var rnd = new Random(7);
+            float[] input = Enumerable.Range(0, c * 96 * 128).Select(_ => (float)rnd.NextDouble()).ToArray();
+            (float[] y, ExecPlan p) Run(bool fuse)
+            {
+                ExecPlan p = GraphCompiler.Compile(m, shape, new CompileOptions(Nhwc: true, PhysicalIo: true, CpuFusions: fuse));
+                using var s = new InferenceSession(p);
+                input.CopyTo(s.Input); s.Run();
+                return (s.Output.ToArray(), p);
+            }
+            var (fy, fp) = Run(true);
+            var (uy, up) = Run(false);
+            string name = Path.GetFileName(path);
+            Assert.Equal(3, fp.Nodes.Count(n => n.P is ConvP { Pool: not null }));
+            Assert.DoesNotContain(fp.Nodes, n => n.Op == ExecOp.MaxPool);
+            Assert.Contains(fp.Nodes, n => n.P is UpHeadP { SkipConv: not null });
+            Assert.True(fp.ArenaFloats * 2 < up.ArenaFloats, $"{name}: arena {fp.ArenaFloats} vs unfused {up.ArenaFloats}");
+            Assert.True(fy.AsSpan().SequenceEqual(uy), $"{name}: fused output differs");
+        }
+    }
+
+    [Fact]
     public void NoFuse_MatchesFused()
     {
         float[] input = Golden.F32("small", "input");

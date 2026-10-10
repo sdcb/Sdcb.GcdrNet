@@ -22,8 +22,8 @@ internal sealed unsafe class VkBackend : IDisposable
     /// Standalone sessions keep logical NCHW I/O (boundary relayouts in the plan);
     /// the fused pipeline keeps I/O physical and its glue shaders speak NHWC.
     /// </summary>
-    internal static CompileOptions PlanOptions => new(Nhwc: true, PhysicalIo: false);
-    internal static CompileOptions PipeOptions => new(Nhwc: true, PhysicalIo: true);
+    internal static CompileOptions PlanOptions => new(Nhwc: true, PhysicalIo: false, CpuFusions: false);
+    internal static CompileOptions PipeOptions => new(Nhwc: true, PhysicalIo: true, CpuFusions: false);
 
     /// <summary>fp16 activation/weight storage (needs storageBuffer16BitAccess; GCDRNET_VK_F16=0 forces fp32).</summary>
     internal bool F16 => Dev.StorageBuffer16 && Environment.GetEnvironmentVariable("GCDRNET_VK_F16") != "0";
