@@ -88,6 +88,56 @@ internal static class PixelOps
         static byte ToU8(float v) => (byte)Math.Clamp((int)(v * 255f + 0.5f), 0, 255);
     }
 
+    /// <summary>BGR u8 HWC → float NHWC [h][w][3] /255 with top/left replicate padding.</summary>
+    public static void BgrToNhwcPad(ReadOnlySpan<byte> src, int width, int height, int srcStride,
+        Span<float> dst, int h, int w, int padTop, int padLeft)
+    {
+        for (int y = 0; y < h; y++)
+        {
+            ReadOnlySpan<byte> row = src.Slice(Math.Max(0, y - padTop) * srcStride, width * 3);
+            Span<float> d = dst.Slice(y * w * 3, w * 3);
+            for (int x = 0; x < w; x++)
+            {
+                int sx = Math.Clamp(x - padLeft, 0, width - 1) * 3;
+                d[x * 3] = row[sx] / 255f;
+                d[x * 3 + 1] = row[sx + 1] / 255f;
+                d[x * 3 + 2] = row[sx + 2] / 255f;
+            }
+        }
+    }
+
+    /// <summary>
+    /// NHWC div6: dst[px,0..2] = x[px], dst[px,3..5] = clamp(x / max(shadow,1e-6), 0, 1).
+    /// x / shadow are [hw][3]; dst is [hw][6].
+    /// </summary>
+    public static void DivConcatNhwc(ReadOnlySpan<float> x, ReadOnlySpan<float> shadow, Span<float> dst)
+    {
+        int px = x.Length / 3;
+        for (int i = 0; i < px; i++)
+        {
+            int s = i * 3, d = i * 6;
+            for (int c = 0; c < 3; c++)
+            {
+                float v = x[s + c];
+                dst[d + c] = v;
+                dst[d + 3 + c] = Math.Clamp(v / Math.Max(shadow[s + c], 1e-6f), 0f, 1f);
+            }
+        }
+    }
+
+    /// <summary>float NHWC [h][w][3] → u8 BGR HWC, cropping (padTop,padLeft) margins.</summary>
+    public static void NhwcToBgrCrop(ReadOnlySpan<float> src, int h, int w,
+        int padTop, int padLeft, Span<byte> dst, int width, int height, int dstStride)
+    {
+        for (int y = 0; y < height; y++)
+        {
+            ReadOnlySpan<float> r = src.Slice(((y + padTop) * w + padLeft) * 3, width * 3);
+            Span<byte> drow = dst.Slice(y * dstStride, width * 3);
+            for (int i = 0; i < width * 3; i++)
+                drow[i] = (byte)Math.Clamp((int)(r[i] * 255f + 0.5f), 0, 255);
+        }
+    }
+
     /// <summary>float NCHW ↔ raw grayscale compare helper used in tests.</summary>
     public static float MaxDiff(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
