@@ -73,8 +73,14 @@ matching the reference Python implementation.
 dotnet test tests/Sdcb.GcdrNet.Tests -c Release
 ```
 
-Golden outputs come from onnxruntime runs of the simplified models (max diff ≤ 2e-3;
-Vulkan node-by-node vs CPU within ~1e-4). Kernel dispatch follows the runtime's
+Golden outputs come from onnxruntime runs of the simplified models (CPU ≤ 1e-4 /
+Vulkan ≤ 5e-4); regenerate with `dotnet run --project tools/GenGolden` (pure C#:
+OnnxRuntime oracle + SkiaSharp decode). `tests/testdata/realdae/` holds a manifest
+for a 50-image RealDAE corpus (`NN_<color|shadow|bleed>.webp` + paired `NN_gt.webp`) —
+the webp files are local-only data (gitignored); `CorpusTests` smoke-tests
+decode→enhance on them when present, and the benchmark's `--corpus [cpu|vulkan]`
+mode reports per-image ms, MP/s, memory and PSNR/MAE vs the `_gt` pairs.
+Kernel dispatch follows the runtime's
 `IsSupported` flags, so ISA tiers are exercised via the standard runtime knobs —
 `test-all.ps1` runs `DOTNET_EnableAVX2=0` (128-bit `Vector<float>`),
 `DOTNET_EnableAVX=0` (SSE, no FMA), `DOTNET_EnableHWIntrinsic=0` (scalar),
@@ -138,7 +144,13 @@ byte[] dst = enh.Enhance(bgrBytes, width: 1600, height: 1152);
 dotnet test tests/Sdcb.GcdrNet.Tests -c Release
 ```
 
-golden 由 onnxruntime 对简化模型跑出（阈值 ≤2e-3）；内核分发直接跟随 runtime 的
-`IsSupported` 标志，改 CPU 内核请用 `test-all.ps1` 跑 ISA 矩阵：
+golden 由 onnxruntime 对简化模型跑出（CPU 阈值 ≤1e-4 / Vulkan ≤5e-4）；
+重新生成用 `dotnet run --project tools/GenGolden`（纯 C#，OnnxRuntime oracle +
+SkiaSharp 解码）。`tests/testdata/realdae/` 存一份清单，对应 50 张 RealDAE
+语料（`NN_<color|shadow|bleed>.webp` + 配对 `NN_gt.webp`）——webp 为本地数据
+（已 gitignore）；`CorpusTests` 在文件存在时做 decode→enhance 冒烟，benchmark
+`--corpus [cpu|vulkan]` 按图报耗时、MP/s、内存及对照 `_gt` 的 PSNR/MAE。
+内核分发直接跟随 runtime 的 `IsSupported` 标志，
+改 CPU 内核请用 `test-all.ps1` 跑 ISA 矩阵：
 `DOTNET_EnableAVX2=0`（128 位 Vector）、`DOTNET_EnableAVX=0`（SSE 无 FMA）、
 `DOTNET_EnableHWIntrinsic=0`（纯标量）、`DOTNET_EnableAVX512=0`。
