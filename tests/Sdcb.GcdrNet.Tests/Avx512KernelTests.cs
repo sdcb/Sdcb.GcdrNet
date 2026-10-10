@@ -90,4 +90,43 @@ public class Avx512KernelTests
         NhwcConvPlan kp = Nhwc.PackGemm(bm, k, n, transB, bias);
         Both(dst => Nhwc.Gemm(a, m, k, dst, n, kp, (ActivationKind)act), m * n);
     }
+
+    [SkippableTheory]
+    [InlineData(32, 2, 2, 0, false)]
+    [InlineData(16, 3, 2, 1, true)]    // padded taps, fused relu
+    public void MaxPool_MatchesAvx2(int c, int k, int s, int pad, bool relu)
+    {
+        var rng = new Random(c + k);
+        int h = 19, w = 26, oh = (h + 2 * pad - k) / s + 1, ow = (w + 2 * pad - k) / s + 1;
+        float[] x = rng.Array(h * w * c);
+        var p = new PoolP { Kernel = [k, k], Strides = [s, s], Pads = [pad, pad, pad, pad], FuseRelu = relu };
+        Both(dst => Nhwc.MaxPool(x, h, w, c, dst, oh, ow, p), oh * ow * c);
+    }
+
+    [SkippableTheory]
+    [InlineData(32, true, true, true)]
+    [InlineData(16, false, false, false)]
+    [InlineData(24, true, false, true)]   // c % 16 != 0: generic resize
+    public void Resize_MatchesAvx2(int c, bool relu, bool addend, bool addRelu)
+    {
+        var rng = new Random(c);
+        int h = 13, w = 9, oh = 26, ow = 18;
+        float[] x = rng.Array(h * w * c), add = addend ? rng.Array(oh * ow * c) : [];
+        Both(dst => Nhwc.ResizeBilinear(x, h, w, c, dst, oh, ow, 2, 2,
+            relu ? ActivationKind.Relu : ActivationKind.None, add, addRelu), oh * ow * c);
+    }
+
+    [SkippableTheory]
+    [InlineData(32, 3, true, true, 2)]
+    [InlineData(16, 3, false, true, 0)]
+    [InlineData(24, 5, true, false, 1)]   // c % 16 != 0, oc 5
+    public void UpHead_MatchesAvx2(int c, int oc, bool resizeRelu, bool skipRelu, int act)
+    {
+        var rng = new Random(c * oc);
+        int h = 11, w = 15, oh = 22, ow = 30;   // ow % 4 != 0: partial pixel group
+        float[] x = rng.Array(h * w * c), skip = rng.Array(oh * ow * c), wt = rng.Array(oc * c), b = rng.Array(oc);
+        UpHeadPlan kp = Nhwc.PackUpHead(wt, oc, c, b);
+        var p = new UpHeadP { Scales = [1, 1, 2, 2], ResizeRelu = resizeRelu, SkipRelu = skipRelu, Act = (ActivationKind)act };
+        Both(dst => Nhwc.UpHead(x, h, w, c, skip, dst, oh, ow, 2, 2, p, kp), oh * ow * oc);
+    }
 }
