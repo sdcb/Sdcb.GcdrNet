@@ -288,6 +288,11 @@ internal static unsafe partial class Nhwc
         int VL = Vector<float>.Count;
         // software Vector<T> (DOTNET_EnableHWIntrinsic=0) is far slower than plain scalar
         bool vec = Vector.IsHardwareAccelerated && Ob % VL == 0;
+        if (vec && VL == 4)
+        {
+            TileVec4(ptrs, rows, taps, ic, wb, bb, outp, addp, oc, lanes, act);
+            return;
+        }
         float* acc = stackalloc float[Ob];
         for (int i = 0; i < rows; i++)
         {
@@ -313,6 +318,51 @@ internal static unsafe partial class Nhwc
             float* ad = addp == null ? null : addp + (long)i * oc;
             for (int l = 0; l < lanes; l++)
                 o[l] = ActS(ad != null ? acc[l] + ad[l] : acc[l], act);
+        }
+    }
+
+    /// <summary>
+    /// 128-bit Vector&lt;float&gt; tile (AVX2 disabled): two pixel rows × 16 oc in eight register
+    /// accumulators (+4 weight vectors), instead of a stack accumulator round-tripped through
+    /// memory on every multiply-add. Same per-lane op order (acc + w·x) as the generic loop.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void TileVec4(float** ptrs, int rows, int taps, int ic, float* wb, float* bb,
+        float* outp, float* addp, int oc, int lanes, ActivationKind act)
+    {
+        float* tmp = stackalloc float[2 * Ob];
+        for (int i = 0; i < rows; i += 2)
+        {
+            Vector<float> a0 = Simd.VectorLoad(bb), a1 = Simd.VectorLoad(bb + 4),
+                a2 = Simd.VectorLoad(bb + 8), a3 = Simd.VectorLoad(bb + 12);
+            Vector<float> c0 = a0, c1 = a1, c2 = a2, c3 = a3;
+            for (int tap = 0; tap < taps; tap++)
+            {
+                // ptrs holds Tile entries per tap (short tiles repeat their last pixel)
+                float* p = ptrs[tap * Tile + i], q = ptrs[tap * Tile + i + 1];
+                float* w = wb + (long)tap * ic * Ob;
+                for (int c = 0; c < ic; c++, w += Ob)
+                {
+                    Vector<float> w0 = Simd.VectorLoad(w), w1 = Simd.VectorLoad(w + 4),
+                        w2 = Simd.VectorLoad(w + 8), w3 = Simd.VectorLoad(w + 12);
+                    var vp = new Vector<float>(p[c]);
+                    a0 += w0 * vp; a1 += w1 * vp; a2 += w2 * vp; a3 += w3 * vp;
+                    var vq = new Vector<float>(q[c]);
+                    c0 += w0 * vq; c1 += w1 * vq; c2 += w2 * vq; c3 += w3 * vq;
+                }
+            }
+            Simd.VectorStore(tmp, a0); Simd.VectorStore(tmp + 4, a1);
+            Simd.VectorStore(tmp + 8, a2); Simd.VectorStore(tmp + 12, a3);
+            Simd.VectorStore(tmp + 16, c0); Simd.VectorStore(tmp + 20, c1);
+            Simd.VectorStore(tmp + 24, c2); Simd.VectorStore(tmp + 28, c3);
+            for (int r = 0; r < 2 && i + r < rows; r++)
+            {
+                float* o = outp + (long)(i + r) * oc;
+                float* ad = addp == null ? null : addp + (long)(i + r) * oc;
+                float* t = tmp + r * Ob;
+                for (int l = 0; l < lanes; l++)
+                    o[l] = ActS(ad != null ? t[l] + ad[l] : t[l], act);
+            }
         }
     }
 
