@@ -634,7 +634,9 @@ internal sealed class VkGraphModel : IDisposable
         {
             return new VkDispatch
             {
-                Pipe = _dev.GetPipeline(Sh(shader), binds.Length, pc.Length),
+                Pipe = shader.StartsWith("conv_cm", StringComparison.Ordinal)
+                    ? _dev.GetCoopPipeline(shader, binds.Length, pc.Length)
+                    : _dev.GetPipeline(Sh(shader), binds.Length, pc.Length),
                 Pc = pc, Binds = binds, Gx = gx, Gy = gy, Gz = gz,
                 Name = $"{shader}({n.Name})",
             };

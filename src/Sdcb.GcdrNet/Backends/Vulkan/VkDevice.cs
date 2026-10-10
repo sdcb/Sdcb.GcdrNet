@@ -20,8 +20,24 @@ internal unsafe sealed class VkDevice : IDisposable
     public ulong MaxStorageRange = uint.MaxValue;
     public bool PushDescriptors;
     /// <summary>VK_KHR_cooperative_matrix with a 16x16x16 fp16 x fp16 -> fp32 subgroup
-    /// config, 32-lane subgroups and shaderFloat16 (tensor-core convs; GCDRNET_VK_COOPMAT=0 disables).</summary>
+    /// config, 32-lane subgroups and shaderFloat16 (tensor-core convs; GCDRNET_VK_COOPMAT=0 disables).
+    /// Devices whose default compute subgroup is not 32 lanes (RDNA wave64) qualify only when
+    /// VK_EXT_subgroup_size_control can pin it to 32 (<see cref="CoopSubgroupSize"/>) and a probe
+    /// dispatch confirms 32-lane subgroups; otherwise the convs stay on conv_tile.</summary>
     public bool CoopMat16;
+    /// <summary>requiredSubgroupSize for the coopmat pipelines: 0 = device default (already 32),
+    /// 32 = pinned through VK_EXT_subgroup_size_control.</summary>
+    public uint CoopSubgroupSize;
+    /// <summary>Coopmat convs use the LITE variants (single-buffered 28 KB staging, scalar epilogue,
+    /// grouped raster): wave64-capable parts or less than the 48 KB shared memory the
+    /// double-buffered kernels take.</summary>
+    public bool CoopLite;
+    /// <summary>VK_EXT_subgroup_size_control range (1..128 when the extension is absent).</summary>
+    public uint SubgroupMin = 1, SubgroupMax = 128;
+    /// <summary>Largest DEVICE_LOCAL heap (bytes).</summary>
+    public ulong DeviceLocalHeap;
+    /// <summary>Integrated GPU: "device-local" memory is system RAM shared with the CPU.</summary>
+    public bool UnifiedMemory;
     private unsafe delegate* unmanaged[Cdecl]<IntPtr, uint, IntPtr, uint, uint, Vk.VkWriteDescriptorSet*, void> _pushDesc;
     public double TimestampPeriodNs = 1;
     private IntPtr _commandPool;
@@ -43,23 +59,33 @@ internal unsafe sealed class VkDevice : IDisposable
     public readonly object Sync = new();
     /// <summary>vkQueueSubmit on the single compute queue is externally synchronized.</summary>
     public readonly object QueueLock = new();
-    private readonly Dictionary<(string name, int bindings, int pcBytes), VkPipeline> _pipes = new();
+    private readonly Dictionary<(string name, int bindings, int pcBytes, uint sg), VkPipeline> _pipes = new();
 
     /// <summary>Process-wide pipeline cache: every graph/session shares one
     /// VkPipeline per (shader, binding-count, push-const-size). Set layouts carry
     /// PUSH_DESCRIPTOR_BIT when the extension is available.</summary>
-    public VkPipeline GetPipeline(string name, int bindings, int pcBytes)
+    public VkPipeline GetPipeline(string name, int bindings, int pcBytes, uint requiredSubgroupSize = 0)
     {
-        var key = (name, bindings, pcBytes);
+        var key = (name, bindings, pcBytes, requiredSubgroupSize);
         lock (_pipes)
         {
             if (_pipes.TryGetValue(key, out VkPipeline? p)) return p;
-            p = NewPipeline(NewShaderModule(VkShaders.Load(name)), bindings, pcBytes, PushDescriptors);
+            p = NewPipeline(NewShaderModule(VkShaders.Load(name)), bindings, pcBytes, PushDescriptors, requiredSubgroupSize);
             p.Name = name;
             p.Bindings = bindings;
             _pipes[key] = p;
             return p;
         }
+    }
+
+    /// <summary>Pipeline of a conv_cm variant ("conv_cm", "conv_cm_n64", ...; fp16 storage): the
+    /// LITE build on <see cref="CoopLite"/> devices (or when <paramref name="lite"/> forces it),
+    /// with the subgroup pinned to <see cref="CoopSubgroupSize"/>.</summary>
+    public VkPipeline GetCoopPipeline(string variant, int bindings, int pcBytes, bool? lite = null)
+    {
+        if (!variant.StartsWith("conv_cm", StringComparison.Ordinal)) throw new ArgumentException(variant);
+        string name = (lite ?? CoopLite) ? "conv_cm_l" + variant["conv_cm".Length..] : variant;
+        return GetPipeline(name + "_h", bindings, pcBytes, CoopSubgroupSize);
     }
 
     public static VkDevice Create(uint deviceIndex = 0)
@@ -137,7 +163,7 @@ internal unsafe sealed class VkDevice : IDisposable
         byte* wantPush = stackalloc byte[] { (byte)'V', (byte)'K', (byte)'_', (byte)'K', (byte)'H', (byte)'R',
             (byte)'_', (byte)'p', (byte)'u', (byte)'s', (byte)'h', (byte)'_', (byte)'d', (byte)'e', (byte)'s', (byte)'c',
             (byte)'r', (byte)'i', (byte)'p', (byte)'t', (byte)'o', (byte)'r', 0 };
-        bool hasPush = false, hasCoop = false, hasF16Int8 = false, hasVmm = false;
+        bool hasPush = false, hasCoop = false, hasF16Int8 = false, hasVmm = false, hasSgc = false;
         for (int i = 0; i < (int)next; i++)
         {
             string en = new((sbyte*)exts[i].ExtensionName);
@@ -145,6 +171,7 @@ internal unsafe sealed class VkDevice : IDisposable
             else if (en == "VK_KHR_cooperative_matrix") hasCoop = true;
             else if (en == "VK_KHR_shader_float16_int8") hasF16Int8 = true;
             else if (en == "VK_KHR_vulkan_memory_model") hasVmm = true;
+            else if (en == "VK_EXT_subgroup_size_control") hasSgc = true;
         }
         if (Environment.GetEnvironmentVariable("GCDRNET_VK_NOPUSH") == "1") hasPush = false;
 
@@ -155,9 +182,18 @@ internal unsafe sealed class VkDevice : IDisposable
             QueueFamilyIndex = d.QueueFamily, QueueCount = 1, PQueuePriorities = &prio,
         };
         Vk.VkPhysicalDeviceSubgroupProperties sgP = new() { SType = VkConst.StPhysicalDeviceSubgroupProperties };
+        Vk.VkPhysicalDeviceSubgroupSizeControlProperties sgcP = new() { SType = VkConst.StPhysicalDeviceSubgroupSizeControlPropertiesEXT };
+        if (hasSgc) sgP.PNext = &sgcP;
         Vk.VkPhysicalDeviceProperties2 p2 = new() { SType = VkConst.StPhysicalDeviceProperties2, PNext = &sgP };
         Vk.vkGetPhysicalDeviceProperties2(d.PhysDevice, &p2);
         d.SubgroupSize = sgP.SubgroupSize;
+        bool sgcCompute = false;
+        if (hasSgc)
+        {
+            d.SubgroupMin = sgcP.MinSubgroupSize;
+            d.SubgroupMax = sgcP.MaxSubgroupSize;
+            sgcCompute = (sgcP.RequiredSubgroupSizeStages & VkConst.StageComputeShader) != 0;
+        }
 
         // Query storageBuffer16BitAccess (VK 1.1 core) for fp16 activation storage.
         Vk.VkPhysicalDevice16BitStorageFeatures feat16 = new()
@@ -177,25 +213,34 @@ internal unsafe sealed class VkDevice : IDisposable
         Vk.VkPhysicalDeviceShaderFloat16Int8Features f16q = new() { SType = VkConst.StPhysicalDeviceShaderFloat16Int8Features };
         Vk.VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopQ = new() { SType = VkConst.StPhysicalDeviceCooperativeMatrixFeaturesKHR };
         Vk.VkPhysicalDeviceVulkanMemoryModelFeatures vmmQ = new() { SType = VkConst.StPhysicalDeviceVulkanMemoryModelFeatures };
-        bool wantCm = hasCoop && hasF16Int8 && hasVmm && d.StorageBuffer16 && d.SubgroupSize == 32
+        Vk.VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sgcQ = new() { SType = VkConst.StPhysicalDeviceSubgroupSizeControlFeaturesEXT };
+        // a default other than 32 lanes (RDNA: wave64) needs the compute subgroup pinned to 32
+        bool pinSg32 = d.SubgroupSize != 32 && hasSgc && sgcCompute && d.SubgroupMin <= 32 && d.SubgroupMax >= 32
+            && Environment.GetEnvironmentVariable("GCDRNET_VK_SG32") != "0";
+        bool wantCm = hasCoop && hasF16Int8 && hasVmm && d.StorageBuffer16 && (d.SubgroupSize == 32 || pinSg32)
             && Environment.GetEnvironmentVariable("GCDRNET_VK_COOPMAT") != "0";
         if (wantCm)
         {
             f16q.PNext = &coopQ;
             coopQ.PNext = &vmmQ;
+            if (pinSg32) vmmQ.PNext = &sgcQ;
             Vk.VkPhysicalDeviceFeatures2 fq = new() { SType = VkConst.StPhysicalDeviceFeatures2, PNext = &f16q };
             Vk.vkGetPhysicalDeviceFeatures2(d.PhysDevice, &fq);
-            wantCm = f16q.ShaderFloat16 != 0 && coopQ.CooperativeMatrix != 0 && vmmQ.VulkanMemoryModel != 0 && Coop16(d);
+            wantCm = f16q.ShaderFloat16 != 0 && coopQ.CooperativeMatrix != 0 && vmmQ.VulkanMemoryModel != 0
+                && (!pinSg32 || sgcQ.SubgroupSizeControl != 0) && Coop16(d);
         }
+        pinSg32 &= wantCm;
 
-        byte** extsToEnable = stackalloc byte*[4];
+        byte** extsToEnable = stackalloc byte*[5];
         uint nExt = 0;
         if (hasPush) extsToEnable[nExt++] = wantPush;
-        byte* pCm = stackalloc byte[32], pF16 = stackalloc byte[32], pVmm = stackalloc byte[32];
+        byte* pCm = stackalloc byte[32], pF16 = stackalloc byte[32], pVmm = stackalloc byte[32], pSgc = stackalloc byte[32];
         System.Text.Encoding.ASCII.GetBytes("VK_KHR_cooperative_matrix\0", new Span<byte>(pCm, 32));
         System.Text.Encoding.ASCII.GetBytes("VK_KHR_shader_float16_int8\0", new Span<byte>(pF16, 32));
         System.Text.Encoding.ASCII.GetBytes("VK_KHR_vulkan_memory_model\0", new Span<byte>(pVmm, 32));
+        System.Text.Encoding.ASCII.GetBytes("VK_EXT_subgroup_size_control\0", new Span<byte>(pSgc, 32));
         if (wantCm) { extsToEnable[nExt++] = pCm; extsToEnable[nExt++] = pF16; extsToEnable[nExt++] = pVmm; }
+        if (pinSg32) extsToEnable[nExt++] = pSgc;
         Vk.VkPhysicalDeviceShaderFloat16Int8Features f16en = new()
         {
             SType = VkConst.StPhysicalDeviceShaderFloat16Int8Features, ShaderFloat16 = 1,
@@ -208,6 +253,12 @@ internal unsafe sealed class VkDevice : IDisposable
         {
             SType = VkConst.StPhysicalDeviceVulkanMemoryModelFeatures, VulkanMemoryModel = 1,
         };
+        Vk.VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sgcEn = new()
+        {
+            SType = VkConst.StPhysicalDeviceSubgroupSizeControlFeaturesEXT, SubgroupSizeControl = 1,
+            ComputeFullSubgroups = sgcQ.ComputeFullSubgroups,
+        };
+        if (pinSg32) vmmEn.PNext = &sgcEn;
         coopEn.PNext = &vmmEn;
         f16en.PNext = &coopEn;
         feat16.PNext = wantCm ? &f16en : null;
@@ -231,6 +282,10 @@ internal unsafe sealed class VkDevice : IDisposable
         };
         Vk.Check(Vk.vkCreateDevice(d.PhysDevice, &dci, null, out d.Device), "vkCreateDevice");
         d.CoopMat16 = wantCm;
+        d.CoopSubgroupSize = pinSg32 ? 32u : 0u;
+        d._fullSubgroups = pinSg32 && sgcQ.ComputeFullSubgroups != 0;
+        d.CoopLite = wantCm && ((hasSgc ? d.SubgroupMax : d.SubgroupSize) >= 64 || d.MaxSharedMemory < 48 * 1024)
+            && Environment.GetEnvironmentVariable("GCDRNET_VK_LITE") != "0";
         Vk.vkGetDeviceQueue(d.Device, d.QueueFamily, 0, out d.Queue);
 
         if (hasPush)
@@ -246,8 +301,6 @@ internal unsafe sealed class VkDevice : IDisposable
                 d._pushDesc = (delegate* unmanaged[Cdecl]<IntPtr, uint, IntPtr, uint, uint, Vk.VkWriteDescriptorSet*, void>)fn;
             }
         }
-        if (Environment.GetEnvironmentVariable("GCDRNET_VK_VERBOSE") == "1")
-            Console.Error.WriteLine($"[vk] device={d.DeviceName} qfamily={d.QueueFamily} sg={d.SubgroupSize} push={d.PushDescriptors} coopmat={d.CoopMat16} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
 
         fixed (Vk.VkPhysicalDeviceMemoryProperties* mp = &d.MemProps)
             Vk.vkGetPhysicalDeviceMemoryProperties(d.PhysDevice, mp);
@@ -259,6 +312,12 @@ internal unsafe sealed class VkDevice : IDisposable
                 d.CoherentDeviceLocal = true;
                 break;
             }
+        }
+        d.UnifiedMemory = props.DeviceType == VkConst.PhysDeviceIntegrated;
+        for (int i = 0; i < (int)d.MemProps.MemoryHeapCount; i++)
+        {
+            var hp = d.MemProps.HeapAt(i);
+            if ((hp.Flags & 1u) != 0) d.DeviceLocalHeap = Math.Max(d.DeviceLocalHeap, hp.Size);   // HEAP_DEVICE_LOCAL
         }
 
         Vk.VkCommandPoolCreateInfo cpci = new()
@@ -276,7 +335,93 @@ internal unsafe sealed class VkDevice : IDisposable
             Flags = 1, MaxSets = 1 << 16, PoolSizeCount = 1, PPoolSizes = &psz,
         };
         Vk.Check(Vk.vkCreateDescriptorPool(d.Device, &dpci, null, out d._descPool), "vkCreateDescriptorPool");
+
+        // never trust a pinned subgroup size blindly: the coopmat lane mapping is hard-wired to
+        // 32 lanes, so anything else would silently compute garbage
+        if (pinSg32 && !d.ProbeSubgroup32())
+        {
+            d.CoopMat16 = false;
+            d.CoopLite = false;
+            d.CoopSubgroupSize = 0;
+        }
+        if (Environment.GetEnvironmentVariable("GCDRNET_VK_VERBOSE") == "1")
+        {
+            Console.Error.WriteLine($"[vk] device={d.DeviceName} type={props.DeviceType} vendor=0x{d.VendorId:x4} qfamily={d.QueueFamily} " +
+                $"sg={d.SubgroupSize} sgRange={d.SubgroupMin}-{d.SubgroupMax} sgcCompute={sgcCompute} push={d.PushDescriptors} " +
+                $"coopmat={d.CoopMat16} coopSg={(d.CoopSubgroupSize == 0 ? "default" : d.CoopSubgroupSize.ToString())} " +
+                $"fullSg={d._fullSubgroups} lite={d.CoopLite} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
+            for (int i = 0; i < (int)d.MemProps.MemoryHeapCount; i++)
+            {
+                var hp = d.MemProps.HeapAt(i);
+                Console.Error.WriteLine($"[vk] heap{i}: {hp.Size >> 20} MB flags={hp.Flags:x}");
+            }
+            for (int i = 0; i < (int)d.MemProps.MemoryTypeCount; i++)
+                Console.Error.WriteLine($"[vk] type{i}: heap{d.MemProps.TypeAt(i).HeapIndex} flags={d.MemProps.TypeAt(i).PropertyFlags:x}");
+        }
         return d;
+    }
+
+    private bool _fullSubgroups;
+
+    /// <summary>Runs sgprobe.comp (256 threads) with requiredSubgroupSize = 32 and checks every
+    /// invocation reports 32-lane subgroups, 8 per workgroup.</summary>
+    private bool ProbeSubgroup32()
+    {
+        VkPipeline? pipe = null;
+        VkBuffer? buf = null;
+        try
+        {
+            pipe = NewPipeline(NewShaderModule(VkShaders.Load("sgprobe")), 1, 0, PushDescriptors, 32);
+            buf = NewStorageBuffer(256 * 4, hostVisible: true, preferHost: true);
+            IntPtr set = IntPtr.Zero, pool = IntPtr.Zero;
+            lock (Sync)
+            {
+                IntPtr cmd = NewCommandBuffer();
+                IntPtr fence = NewFence();
+                var begin = new Vk.VkCommandBufferBeginInfo { SType = VkConst.StCommandBufferBeginInfo };
+                Vk.Check(Vk.vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
+                Vk.vkCmdBindPipeline(cmd, VkConst.BindPointCompute, pipe.Pipeline);
+                Vk.VkDescriptorBufferInfo bi = new() { Buffer = buf.Buffer, Offset = 0, Range = 256 * 4 };
+                Vk.VkWriteDescriptorSet w = new()
+                {
+                    SType = VkConst.StWriteDescriptorSet, DstBinding = 0,
+                    DescriptorCount = 1, DescriptorType = VkConst.DescStorageBuffer, PBufferInfo = &bi,
+                };
+                if (PushDescriptors) CmdPushDescriptors(cmd, pipe.Layout, &w, 1);
+                else
+                {
+                    pool = NewDescriptorPool(1);
+                    set = AllocateDescriptorSet(pool, pipe.SetLayout);
+                    BindBuffer(set, 0, buf, 0, 256 * 4);
+                    Vk.vkCmdBindDescriptorSets(cmd, VkConst.BindPointCompute, pipe.Layout, 0, 1, &set, 0, null);
+                }
+                Vk.vkCmdDispatch(cmd, 1, 1, 1);
+                Vk.Check(Vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
+                Submit(cmd, fence);
+                WaitFence(fence);
+                Vk.vkDestroyFence(Device, fence, null);
+                FreeCommandBuffer(cmd);
+                if (pool != IntPtr.Zero) Vk.vkDestroyDescriptorPool(Device, pool, null);
+            }
+            uint* r = (uint*)buf.Map();
+            buf.Invalidate(0, 256 * 4);
+            bool ok = true;
+            for (int i = 0; i < 256; i++)
+                ok &= (r[i] & 0xff) == 32 && ((r[i] >> 8) & 0xff) == 8 && ((r[i] >> 16) & 0xff) < 8 && (r[i] >> 24) < 32;
+            buf.Unmap();
+            return ok;
+        }
+        catch (InvalidOperationException) { return false; }
+        finally
+        {
+            buf?.Free();
+            if (pipe is not null)
+            {
+                Vk.vkDestroyPipeline(Device, pipe.Pipeline, null);
+                Vk.vkDestroyPipelineLayout(Device, pipe.Layout, null);
+                Vk.vkDestroyDescriptorSetLayout(Device, pipe.SetLayout, null);
+            }
+        }
     }
 
     /// <summary>True when the device offers a 16x16x16 fp16 x fp16 -> fp32 (C and result) subgroup coopmat.</summary>
@@ -398,8 +543,10 @@ internal unsafe sealed class VkDevice : IDisposable
         }
     }
 
-    /// <summary>One set layout with `bindings` storage buffers (0..bindings-1) + push constants.</summary>
-    public VkPipeline NewPipeline(IntPtr shaderModule, int bindings, int pushConstBytes, bool pushLayout)
+    /// <summary>One set layout with `bindings` storage buffers (0..bindings-1) + push constants.
+    /// requiredSubgroupSize != 0 pins the compute subgroup width (VK_EXT_subgroup_size_control).</summary>
+    public VkPipeline NewPipeline(IntPtr shaderModule, int bindings, int pushConstBytes, bool pushLayout,
+        uint requiredSubgroupSize = 0)
     {
         var dslb = stackalloc Vk.VkDescriptorSetLayoutBinding[bindings];
         for (int i = 0; i < bindings; i++)
@@ -432,6 +579,11 @@ internal unsafe sealed class VkDevice : IDisposable
         Vk.Check(Vk.vkCreatePipelineLayout(Device, &plci, null, out layout), "vkCreatePipelineLayout");
 
         byte* name = stackalloc byte[5] { (byte)'m', (byte)'a', (byte)'i', (byte)'n', 0 };
+        Vk.VkPipelineShaderStageRequiredSubgroupSizeCreateInfo sgc = new()
+        {
+            SType = VkConst.StPipelineShaderStageRequiredSubgroupSizeCreateInfo,
+            RequiredSubgroupSize = requiredSubgroupSize,
+        };
         Vk.VkComputePipelineCreateInfo cpci = new()
         {
             SType = VkConst.StComputePipelineCreateInfo,
@@ -439,6 +591,9 @@ internal unsafe sealed class VkDevice : IDisposable
             {
                 SType = VkConst.StPipelineShaderStageCreateInfo,
                 Stage = VkConst.StageComputeShader, Module = shaderModule, PName = name,
+                PNext = requiredSubgroupSize != 0 ? &sgc : null,
+                // REQUIRE_FULL_SUBGROUPS: every subgroup of a pinned pipeline has all its lanes
+                Flags = requiredSubgroupSize != 0 && _fullSubgroups ? 2u : 0u,
             },
             Layout = layout,
         };
