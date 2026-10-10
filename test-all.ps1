@@ -11,10 +11,13 @@ $run = { param($name, $env)
     if ($LASTEXITCODE -ne 0) { Write-Error "$name failed"; exit 1 }
 }
 
-& $run 'default (AVX2/AVX-512)' @{}
+# AVX-512 -> AVX2 -> Vector -> Scalar. On machines without AVX-512 the first two runs
+# are both the AVX2 tier (the AVX-512 kernel tests skip).
+& $run 'default (AVX-512 if supported, else AVX2)' @{}
+& $run 'no-AVX512 / AVX2 (DOTNET_EnableAVX512=0)' @{ DOTNET_EnableAVX512 = '0' }
+& $run 'no-AVX512F / AVX2 (DOTNET_EnableAVX512F=0)' @{ DOTNET_EnableAVX512F = '0' }
 & $run 'vector-128 (DOTNET_EnableAVX2=0)' @{ DOTNET_EnableAVX2 = '0' }
 & $run 'sse-no-fma (DOTNET_EnableAVX=0)' @{ DOTNET_EnableAVX = '0' }
 & $run 'scalar (DOTNET_EnableHWIntrinsic=0)' @{ DOTNET_EnableHWIntrinsic = '0' }
-& $run 'no-AVX512 (DOTNET_EnableAVX512=0)' @{ DOTNET_EnableAVX512 = '0' }
 
 Write-Host 'All ISA tiers passed.' -ForegroundColor Green

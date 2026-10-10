@@ -31,7 +31,7 @@
     <PackageId>Sdcb.GcdrNet</PackageId>
     <Version>$(GcdrNetVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX2/Vector/Scalar) and Vulkan backends; no onnxruntime dependency.</Description>
+    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX-512/AVX2/Vector/Scalar) and Vulkan backends; no onnxruntime dependency.</Description>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">
