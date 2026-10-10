@@ -78,7 +78,7 @@ public sealed class GcdrEnhancer : IDisposable
             () => { Interlocked.Increment(ref _workersCreated); return new InferenceSession(GraphCompiler.Compile(model, [1, c, h, w], CpuPlan)); });
         if (!pools.TryAdd(key, p)) { p.Dispose(); return pools[key]; }
         Interlocked.Increment(ref _poolsCreated);
-        EvictIfNeeded(pools, key, CpuPoolBudget);
+        EvictIfNeeded(pools, key, CpuPoolBudget, 1024);
         return p;
     }
 
@@ -90,20 +90,23 @@ public sealed class GcdrEnhancer : IDisposable
             () => { Interlocked.Increment(ref _workersCreated); return Backends.Vulkan.VkBackend.Default.NewPipe(_gcModel, _drModel, ih, iw); });
         if (!_vkPool.TryAdd(key, p)) { p.Dispose(); return _vkPool[key]; }
         Interlocked.Increment(ref _poolsCreated);
-        EvictIfNeeded(_vkPool, key, VkPoolBudget);
+        EvictIfNeeded(_vkPool, key, VkPoolBudget, VkBytesPerPx);
         return p;
     }
 
-    /// <summary>Per-pool footprint estimate for the eviction budget: ~1KB/px activations + 32MB base.</summary>
-    private static long Footprint(long key) => ((key >> 16) * (key & 0xFFFF) + 1) * 1024 + (32L << 20);
+    /// <summary>Per-pool footprint estimate for the eviction budget: activations ~1KB/px
+    /// (fp32; ~0.5KB/px with Vulkan fp16 storage) + 32MB base.</summary>
+    private static long Footprint(long key, int bytesPerPx) => ((key >> 16) * (key & 0xFFFF) + 1) * bytesPerPx + (32L << 20);
+
+    private static int VkBytesPerPx => Backends.Vulkan.VkBackend.Default.F16 ? 512 : 1024;
 
     /// <summary>Bounded size cache: evict pools until total estimated footprint fits the
     /// budget and count ≤ MaxSizes. A single over-budget pool is kept.</summary>
-    private void EvictIfNeeded<T>(ConcurrentDictionary<long, SizePool<T>> pools, long keep, long budget)
+    private void EvictIfNeeded<T>(ConcurrentDictionary<long, SizePool<T>> pools, long keep, long budget, int bytesPerPx)
         where T : IDisposable
     {
         long total = 0; int n = 0;
-        foreach (long k in pools.Keys) { total += Footprint(k); n++; }
+        foreach (long k in pools.Keys) { total += Footprint(k, bytesPerPx); n++; }
         while ((n > MaxSizes || total > budget) && pools.Count > 1)
         {
             long victim = -1;
@@ -112,7 +115,7 @@ public sealed class GcdrEnhancer : IDisposable
             if (pools.TryRemove(victim, out var p))
             {
                 p.Dispose();
-                total -= Footprint(victim); n--;
+                total -= Footprint(victim, bytesPerPx); n--;
                 Interlocked.Increment(ref _poolsEvicted);
             }
         }

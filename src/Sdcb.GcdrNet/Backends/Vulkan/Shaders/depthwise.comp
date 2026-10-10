@@ -1,11 +1,14 @@
 #version 450
-// Depthwise conv: out[c,oy,ox] = bias[c] + sum_{ky,kx} w[c,ky,kx] * x[c, oy*sh+ky-pt, ox*sw+kx-pl]
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// NHWC depthwise conv: out[oy,ox,c] = bias[c] + sum w[tap,c] * x[sy,sx,c]
+// (w backend-packed [tap][C]); channel-fastest flat index -> coalesced.
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer X  { float x[]; };
-layout(set = 0, binding = 1) readonly buffer W  { float w[]; };
+layout(set = 0, binding = 0) readonly buffer X  { ET x[]; };
+layout(set = 0, binding = 1) readonly buffer W  { ET w[]; };
 layout(set = 0, binding = 2) readonly buffer B  { float b[]; };
-layout(set = 0, binding = 3) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 3) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
     uint c, ih, iw, oh, ow;
@@ -29,7 +32,8 @@ void main()
 {
     uint id = gl_GlobalInvocationID.x;
     if (id >= p.c * p.oh * p.ow) return;
-    uint ox = id % p.ow, oy = (id / p.ow) % p.oh, ch = id / (p.oh * p.ow);
+    uint ch = id % p.c, px = id / p.c;
+    uint ox = px % p.ow, oy = px / p.ow;
     bool refl = (p.flags & 2u) != 0u;
     float acc = ((p.flags & 1u) != 0u) ? b[ch] : 0.0;
     for (uint ky = 0u; ky < p.kh; ky++)
@@ -38,21 +42,18 @@ void main()
         for (uint kx = 0u; kx < p.kw; kx++)
         {
             int sx = int(ox * p.sw + kx) - int(p.pl);
+            float wv = float(w[(ky * p.kw + kx) * p.c + ch]);
+            int yy = sy, xx = sx;
             if (uint(sy) >= p.ih || uint(sx) >= p.iw)
             {
-                if (refl)
-                {
-                    if (uint(sy) >= p.ih) sy = mirror(sy, int(p.ih));
-                    if (uint(sx) >= p.iw) sx = mirror(sx, int(p.iw));
-                    acc += w[(ch * p.kh + ky) * p.kw + kx] * x[(ch * p.ih + uint(sy)) * p.iw + uint(sx)];
-                }
-                else acc += w[(ch * p.kh + ky) * p.kw + kx] * p.padVal;
+                if (!refl) { acc += wv * p.padVal; continue; }
+                if (uint(sy) >= p.ih) yy = mirror(sy, int(p.ih));
+                if (uint(sx) >= p.iw) xx = mirror(sx, int(p.iw));
             }
-            else
-                acc += w[(ch * p.kh + ky) * p.kw + kx] * x[(ch * p.ih + uint(sy)) * p.iw + uint(sx)];
+            acc += wv * float(x[(uint(yy) * p.iw + uint(xx)) * p.c + ch]);
         }
     }
     if ((p.flags & 4u) != 0u) acc = max(acc, 0.0);
     if ((p.flags & 16u) != 0u) acc = 0.5 * acc * (1.0 + ferf(acc * 0.7071067811865475));
-    o[id] = acc;
+    o[id] = ET(acc);
 }

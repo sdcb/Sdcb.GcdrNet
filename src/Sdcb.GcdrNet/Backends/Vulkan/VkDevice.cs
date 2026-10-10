@@ -15,6 +15,7 @@ internal unsafe sealed class VkDevice : IDisposable
     public uint QueueFamily;
     public Vk.VkPhysicalDeviceMemoryProperties MemProps;
     public bool CoherentDeviceLocal;   // DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT exists (ReBAR)
+    public bool StorageBuffer16;       // VK_KHR_16bit_storage: activations may be stored as float16
     public uint MaxSharedMemory;
     public ulong MaxStorageRange = uint.MaxValue;
     public bool PushDescriptors;
@@ -152,15 +153,37 @@ internal unsafe sealed class VkDevice : IDisposable
         Vk.vkGetPhysicalDeviceProperties2(d.PhysDevice, &p2);
         d.SubgroupSize = sgP.SubgroupSize;
 
-        Vk.VkPhysicalDeviceFeatures feats = new();
+        // Query storageBuffer16BitAccess (VK 1.1 core) for fp16 activation storage.
+        Vk.VkPhysicalDevice16BitStorageFeatures feat16 = new()
+        {
+            SType = VkConst.StPhysicalDevice16BitStorageFeatures,
+        };
+        Vk.VkPhysicalDeviceFeatures2 feats2 = new()
+        {
+            SType = VkConst.StPhysicalDeviceFeatures2,
+            PNext = &feat16,
+        };
+        Vk.vkGetPhysicalDeviceFeatures2(d.PhysDevice, &feats2);
+        d.StorageBuffer16 = feat16.StorageBuffer16BitAccess != 0;
+
         byte** extsToEnable = stackalloc byte*[1];
         uint nExt = 0;
         if (hasPush) extsToEnable[nExt++] = wantPush;
+
+        // To enable 16-bit storage we chain feat16 into VkDeviceCreateInfo.pNext
+        // (VK 1.1 core: no extension needed). PEnabledFeatures must be null when
+        // using Features2 pNext; we inline a zero VkPhysicalDeviceFeatures in feat2.
+        Vk.VkPhysicalDeviceFeatures2 feat2enable = new()
+        {
+            SType = VkConst.StPhysicalDeviceFeatures2,
+            PNext = d.StorageBuffer16 ? &feat16 : null,
+        };
         Vk.VkDeviceCreateInfo dci = new()
         {
             SType = VkConst.StDeviceCreateInfo,
             QueueCreateInfoCount = 1, PQueueCreateInfos = &qci,
-            PEnabledFeatures = &feats,
+            PEnabledFeatures = null,
+            PNext = &feat2enable,
             EnabledExtensionCount = nExt,
             PpEnabledExtensionNames = nExt > 0 ? extsToEnable : null,
         };
@@ -181,7 +204,7 @@ internal unsafe sealed class VkDevice : IDisposable
             }
         }
         if (Environment.GetEnvironmentVariable("GCDRNET_VK_VERBOSE") == "1")
-            Console.Error.WriteLine($"[vk] device={d.DeviceName} qfamily={d.QueueFamily} sg={d.SubgroupSize} push={d.PushDescriptors} lds={d.MaxSharedMemory}");
+            Console.Error.WriteLine($"[vk] device={d.DeviceName} qfamily={d.QueueFamily} sg={d.SubgroupSize} push={d.PushDescriptors} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
 
         fixed (Vk.VkPhysicalDeviceMemoryProperties* mp = &d.MemProps)
             Vk.vkGetPhysicalDeviceMemoryProperties(d.PhysDevice, mp);

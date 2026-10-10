@@ -1,12 +1,14 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
 // Tiled GEMM: C[M,N] = A[M,K] * B + bias[N]; B is [K,N] or [N,K] when transB.
 // Tile 64x64, K-chunk 16, 256 threads -> 4x4 each.
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer A  { float a[]; };
-layout(set = 0, binding = 1) readonly buffer B  { float b[]; };
+layout(set = 0, binding = 0) readonly buffer A  { ET a[]; };
+layout(set = 0, binding = 1) readonly buffer B  { ET b[]; };
 layout(set = 0, binding = 2) readonly buffer BS { float bs[]; };  // bias[N] (dummy if none)
-layout(set = 0, binding = 3) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 3) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
     uint m, n, k;
@@ -43,7 +45,7 @@ void main()
         {
             uint kk = e >> 6, mm = e & 63u;
             uint gm = m0 + mm, gk = k0 + kk;
-            As[e] = (gm < p.m && gk < p.k) ? a[gm * p.k + gk] : 0.0;
+            As[e] = (gm < p.m && gk < p.k) ? float(a[gm * p.k + gk]) : 0.0;
         }
         for (uint e = tid; e < BK * BN; e += 256u)
         {
@@ -51,7 +53,7 @@ void main()
             uint gn = n0 + nn, gk = k0 + kk;
             float v = 0.0;
             if (gn < p.n && gk < p.k)
-                v = transB ? b[gn * p.k + gk] : b[gk * p.n + gn];
+                v = float(transB ? b[gn * p.k + gk] : b[gk * p.n + gn]);
             Bs[e] = v;
         }
         barrier();
@@ -80,7 +82,7 @@ void main()
             if (hasBias) v += bs[gn];
             if ((p.flags & 4u) != 0u) v = max(v, 0.0);
             if ((p.flags & 8u) != 0u) v = 0.5 * v * (1.0 + ferf(v * 0.7071067811865475));
-            o[gm * p.n + gn] = v;
+            o[gm * p.n + gn] = ET(v);
         }
     }
 }

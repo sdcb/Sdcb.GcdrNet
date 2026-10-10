@@ -1,9 +1,11 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
 // Rank-4 pad on all dims (spatial in practice), constant or reflect.
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
     uint id0, id1, id2, id3;     // in dims
@@ -39,7 +41,7 @@ void main()
     int c1 = coord(d1, p.pb1, p.id1, m1);
     int c2 = coord(d2, p.pb2, p.id2, m2);
     int c3 = coord(d3, p.pb3, p.id3, m3);
-    if (m0 || m1 || m2 || m3) { o[i] = p.value; return; }
+    if (m0 || m1 || m2 || m3) { o[i] = ET(p.value); return; }
     uint si2 = p.id3, si1 = p.id2 * si2, si0 = p.id1 * si1;
     o[i] = x[uint(c0) * si0 + uint(c1) * si1 + uint(c2) * si2 + uint(c3)];
 }

@@ -12,13 +12,21 @@ internal sealed unsafe class VkBackend : IDisposable
 {
     internal readonly VkDevice Dev;
     // (model, c, h, w) -> compiled graph (weights upload + dispatch list)
-    private readonly ConcurrentDictionary<(OnnxModel m, int c, int h, int w), VkGraphModel> _graphs = new();
+    private readonly ConcurrentDictionary<(OnnxModel m, int c, int h, int w, bool physIo), VkGraphModel> _graphs = new();
 
     private static readonly Lazy<VkBackend> s_default = new(() => new VkBackend());
     internal static VkBackend Default => s_default.Value;
 
-    /// <summary>Plan options for every GPU-side compile (shaders address the layout these produce).</summary>
-    internal static CompileOptions PlanOptions => new(Nhwc: false);
+    /// <summary>
+    /// Plan options for GPU compiles: always channels-last (shaders address NHWC).
+    /// Standalone sessions keep logical NCHW I/O (boundary relayouts in the plan);
+    /// the fused pipeline keeps I/O physical and its glue shaders speak NHWC.
+    /// </summary>
+    internal static CompileOptions PlanOptions => new(Nhwc: true, PhysicalIo: false);
+    internal static CompileOptions PipeOptions => new(Nhwc: true, PhysicalIo: true);
+
+    /// <summary>fp16 activation/weight storage (needs storageBuffer16BitAccess; GCDRNET_VK_F16=0 forces fp32).</summary>
+    internal bool F16 => Dev.StorageBuffer16 && Environment.GetEnvironmentVariable("GCDRNET_VK_F16") != "0";
 
     internal VkBackend()
     {
@@ -35,11 +43,12 @@ internal sealed unsafe class VkBackend : IDisposable
     }
 
     /// <summary>Compiled GPU graph for a model+shape (cached, bounded).</summary>
-    internal VkGraphModel GraphFor(OnnxModel m, int[] shape)
+    internal VkGraphModel GraphFor(OnnxModel m, int[] shape, bool physIo = false)
     {
-        var key = (m, shape[1], shape[2], shape[3]);
+        var key = (m, shape[1], shape[2], shape[3], physIo);
         if (_graphs.TryGetValue(key, out var g)) return g;
-        g = new VkGraphModel(Dev, GraphCompiler.Compile(m, [1, shape[1], shape[2], shape[3]], PlanOptions));
+        g = new VkGraphModel(Dev, GraphCompiler.Compile(m, [1, shape[1], shape[2], shape[3]],
+            physIo ? PipeOptions : PlanOptions), F16);
         if (!_graphs.TryAdd(key, g)) { g.Dispose(); return _graphs[key]; }
         // bound the cache: evict an arbitrary other graph beyond the cap
         while (_graphs.Count > 32)
@@ -56,13 +65,13 @@ internal sealed unsafe class VkBackend : IDisposable
     internal VkGcdrPipeline NewPipe(OnnxModel gc, OnnxModel dr, int ih, int iw)
     {
         int h = ih + ((-ih) & 31), w = iw + ((-iw) & 31);
-        ExecPlan gcPlan = GraphCompiler.Compile(gc, [1, 3, h, w], PlanOptions);
-        ExecPlan drPlan = GraphCompiler.Compile(dr, [1, 6, h, w], PlanOptions);
+        ExecPlan gcPlan = GraphCompiler.Compile(gc, [1, 3, h, w], PipeOptions);
+        ExecPlan drPlan = GraphCompiler.Compile(dr, [1, 6, h, w], PipeOptions);
         // hold caller refs: GraphFor(dr)'s eviction loop may pick the gc graph we
         // just got and Release its cache ref — without ours the session ctor would
         // resurrect a graph whose consts were already freed.
-        VkGraphModel gg = GraphFor(gc, [1, 3, h, w]); gg.Acquire();
-        VkGraphModel gd = GraphFor(dr, [1, 6, h, w]); gd.Acquire();
+        VkGraphModel gg = GraphFor(gc, [1, 3, h, w], physIo: true); gg.Acquire();
+        VkGraphModel gd = GraphFor(dr, [1, 6, h, w], physIo: true); gd.Acquire();
         try { return new VkGcdrPipeline(Dev, gcPlan, drPlan, gg, gd, ih, iw); }
         finally { gg.Release(); gd.Release(); }
     }

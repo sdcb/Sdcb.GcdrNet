@@ -1,14 +1,21 @@
 #version 450
-// Tiled NCHW conv, 3D dispatch: gx=x-tile(16), gy=y-tile(8), gz=oc-tile(64).
-// Workgroup 256 thr; per thread 4 oc x 8 spatial outputs. K-chunk 32 staged in shared.
-// Compile-time kernel/stride via -DKH= -DKW= -DSH= -DSW= (defaults: runtime PC values).
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+#extension GL_EXT_control_flow_attributes : require
+// NHWC implicit-GEMM conv: O[px, oc] = sum_k X[px, k] * W[k, oc] with
+// k = (ky*KW + kx)*IC + ic, so consecutive k are consecutive channels of one
+// input pixel (coalesced loads). W is backend-packed [K][OC] (oc fastest).
+// 3D dispatch: gx = x-tile(16), gy = y-tile(8), gz = oc-tile(64); 256 threads,
+// each 4 oc x 8 pixels (vec4 accumulators over oc). K-chunk 32 staged in
+// shared: As[k][m] (vec4 over m), Bs[n][k] (row stride 36 floats, vec4 over k).
+// Accumulation is always fp32. Compile-time kernel/stride: -DKH= -DKW= -DSH= -DSW=.
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer X  { float x[]; };
-layout(set = 0, binding = 1) readonly buffer W  { float w[]; };
+layout(set = 0, binding = 0) readonly buffer X  { ET x[]; };
+layout(set = 0, binding = 1) readonly buffer W  { ET w[]; };
 layout(set = 0, binding = 2) readonly buffer B  { float b[]; };   // per-OC bias (dummy if none)
-layout(set = 0, binding = 3) readonly buffer R  { float r[]; };   // same-shape residual (dummy if none)
-layout(set = 0, binding = 4) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 3) readonly buffer R  { ET r[]; };      // same-shape residual (dummy if none)
+layout(set = 0, binding = 4) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
     uint ic, ih, iw;
@@ -16,6 +23,7 @@ layout(push_constant) uniform PC {
     uint kh, kw, sh, sw;
     uint pt, pl;
     uint flags;     // bit0 hasBias, bit1 reflectPad, bit2 relu, bit3 hasAdd, bit4 gelu
+    uint pad0;
 } p;
 
 #ifndef KH
@@ -33,10 +41,11 @@ layout(push_constant) uniform PC {
 
 const uint BM = 64u;            // oc tile
 const uint BH = 8u, BW = 16u;   // spatial tile
-const uint BN = BH * BW;        // 128 spatial outputs per wg
+const uint BN = BH * BW;        // 128 pixels per wg
 const uint BK = 32u;
+const uint BKP = 36u;           // Bs row stride in floats (vec4 aligned)
 shared vec4 Asv[BK * BM / 4];
-shared vec4 Bsv[BK * BN / 4];
+shared vec4 Bsv[BN * BKP / 4];
 
 int mirror(int i, int d) { if (d <= 1) return 0; while (i < 0 || i >= d) i = i < 0 ? -i : 2 * d - 2 - i; return i; }
 
@@ -54,65 +63,63 @@ void main()
     uint oc0 = gl_WorkGroupID.z * BM;
     uint oy0 = gl_WorkGroupID.y * BH;
     uint ox0 = gl_WorkGroupID.x * BW;
-    uint K = p.ic * KH * KW;
+    uint K = KH * KW * p.ic;
     uint tid = gl_LocalInvocationID.x;
-    uint ty = tid >> 4, tx = tid & 15u;    // ty: oc rows (4 each), tx: spatial (8 each)
+    uint tm = tid & 15u, tn = tid >> 4;    // tm: 4 oc each, tn: 8 pixels each
 
-    float acc[4][8];
-    for (int i = 0; i < 4; i++) for (int j = 0; j < 8; j++) acc[i][j] = 0.0;
+    vec4 acc[8] = vec4[8](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
 
     bool reflect = (p.flags & 2u) != 0u;
-    uint khkw = KH * KW;
+    uint bk = tid & 31u;                   // fixed k lane for Bs loads (256 % 32 == 0)
 
     for (uint k0 = 0u; k0 < K; k0 += BK)
     {
-        // As[k][m] = w[(oc0+m)*K + k0+k]
+        // As[k][m] = W[k0+k][oc0+m]
         for (uint e = tid; e < BK * BM; e += 256u)
         {
             uint k = e >> 6, m = e & 63u;
             uint gm = oc0 + m, gk = k0 + k;
-            Asv[e >> 2][e & 3u] = (gm < p.oc && gk < K) ? w[gm * K + gk] : 0.0;
+            Asv[e >> 2][e & 3u] = (gm < p.oc && gk < K) ? float(w[gk * p.oc + gm]) : 0.0;
         }
-        // Bs[k][n]: n = ey*BW + ex (ey=n>>4, ex=n&15)
-        for (uint e = tid; e < BK * BN; e += 256u)
+        // Bs[n][k]: a warp reads 32 consecutive k = channels of one pixel tap
+        uint gk = k0 + bk;
+        bool kok = gk < K;
+        uint tap = kok ? gk / p.ic : 0u;
+        uint ch = gk - tap * p.ic;
+        uint ky = tap / KW, kx = tap - ky * KW;
+        for (uint n = tid >> 5; n < BN; n += 8u)
         {
-            uint k = e / BN, n = e - (e / BN) * BN;
-            uint gk = k0 + k;
-            uint ey = n >> 4, ex = n & 15u;
             float v = 0.0;
-            if (gk < K)
+            uint oy = oy0 + (n >> 4), ox = ox0 + (n & 15u);
+            if (kok && oy < p.oh && ox < p.ow)
             {
-                uint oy = oy0 + ey, ox = ox0 + ex;
-                if (oy < p.oh && ox < p.ow)
+                int sy = int(oy * SH + ky) - int(p.pt);
+                int sx = int(ox * SW + kx) - int(p.pl);
+                if (reflect)
                 {
-                    uint kx = gk % KW, ky = (gk / KW) % KH, ic = gk / khkw;
-                    int sy = int(oy * SH + ky) - int(p.pt);
-                    int sx = int(ox * SW + kx) - int(p.pl);
-                    if (reflect)
-                    {
-                        if (uint(sy) >= p.ih) sy = mirror(sy, int(p.ih));
-                        if (uint(sx) >= p.iw) sx = mirror(sx, int(p.iw));
-                        v = x[(ic * p.ih + uint(sy)) * p.iw + uint(sx)];
-                    }
-                    else if (uint(sy) < p.ih && uint(sx) < p.iw)
-                        v = x[(ic * p.ih + uint(sy)) * p.iw + uint(sx)];
+                    if (uint(sy) >= p.ih) sy = mirror(sy, int(p.ih));
+                    if (uint(sx) >= p.iw) sx = mirror(sx, int(p.iw));
+                    v = float(x[(uint(sy) * p.iw + uint(sx)) * p.ic + ch]);
                 }
+                else if (uint(sy) < p.ih && uint(sx) < p.iw)
+                    v = float(x[(uint(sy) * p.iw + uint(sx)) * p.ic + ch]);
             }
-            Bsv[e >> 2][e & 3u] = v;
+            uint si = n * BKP + bk;
+            Bsv[si >> 2][si & 3u] = v;
         }
         barrier();
 
-        for (uint k = 0u; k < BK; k++)
+        [[unroll]] for (uint k = 0u; k < BK; k += 4u)
         {
-            vec4 av = Asv[k * 16u + ty];                    // As[k][ty*4 .. +3]
-            vec4 bv0 = Bsv[k * 32u + tx * 2u];              // Bs[k][tx*8 .. +3]
-            vec4 bv1 = Bsv[k * 32u + tx * 2u + 1u];         // Bs[k][tx*8+4 .. +7]
-            for (int i = 0; i < 4; i++)
-                for (int j = 0; j < 4; j++)
-                    acc[i][j] += av[i] * bv0[j];
-            for (int i = 0; i < 4; i++)
-                for (int j = 0; j < 4; j++)
-                    acc[i][j + 4] += av[i] * bv1[j];
+            vec4 a0 = Asv[k * 16u + tm];
+            vec4 a1 = Asv[(k + 1u) * 16u + tm];
+            vec4 a2 = Asv[(k + 2u) * 16u + tm];
+            vec4 a3 = Asv[(k + 3u) * 16u + tm];
+            [[unroll]] for (int j = 0; j < 8; j++)
+            {
+                vec4 bv = Bsv[(tn * 8u + uint(j)) * (BKP / 4u) + (k >> 2)];
+                acc[j] += a0 * bv.x + a1 * bv.y + a2 * bv.z + a3 * bv.w;
+            }
         }
         barrier();
     }
@@ -120,23 +127,40 @@ void main()
     bool hasBias = (p.flags & 1u) != 0u;
     bool relu = (p.flags & 4u) != 0u;
     bool hasAdd = (p.flags & 8u) != 0u;
-    uint ohw = p.oh * p.ow;
-    for (int i = 0; i < 4; i++)
+    bool gelu = (p.flags & 16u) != 0u;
+    uint gm0 = oc0 + tm * 4u;
+    // constant component indices only: keeps acc[] in registers (no local-memory spill)
+    vec4 bias = vec4(
+        hasBias && gm0 < p.oc ? b[gm0] : 0.0,
+        hasBias && gm0 + 1u < p.oc ? b[gm0 + 1u] : 0.0,
+        hasBias && gm0 + 2u < p.oc ? b[gm0 + 2u] : 0.0,
+        hasBias && gm0 + 3u < p.oc ? b[gm0 + 3u] : 0.0);
+    bool full = gm0 + 3u < p.oc;
+    [[unroll]] for (int j = 0; j < 8; j++)
     {
-        uint gm = oc0 + ty * 4u + uint(i);
-        if (gm >= p.oc) continue;
-        float bias = hasBias ? b[gm] : 0.0;
-        for (int j = 0; j < 8; j++)
+        uint n = tn * 8u + uint(j);
+        uint oy = oy0 + (n >> 4), ox = ox0 + (n & 15u);
+        if (oy >= p.oh || ox >= p.ow || gm0 >= p.oc) continue;
+        uint base = (oy * p.ow + ox) * p.oc + gm0;
+        vec4 v = acc[j] + bias;
+        if (hasAdd)
         {
-            uint n = tx * 8u + uint(j);
-            uint oy = oy0 + (n >> 4), ox = ox0 + (n & 15u);
-            if (oy >= p.oh || ox >= p.ow) continue;
-            uint di = gm * ohw + oy * p.ow + ox;
-            float v = acc[i][j] + bias;
-            if (hasAdd) v += r[di];
-            if (relu) v = max(v, 0.0);
-            if ((p.flags & 16u) != 0u) v = 0.5 * v * (1.0 + ferf(v * 0.7071067811865475));
-            o[di] = v;
+            v.x += float(r[base]);
+            if (full) { v.y += float(r[base + 1u]); v.z += float(r[base + 2u]); v.w += float(r[base + 3u]); }
+            else
+            {
+                if (gm0 + 1u < p.oc) v.y += float(r[base + 1u]);
+                if (gm0 + 2u < p.oc) v.z += float(r[base + 2u]);
+            }
         }
+        if (relu) v = max(v, vec4(0.0));
+        if (gelu) v = vec4(0.5 * v.x * (1.0 + ferf(v.x * 0.7071067811865475)),
+                           0.5 * v.y * (1.0 + ferf(v.y * 0.7071067811865475)),
+                           0.5 * v.z * (1.0 + ferf(v.z * 0.7071067811865475)),
+                           0.5 * v.w * (1.0 + ferf(v.w * 0.7071067811865475)));
+        o[base] = ET(v.x);
+        if (gm0 + 1u < p.oc) o[base + 1u] = ET(v.y);
+        if (gm0 + 2u < p.oc) o[base + 2u] = ET(v.z);
+        if (full) o[base + 3u] = ET(v.w);
     }
 }

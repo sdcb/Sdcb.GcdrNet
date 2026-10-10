@@ -1,10 +1,12 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
 // Concat along an axis: one dispatch per input. Copies this input's slice into
 // dst at axisOffset.  dst[o, a, i] = src[o, a - axisOff, i].
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
     uint n;          // src element count
