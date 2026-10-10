@@ -18,6 +18,14 @@ internal sealed class NhwcConvPlan
     public int Blocks;
 }
 
+/// <summary>Packed <see cref="ExecOp.UpHead"/> weights: [c][8] oc lanes (zero-padded) + bias[8].</summary>
+internal sealed class UpHeadPlan
+{
+    public required float[] W;
+    public required float[] Bias;
+    public int Oc, C;
+}
+
 /// <summary>
 /// Channels-last (NHWC, N==1) kernels. Shapes are passed in storage order
 /// ([h,w,c]). Every pad mode goes through precomputed source row/col maps
@@ -394,29 +402,65 @@ internal static unsafe class Nhwc
     }
 
     // ======================== bilinear resize (half-pixel) ========================
-    public static void ResizeBilinear(ReadOnlySpan<float> src, int ih, int iw, int c,
-        Span<float> dst, int oh, int ow, float sy, float sx, ActivationKind act)
+    private static void ResizeAxis(int outLen, int inLen, float scale, int[] i0, int[] i1, float[] wt)
     {
-        static void Axis(int outLen, int inLen, float scale, int[] i0, int[] i1, float[] wt)
+        for (int o = 0; o < outLen; o++)
         {
-            for (int o = 0; o < outLen; o++)
-            {
-                float f = (o + 0.5f) / scale - 0.5f;
-                float fl = MathF.Floor(f);
-                i0[o] = Math.Clamp((int)fl, 0, inLen - 1);
-                i1[o] = Math.Clamp((int)fl + 1, 0, inLen - 1);
-                wt[o] = f - fl;
-            }
+            float f = (o + 0.5f) / scale - 0.5f;
+            float fl = MathF.Floor(f);
+            i0[o] = Math.Clamp((int)fl, 0, inLen - 1);
+            i1[o] = Math.Clamp((int)fl + 1, 0, inLen - 1);
+            wt[o] = f - fl;
         }
+    }
+
+    /// <summary>One output pixel of the bilinear resize into <paramref name="o"/> (c channels):
+    /// v = [relu](lerp) + [relu](add) — the same per-element ops as separate Resize/Relu/Add nodes.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ResizePixel(float* a, float* b, float* e, float* f, float wX, float wY,
+        Vector<float> vX, Vector<float> vY, int c, bool relu, float* add, bool addRelu, float* o)
+    {
+        int VL = Vector<float>.Count, ch = 0;
+        for (; ch + VL <= c; ch += VL)
+        {
+            var va = Simd.VectorLoad(a + ch); var ve = Simd.VectorLoad(e + ch);
+            var top = va + (Simd.VectorLoad(b + ch) - va) * vX;
+            var bot = ve + (Simd.VectorLoad(f + ch) - ve) * vX;
+            var v = top + (bot - top) * vY;
+            if (relu) v = Vector.Max(v, Vector<float>.Zero);
+            if (add != null)
+            {
+                var s = Simd.VectorLoad(add + ch);
+                v += addRelu ? Vector.Max(s, Vector<float>.Zero) : s;
+            }
+            Simd.VectorStore(o + ch, v);
+        }
+        for (; ch < c; ch++)
+        {
+            float top = a[ch] + (b[ch] - a[ch]) * wX;
+            float bot = e[ch] + (f[ch] - e[ch]) * wX;
+            float v = top + (bot - top) * wY;
+            if (relu) v = MathF.Max(v, 0f);
+            if (add != null) v += addRelu ? MathF.Max(add[ch], 0f) : add[ch];
+            o[ch] = v;
+        }
+    }
+
+    /// <summary>NHWC bilinear resize; optional same-shape addend (out = [relu](resize) + [relu](add)).</summary>
+    public static void ResizeBilinear(ReadOnlySpan<float> src, int ih, int iw, int c,
+        Span<float> dst, int oh, int ow, float sy, float sx, ActivationKind act,
+        ReadOnlySpan<float> add = default, bool addRelu = false)
+    {
+        if (!add.IsEmpty && add.Length != dst.Length)
+            throw new NotSupportedException($"resize addend has {add.Length} elems, expected {dst.Length}.");
         int[] y0 = new int[oh], y1 = new int[oh], x0 = new int[ow], x1 = new int[ow];
         float[] wy = new float[oh], wx = new float[ow];
-        Axis(oh, ih, sy, y0, y1, wy);
-        Axis(ow, iw, sx, x0, x1, wx);
-        bool relu = act == ActivationKind.Relu;
-        int VL = Vector<float>.Count;
-        fixed (float* sp0 = src, dp0 = dst)
+        ResizeAxis(oh, ih, sy, y0, y1, wy);
+        ResizeAxis(ow, iw, sx, x0, x1, wx);
+        bool relu = act == ActivationKind.Relu, hasAdd = !add.IsEmpty;
+        fixed (float* sp0 = src, dp0 = dst, ap0 = add)
         {
-            float* sp = sp0, dp = dp0;
+            float* sp = sp0, dp = dp0, ap = ap0;
             For(oh, (long)oh * ow * c, y =>
             {
                 float* r0 = sp + (long)y0[y] * iw * c, r1 = sp + (long)y1[y] * iw * c;
@@ -424,31 +468,96 @@ internal static unsafe class Nhwc
                 float wY = wy[y];
                 for (int x = 0; x < ow; x++)
                 {
-                    float* a = r0 + (long)x0[x] * c, b = r0 + (long)x1[x] * c;
-                    float* e = r1 + (long)x0[x] * c, f = r1 + (long)x1[x] * c;
-                    float* o = dp + ((long)y * ow + x) * c;
-                    float wX = wx[x];
-                    var vX = new Vector<float>(wX);
-                    int ch = 0;
-                    for (; ch + VL <= c; ch += VL)
-                    {
-                        var va = Simd.VectorLoad(a + ch); var ve = Simd.VectorLoad(e + ch);
-                        var top = va + (Simd.VectorLoad(b + ch) - va) * vX;
-                        var bot = ve + (Simd.VectorLoad(f + ch) - ve) * vX;
-                        var v = top + (bot - top) * vY;
-                        if (relu) v = Vector.Max(v, Vector<float>.Zero);
-                        Simd.VectorStore(o + ch, v);
-                    }
-                    for (; ch < c; ch++)
-                    {
-                        float top = a[ch] + (b[ch] - a[ch]) * wX;
-                        float bot = e[ch] + (f[ch] - e[ch]) * wX;
-                        float v = top + (bot - top) * wY;
-                        o[ch] = relu ? MathF.Max(v, 0f) : v;
-                    }
+                    long ob = ((long)y * ow + x) * c;
+                    ResizePixel(r0 + (long)x0[x] * c, r0 + (long)x1[x] * c, r1 + (long)x0[x] * c, r1 + (long)x1[x] * c,
+                        wx[x], wY, new Vector<float>(wx[x]), vY, c, relu, hasAdd ? ap + ob : null, addRelu, dp + ob);
                 }
             });
         }
+    }
+
+    // ======================== fused upsample tail ========================
+    /// <summary>Packs UpHead weights [oc, c, 1, 1] as [c][8] (oc lanes, zero-padded) + bias[8].</summary>
+    public static UpHeadPlan PackUpHead(ReadOnlySpan<float> w, int oc, int c, ReadOnlySpan<float> bias)
+    {
+        if (oc > 8) throw new NotSupportedException($"UpHead supports oc <= 8 (got {oc}).");
+        float[] pw = new float[c * 8], pb = new float[8];
+        for (int o = 0; o < oc; o++)
+            for (int ch = 0; ch < c; ch++) pw[ch * 8 + o] = w[o * c + ch];
+        if (!bias.IsEmpty) bias.CopyTo(pb);
+        return new UpHeadPlan { W = pw, Bias = pb, Oc = oc, C = c };
+    }
+
+    /// <summary>
+    /// out[y,x,o] = act(bias[o] + Σ_c w[o,c]·s[c]), s = [relu](resize(src)) + [relu](skip): the
+    /// full-resolution resize/add tensors live only in a per-pixel stack buffer. Per-element
+    /// math follows the unfused nodes (bias-initialized, channel-ascending accumulation).
+    /// </summary>
+    public static void UpHead(ReadOnlySpan<float> src, int ih, int iw, int c, ReadOnlySpan<float> skip,
+        Span<float> dst, int oh, int ow, float sy, float sx, UpHeadP p, UpHeadPlan kp)
+    {
+        if (kp.C != c || skip.Length != (long)oh * ow * c || dst.Length != (long)oh * ow * kp.Oc)
+            throw new NotSupportedException("UpHead shape mismatch.");
+        int[] y0 = new int[oh], y1 = new int[oh], x0 = new int[ow], x1 = new int[ow];
+        float[] wy = new float[oh], wx = new float[ow];
+        ResizeAxis(oh, ih, sy, y0, y1, wy);
+        ResizeAxis(ow, iw, sx, x0, x1, wx);
+        bool relu = p.ResizeRelu, skipRelu = p.SkipRelu, avx = UseAvx;
+        int oc = kp.Oc;
+        ActivationKind act = p.Act;
+        fixed (float* sp0 = src, dp0 = dst, kp0 = skip, wp0 = kp.W, bp0 = kp.Bias)
+        {
+            float* sp = sp0, dp = dp0, kpp = kp0, wp = wp0, bp = bp0;
+            For(oh, (long)oh * ow * c * (oc + 4), y =>
+            {
+                float* s = stackalloc float[c + 8];
+                float* acc = stackalloc float[8];
+                float* r0 = sp + (long)y0[y] * iw * c, r1 = sp + (long)y1[y] * iw * c;
+                var vY = new Vector<float>(wy[y]);
+                float wY = wy[y];
+                float* orow = dp + (long)y * ow * oc;
+                for (int x = 0; x < ow; x++)
+                {
+                    ResizePixel(r0 + (long)x0[x] * c, r0 + (long)x1[x] * c, r1 + (long)x0[x] * c, r1 + (long)x1[x] * c,
+                        wx[x], wY, new Vector<float>(wx[x]), vY, c, relu, kpp + ((long)y * ow + x) * c, skipRelu, s);
+                    float* o = orow + (long)x * oc;
+                    if (avx)
+                    {
+                        F32x8 a = Avx.LoadVector256(bp);
+                        float* w = wp;
+                        for (int ch = 0; ch < c; ch++, w += 8)
+                            a = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(s + ch), Avx.LoadVector256(w), a);
+                        Avx.Store(acc, a);
+                    }
+                    else
+                    {
+                        for (int l = 0; l < 8; l++) acc[l] = bp[l];
+                        float* w = wp;
+                        for (int ch = 0; ch < c; ch++, w += 8)
+                        {
+                            float v = s[ch];
+                            for (int l = 0; l < oc; l++) acc[l] += v * w[l];
+                        }
+                    }
+                    for (int l = 0; l < oc; l++) o[l] = acc[l];
+                }
+                if (act != ActivationKind.None) ActRow(orow, ow * oc, act, avx);
+            });
+        }
+    }
+
+    private static void ActRow(float* p, int n, ActivationKind act, bool avx)
+    {
+        int i = 0;
+        if (avx)
+            for (; i + 8 <= n; i += 8) Avx.Store(p + i, Act8(Avx.LoadVector256(p + i), act));
+        else if (act == ActivationKind.Sigmoid)
+        {
+            var row = new Span<float>(p + i, n - i);
+            SimdMath.Sigmoid(row, row);
+            return;
+        }
+        for (; i < n; i++) p[i] = ActS(p[i], act);
     }
 
     // ======================== pad (spatial only) ========================
