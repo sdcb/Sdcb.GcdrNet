@@ -15,7 +15,7 @@ namespace Sdcb.GcdrNet.Kernels;
 /// can capture raw pointers (spans are not capturable). Edge pixels go
 /// through a scalar spill path so every pad mode stays exact.
 /// </summary>
-internal static unsafe class Avx2Kernels
+internal static unsafe partial class Avx2Kernels
 {
     internal static readonly int Threads = InitThreads();
     private static int InitThreads()

@@ -37,6 +37,43 @@ public class EngineTests
             "gc plan lost the Conv+Gelu fusion");
     }
 
+    [Theory]
+    [InlineData(false, 2)]   // logical NCHW I/O: one boundary relayout in, one out
+    [InlineData(true, 0)]    // physical I/O (fused pipelines): no transposes at all
+    public void Nhwc_TransposesDissolve(bool physicalIo, int expected)
+    {
+        // all 32 model transposes per net ([0,2,1], [0,3,1,2]) must dissolve into
+        // zero-copy layout views; acceptance bound is <= 8
+        foreach (var (path, c) in new[] { (GcPath, 3), (DrPath, 6) })
+        {
+            ExecPlan p = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, 96, 128],
+                new CompileOptions(Nhwc: true, PhysicalIo: physicalIo));
+            int n = p.Nodes.Count(m => m.Op == ExecOp.Transpose);
+            Assert.True(n <= 8, $"{Path.GetFileName(path)}: {n} transposes");
+            Assert.Equal(expected, n);
+        }
+    }
+
+    [Fact]
+    public void Nhwc_MatchesNchw()
+    {
+        // layout-planned CPU plan vs the legacy all-NCHW plan, same input
+        foreach (var (path, tag, name) in new[] { (GcPath, "pad", "input"), (DrPath, "pad", "dr_in") })
+        {
+            float[] input = Golden.F32(tag, name);
+            int[] shape = Golden.ShapeOf(tag, name);
+            OnnxModel m = OnnxModel.Load(path);
+            float[] Run(bool nhwc)
+            {
+                using var s = new InferenceSession(GraphCompiler.Compile(m, shape, new CompileOptions(nhwc)));
+                input.CopyTo(s.Input); s.Run();
+                return s.Output.ToArray();
+            }
+            var (max, rmse, _) = Golden.Diff(Run(true), Run(false));
+            Assert.True(max < 1e-5f, $"{Path.GetFileName(path)} nhwc vs nchw max diff {max} rmse {rmse}");
+        }
+    }
+
     [Fact]
     public void NoFuse_MatchesFused()
     {

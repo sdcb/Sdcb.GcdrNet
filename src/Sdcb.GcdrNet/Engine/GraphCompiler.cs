@@ -10,10 +10,13 @@ namespace Sdcb.GcdrNet.Engine;
 /// </summary>
 internal static class GraphCompiler
 {
-    public static ExecPlan Compile(OnnxModel model, ReadOnlySpan<int> inputShape)
+    public static ExecPlan Compile(OnnxModel model, ReadOnlySpan<int> inputShape) =>
+        Compile(model, inputShape, CompileOptions.Default);
+
+    public static ExecPlan Compile(OnnxModel model, ReadOnlySpan<int> inputShape, CompileOptions opt)
     {
         var c = new Compiler(model);
-        return c.Run(inputShape);
+        return c.Run(inputShape, opt);
     }
 
     private sealed class Compiler
@@ -69,7 +72,7 @@ internal static class GraphCompiler
             return outId;
         }
 
-        public ExecPlan Run(ReadOnlySpan<int> inputShape)
+        public ExecPlan Run(ReadOnlySpan<int> inputShape, CompileOptions opt)
         {
             OnnxGraphData g = _m.Graph;
             foreach (OnnxTensorData t in g.Initializers)
@@ -101,18 +104,41 @@ internal static class GraphCompiler
             if (g.Outputs.Count != 1) throw new NotSupportedException("Expected single graph output.");
             int outputValue = _byName[g.Outputs[0].Name];
 
-            return FuseAndPlan(_nodes, _values, _bufSize, _inputValue, outputValue, _m);
+            return FuseAndPlan(_nodes, _values, _bufSize, _inputValue, outputValue, opt);
         }
 
         // ---------- fusion + buffer planning ----------
         private static ExecPlan FuseAndPlan(List<ExecNode> nodes, List<CValue> values,
-            List<int> bufSize, int inputValue, int outputValue, OnnxModel model)
+            List<int> bufSize, int inputValue, int outputValue, CompileOptions opt)
         {
+            // fusion passes operate on the logical graph and are layout-blind;
+            // physical layout is decided afterwards by LayoutPlanner
             if (Environment.GetEnvironmentVariable("GCDRNET_NOFUSE") != "1")
                 Fuse(nodes, values);
+            if (opt.Nhwc)
+                LayoutPlanner.Run(nodes, values, bufSize, inputValue, ref outputValue, opt.PhysicalIo);
 
             PlanArena(nodes, values, bufSize, inputValue, outputValue,
                 out int[] offsets, out int arenaFloats);
+            if (Environment.GetEnvironmentVariable("GCDRNET_DUMP") == "2")
+            {
+                string Vs(int v) => v < 0 ? "-" : $"v{v}/b{values[v].Buf}[{string.Join('x', values[v].Shape)}]{(values[v].Layout is { } l && !Layout.IsIdentity(l) ? Layout.Str(l) : "")}";
+                for (int i = 0; i < nodes.Count; i++)
+                {
+                    ExecNode m = nodes[i];
+                    string extra = m.P switch
+                    {
+                        TransposeP t => $" perm=[{string.Join(',', t.Perm)}]",
+                        ConvP c => $" k={c.Kernel[0]}x{c.Kernel[1]} s={c.Strides[0]} g={c.Group} add={Vs(c.AddValue)} act={c.Act}",
+                        GemmP g => $" act={g.Act}",
+                        ConcatP c => $" axis={c.Axis}",
+                        ShiftP s => $" axis={s.Axis}",
+                        EwP e => $" {e.Op} act={e.Act}",
+                        _ => "",
+                    };
+                    Console.Error.WriteLine($"  #{i,-3} {m.Op,-14} {string.Join(' ', m.In.Select(Vs))} -> {string.Join(' ', m.Out.Select(Vs))}{extra}");
+                }
+            }
             if (Environment.GetEnvironmentVariable("GCDRNET_DUMP") == "1")
             {
                 var hist = nodes.GroupBy(m => m.Op).OrderByDescending(g => g.Count());
@@ -128,6 +154,8 @@ internal static class GraphCompiler
                 ArenaFloats = arenaFloats,
                 InputValue = inputValue,
                 OutputValue = outputValue,
+                Nhwc = opt.Nhwc,
+                PhysicalIo = opt.Nhwc && opt.PhysicalIo,
             };
         }
 
@@ -306,6 +334,9 @@ internal static class GraphCompiler
                 {
                     foreach (CValue v in values)
                         if (v.Buf == ab) v.Buf = ob;
+                    // b.Out is now an unproduced view of a.Out: record it so the
+                    // layout pass can follow the alias chain
+                    values[b.Out[0]].AliasOf = a.Out[0];
                 }
                 else
                 {
@@ -872,7 +903,7 @@ internal static class GraphCompiler
         private void Alias(OnnxNodeData n)
         {
             CValue x = V(Input(0, n));
-            AddValue(new CValue { Name = n.Outputs[0], Shape = x.Shape, DType = 1, Buf = x.Buf, Floats = x.Floats, Ints = x.Ints });
+            AddValue(new CValue { Name = n.Outputs[0], Shape = x.Shape, DType = 1, Buf = x.Buf, Floats = x.Floats, Ints = x.Ints, AliasOf = x.Buf >= 0 ? Input(0, n) : -1 });
         }
 
         private void EmitPad(OnnxNodeData n)
@@ -1077,7 +1108,7 @@ internal static class GraphCompiler
             bool allowZero = n.IntAttr("allowzero") == 1;
             int[] shape = ResolveReshape(x.Shape, spec, allowZero, checked((int)x.ElementCount));
             // zero-copy alias (consts keep their payload so consumers see a materialized tensor)
-            AddValue(new CValue { Name = n.Outputs[0], Shape = shape, DType = 1, Buf = x.Buf, Floats = x.Floats });
+            AddValue(new CValue { Name = n.Outputs[0], Shape = shape, DType = 1, Buf = x.Buf, Floats = x.Floats, AliasOf = x.Buf >= 0 ? Input(0, n) : -1 });
         }
 
         private void EmitSqueeze(OnnxNodeData n)
@@ -1092,7 +1123,7 @@ internal static class GraphCompiler
                 foreach (long a in axes.OrderByDescending(v => v)) dims.RemoveAt((int)(a < 0 ? a + dims.Count : a));
                 shape = dims.ToArray();
             }
-            AddValue(new CValue { Name = n.Outputs[0], Shape = shape, DType = 1, Buf = x.Buf, Floats = x.Floats });
+            AddValue(new CValue { Name = n.Outputs[0], Shape = shape, DType = 1, Buf = x.Buf, Floats = x.Floats, AliasOf = x.Buf >= 0 ? Input(0, n) : -1 });
         }
 
         private void EmitUnsqueeze(OnnxNodeData n)
@@ -1101,7 +1132,7 @@ internal static class GraphCompiler
             long[] axes = V(Input(1, n)).Ints!;
             var dims = x.Shape.ToList();
             foreach (long a in axes.OrderBy(v => v)) dims.Insert((int)(a < 0 ? a + dims.Count + 1 : a), 1);
-            AddValue(new CValue { Name = n.Outputs[0], Shape = dims.ToArray(), DType = 1, Buf = x.Buf, Floats = x.Floats });
+            AddValue(new CValue { Name = n.Outputs[0], Shape = dims.ToArray(), DType = 1, Buf = x.Buf, Floats = x.Floats, AliasOf = x.Buf >= 0 ? Input(0, n) : -1 });
         }
 
         private void EmitElementwise(OnnxNodeData n, string op)
