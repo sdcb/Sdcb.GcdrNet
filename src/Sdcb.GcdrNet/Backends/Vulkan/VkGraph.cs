@@ -88,9 +88,10 @@ internal sealed class VkGraphModel : IDisposable
                 case LnP:
                     Need(n.In[0], CK.Raw); Need(n.In[1], CK.F32); Need(n.In[2], CK.F32);
                     break;
-                case UpHeadP:
+                case UpHeadP up:
                     Need(n.In[2], CK.Raw);
                     if (n.In.Length > 3) Need(n.In[3], CK.F32);
+                    if (up.SkipConv is not null) { Need(up.SkipW, CK.ConvW); Need(up.SkipB, CK.F32); }
                     break;
                 default:
                     foreach (int iv in n.In) Need(iv, CK.Raw);
@@ -186,7 +187,7 @@ internal sealed class VkGraphModel : IDisposable
     /// dense, channel counts in 16 B quads, an epilogue it implements, M within the grid limit.</summary>
     private static bool UseCoopConv(VkDevice dev, bool f16, ExecPlan plan, ExecNode n, ConvP cp)
     {
-        if (!dev.CoopMat16 || !f16 || cp.Group != 1 || cp.Dilations.Any(d => d != 1)) return false;
+        if (!dev.CoopMat16 || !f16 || cp.Group != 1 || cp.Pool is not null || cp.Dilations.Any(d => d != 1)) return false;
         if (cp.Act is not (ActivationKind.None or ActivationKind.Relu or ActivationKind.Gelu)) return false;
         if (cp.PadMode == PadMode.Constant && cp.PadValue != 0f) return false;
         int[] si = plan.Values[n.In[0]].PhysShape, so = plan.Values[n.Out[0]].PhysShape;   // [1,h,w,c]
@@ -354,8 +355,22 @@ internal sealed class VkGraphModel : IDisposable
             case ExecOp.Conv:
             {
                 var p = (ConvP)n.P!;
-                if (p.Pool is not null) throw new NotSupportedException("Vulkan: fused conv+pool is a CPU-plan op.");
                 RequireNhwc(n.In[0]); RequireNhwc(n.Out[0]);
+                if (p.Pool is { } pool)
+                {
+                    // small-ic stem conv + 2x2/2 max pool (GraphCompiler.GpuSmallConv)
+                    int[] ci = shapeIn(0), co = shapeOut(), cw = V[n.In[1]].Shape;
+                    if (!GraphCompiler.GpuSmallConv(p, cw, ci[3]) || p.AddValue >= 0 || ci[1] != co[1] * 2 || ci[2] != co[2] * 2)
+                        throw new NotSupportedException("Vulkan convpool: unsupported conv");
+                    uint pf = (p.BiasValue >= 0 ? 1u : 0u) | (p.PadMode == PadMode.Reflect ? 2u : 0u)
+                        | (p.Act == ActivationKind.Relu ? 4u : 0u) | (pool.FuseRelu ? 8u : 0u);
+                    yield return ND("convpool",
+                        [Bind(n.In[0]), Bind(n.In[1], CK.ConvW), B(p.BiasValue, CK.F32), Bind(n.Out[0])],
+                        PcOfF(U(ci[3], ci[1], ci[2], cw[0], co[1], co[2], p.Kernel[0], p.Kernel[1], p.Pads[0], p.Pads[1], (int)pf),
+                            p.PadMode == PadMode.Constant ? p.PadValue : 0f),
+                        G((uint)co[1] * (uint)co[2] * (uint)(cw[0] / 8)), name: "convpool");
+                    break;
+                }
                 if (p.AddValue >= 0) RequireNhwc(p.AddValue);
                 int[] si = shapeIn(0), sw_ = V[n.In[1]].Shape, so = shapeOut();   // [1,h,w,c]
                 uint ih = (uint)si[1], iw = (uint)si[2], ic = (uint)si[3];
@@ -484,7 +499,6 @@ internal sealed class VkGraphModel : IDisposable
             case ExecOp.UpHead:
             {
                 var p = (UpHeadP)n.P!;
-                if (p.SkipConv is not null) throw new NotSupportedException("Vulkan: UpHead skip recompute is a CPU-plan op.");
                 RequireNhwc(n.In[0]); RequireNhwc(n.In[1]); RequireNhwc(n.Out[0]);
                 int[] si = shapeIn(0), so = shapeOut();
                 uint c = (uint)si[3], oc = (uint)so[3];
@@ -493,6 +507,23 @@ internal sealed class VkGraphModel : IDisposable
                 uint act = p.Act switch { ActivationKind.Relu => 1u, ActivationKind.Sigmoid => 2u, ActivationKind.None => 0u,
                     _ => throw new NotSupportedException($"Vulkan UpHead: {p.Act}") };
                 uint flags = (p.ResizeRelu ? 1u : 0u) | (p.SkipRelu ? 2u : 0u) | (hasBias ? 4u : 0u) | (act << 3);
+                if (p.SkipConv is { } sc)
+                {
+                    // skip recomputed from the stem conv's input (GraphCompiler.GpuSmallConv, c <= 32)
+                    int[] xi = shapeIn(1), cw = V[p.SkipW].Shape;
+                    if (!GraphCompiler.GpuSmallConv(sc, cw, xi[3]) || cw[0] != c || c > 32 || xi[1] != so[1] || xi[2] != so[2])
+                        throw new NotSupportedException("Vulkan UpHead: unsupported skip conv");
+                    uint cf = (sc.BiasValue >= 0 ? 1u : 0u) | (sc.PadMode == PadMode.Reflect ? 2u : 0u)
+                        | (sc.Act == ActivationKind.Relu ? 4u : 0u);
+                    yield return ND("uphead_sc",
+                        [Bind(n.In[0]), Bind(n.In[1]), Bind(n.In[2]), hasBias ? Bind(n.In[3], CK.F32) : B(-1, CK.F32), Bind(n.Out[0]),
+                         Bind(p.SkipW, CK.ConvW), B(p.SkipB, CK.F32)],
+                        PcOfF([c, (uint)si[1], (uint)si[2], (uint)so[1], (uint)so[2], oc, flags],
+                            p.Scales[2], p.Scales[3]).Concat(PcOfF(U(xi[3], sc.Kernel[0], sc.Kernel[1], sc.Pads[0], sc.Pads[1], (int)cf),
+                            sc.PadMode == PadMode.Constant ? sc.PadValue : 0f)).ToArray(),
+                        G((uint)so[1] * (uint)so[2]), name: "uphead_sc");
+                    break;
+                }
                 yield return ND("uphead",
                     [Bind(n.In[0]), Bind(n.In[1]), Bind(n.In[2]), hasBias ? Bind(n.In[3], CK.F32) : B(-1, CK.F32), Bind(n.Out[0])],
                     PcOfF([c, (uint)si[1], (uint)si[2], (uint)so[1], (uint)so[2], oc, flags],

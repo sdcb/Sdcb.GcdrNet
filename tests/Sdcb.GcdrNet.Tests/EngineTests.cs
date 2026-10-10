@@ -87,7 +87,7 @@ public class EngineTests
             float[] input = Enumerable.Range(0, c * 96 * 128).Select(_ => (float)rnd.NextDouble()).ToArray();
             (float[] y, ExecPlan p) Run(bool fuse)
             {
-                ExecPlan p = GraphCompiler.Compile(m, shape, new CompileOptions(Nhwc: true, PhysicalIo: true, CpuFusions: fuse));
+                ExecPlan p = GraphCompiler.Compile(m, shape, new CompileOptions(Nhwc: true, PhysicalIo: true, MemFuse: fuse));
                 using var s = new InferenceSession(p);
                 input.CopyTo(s.Input); s.Run();
                 return (s.Output.ToArray(), p);
@@ -100,6 +100,20 @@ public class EngineTests
             Assert.Contains(fp.Nodes, n => n.P is UpHeadP { SkipConv: not null });
             Assert.True(fp.ArenaFloats * 2 < up.ArenaFloats, $"{name}: arena {fp.ArenaFloats} vs unfused {up.ArenaFloats}");
             Assert.True(fy.AsSpan().SequenceEqual(uy), $"{name}: fused output differs");
+        }
+    }
+
+    [Fact]
+    public void MemFusions_GpuPlans_StemOnly()
+    {
+        // Vulkan plans get the stem conv+pool and the UpHead recompute (small-ic shaders) only
+        foreach (var (path, c) in new[] { (GcPath, 3), (DrPath, 6) })
+        {
+            ExecPlan p = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, 96, 128],
+                new CompileOptions(Nhwc: true, PhysicalIo: true, Gpu: true));
+            Assert.Single(p.Nodes, n => n.P is ConvP { Pool: not null });
+            Assert.Equal(2, p.Nodes.Count(n => n.Op == ExecOp.MaxPool));
+            Assert.Contains(p.Nodes, n => n.P is UpHeadP { SkipConv: not null, SkipW: >= 0 });
         }
     }
 

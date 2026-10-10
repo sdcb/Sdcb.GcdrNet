@@ -1,0 +1,81 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+#extension GL_EXT_control_flow_attributes : require
+// Small-ic conv (stem: ic < 8, stride 1) with a fused 2x2/2 max pool, NHWC:
+//   o[py][px][n] = [relu] max_{dy,dx<2} [relu](b[n] + sum_k x[2py+dy, 2px+dx; k] w[k][n])
+// One thread per (pooled pixel, 8 output channels); weights staged in shared
+// memory as vec4 over n ([K][oc/4], K * oc <= 4096). The full-resolution conv
+// output is never stored. fp32 math.
+// flags: bit0 bias, bit1 reflect pad, bit2 conv relu, bit3 pool relu
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };      // [ih][iw][ic]
+layout(set = 0, binding = 1) readonly buffer W { ET w[]; };      // [K][oc], k = (ky*kw + kx)*ic + ci
+layout(set = 0, binding = 2) readonly buffer B { float b[]; };   // [oc] (dummy if none)
+layout(set = 0, binding = 3) writeonly buffer O { ET o[]; };     // [ph][pw][oc]
+
+layout(push_constant) uniform PC {
+    uint ic, ih, iw, oc, ph, pw, kh, kw, pt, pl, flags;
+    float padv;
+} p;
+
+shared vec4 ws[1024];
+
+int mirror(int i, int d) { if (d <= 1) return 0; while (i < 0 || i >= d) i = i < 0 ? -i : 2 * d - 2 - i; return i; }
+
+void main()
+{
+    uint tid = gl_LocalInvocationID.x;
+    uint K = p.kh * p.kw * p.ic, oc4 = p.oc >> 2;
+    for (uint e = tid; e < K * p.oc; e += 256u) ws[e >> 2][e & 3u] = float(w[e]);
+    barrier();
+
+    uint groups = p.oc >> 3;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= p.ph * p.pw * groups) return;
+    uint g = idx % groups, pp = idx / groups;
+    uint pxx = pp % p.pw, pyy = pp / p.pw;
+    bool reflect = (p.flags & 2u) != 0u, crelu = (p.flags & 4u) != 0u;
+    uint n0 = g * 8u;
+    vec4 b0 = vec4(0.0), b1 = vec4(0.0);
+    if ((p.flags & 1u) != 0u)
+    {
+        b0 = vec4(b[n0], b[n0 + 1u], b[n0 + 2u], b[n0 + 3u]);
+        b1 = vec4(b[n0 + 4u], b[n0 + 5u], b[n0 + 6u], b[n0 + 7u]);
+    }
+    vec4 m0 = vec4(-3.4e38), m1 = vec4(-3.4e38);
+    uint oh = p.ph * 2u, ow = p.pw * 2u;   // conv output = input size (stride 1, 'same')
+    [[unroll]] for (uint d = 0u; d < 4u; d++)
+    {
+        uint oy = pyy * 2u + (d >> 1), ox = pxx * 2u + (d & 1u);
+        vec4 a0 = b0, a1 = b1;
+        for (uint ky = 0u; ky < p.kh; ky++)
+        {
+            int iy = int(oy + ky) - int(p.pt);
+            bool vy = iy >= 0 && iy < int(p.ih);
+            if (!vy && reflect) { iy = mirror(iy, int(p.ih)); vy = true; }
+            for (uint kx = 0u; kx < p.kw; kx++)
+            {
+                int ix = int(ox + kx) - int(p.pl);
+                bool vx = ix >= 0 && ix < int(p.iw);
+                if (!vx && reflect) { ix = mirror(ix, int(p.iw)); vx = true; }
+                bool valid = vy && vx;
+                uint base = valid ? (uint(iy) * p.iw + uint(ix)) * p.ic : 0u;
+                uint kb = (ky * p.kw + kx) * p.ic;
+                for (uint ci = 0u; ci < p.ic; ci++)
+                {
+                    float xv = valid ? float(x[base + ci]) : p.padv;
+                    uint wr = (kb + ci) * oc4 + g * 2u;
+                    a0 += xv * ws[wr];
+                    a1 += xv * ws[wr + 1u];
+                }
+            }
+        }
+        if (crelu) { a0 = max(a0, vec4(0.0)); a1 = max(a1, vec4(0.0)); }
+        m0 = max(m0, a0); m1 = max(m1, a1);
+    }
+    if ((p.flags & 8u) != 0u) { m0 = max(m0, vec4(0.0)); m1 = max(m1, vec4(0.0)); }
+    uint ob = pp * p.oc + n0;
+    [[unroll]] for (uint l = 0u; l < 4u; l++) { o[ob + l] = ET(m0[l]); o[ob + 4u + l] = ET(m1[l]); }
+}

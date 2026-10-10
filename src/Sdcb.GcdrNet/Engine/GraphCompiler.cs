@@ -19,6 +19,14 @@ internal static class GraphCompiler
         return c.Run(inputShape, opt);
     }
 
+    /// <summary>Vulkan small-conv shaders (uphead skip recompute, convpool): dense stride-1
+    /// conv, ic &lt; 8, oc a multiple of 8 (&lt;= 128), weights fit the 16 KB staging.</summary>
+    internal static bool GpuSmallConv(ConvP cp, int[] wShape, int ic) =>
+        cp.Group == 1 && ic < 8 && wShape.Length == 4 && wShape[0] % 8 == 0 && wShape[0] <= 128
+        && (long)wShape[0] * ic * wShape[2] * wShape[3] <= 4096
+        && cp.Strides.All(s => s == 1) && cp.Dilations.All(d => d == 1)
+        && cp.Act is ActivationKind.None or ActivationKind.Relu;
+
     private sealed class Compiler
     {
         private readonly OnnxModel _m;
@@ -122,9 +130,9 @@ internal static class GraphCompiler
             }
             if (opt.Nhwc)
                 LayoutPlanner.Run(nodes, values, bufSize, inputValue, ref outputValue, opt.PhysicalIo);
-            if (opt.Nhwc && opt.CpuFusions && CompileOptions.MemFusions
+            if (opt.Nhwc && opt.MemFuse && CompileOptions.MemFusions
                 && Environment.GetEnvironmentVariable("GCDRNET_NOFUSE") != "1")
-                FuseCpuMemory(nodes, values, outputValue);
+                FuseMemory(nodes, values, outputValue, opt.Gpu);
 
             PlanArena(nodes, values, bufSize, inputValue, outputValue,
                 out int[] offsets, out int arenaFloats);
@@ -357,7 +365,7 @@ internal static class GraphCompiler
         }
 
         /// <summary>
-        /// CPU NHWC memory fusions (after layout planning) that keep full-resolution
+        /// NHWC memory fusions (after layout planning) that keep full-resolution
         /// tensors from ever being stored:
         /// <list type="bullet">
         /// <item>UpHead skip recompute: when the skip is a cheap direct conv of a smaller
@@ -366,8 +374,10 @@ internal static class GraphCompiler
         /// <item>Conv → MaxPool(2x2/2): the conv output's only reader is the pool, so the
         ///   conv emits pooled rows directly (<see cref="ConvP.Pool"/>).</item>
         /// </list>
+        /// Vulkan plans (<paramref name="gpu"/>) only get what its shaders implement: small-ic
+        /// (stem) convs with staged weights, both for the recompute and for conv+pool.
         /// </summary>
-        private static void FuseCpuMemory(List<ExecNode> nodes, List<CValue> values, int outputValue)
+        private static void FuseMemory(List<ExecNode> nodes, List<CValue> values, int outputValue, bool gpu)
         {
             int Producer(int v) => nodes.FindIndex(m => m.Out.Length == 1 && m.Out[0] == v);
             int Uses(int v)
@@ -386,6 +396,7 @@ internal static class GraphCompiler
                 return n;
             }
             bool Nhwc4(int v) => values[v].Shape.Length == 4 && values[v].Layout is [0, 2, 3, 1];
+            bool SameHw(int a, int b) => values[a].Shape[2] == values[b].Shape[2] && values[a].Shape[3] == values[b].Shape[3];
 
             // 1) UpHead skip recompute
             foreach (ExecNode u in nodes)
@@ -402,8 +413,11 @@ internal static class GraphCompiler
                 // for its other reader(s) (and keeps the shared ConvP packed)
                 if (ic * 2 > c || Kernels.Nhwc.WinogradEligible(cp, w.Shape, ic) || Uses(s) < 2) continue;
                 if (cp.BiasValue >= 0 && values[cp.BiasValue].Floats is null) continue;
+                if (gpu && (!GpuSmallConv(cp, w.Shape, ic) || c > 32 || !SameHw(xin, s))) continue;
                 u.In[1] = xin;
                 up.SkipConv = cp;
+                up.SkipW = nodes[ci].In[1];
+                up.SkipB = cp.BiasValue;
             }
 
             // 2) Conv -> MaxPool(2x2, stride 2, no pad, exact halving)
@@ -417,6 +431,7 @@ internal static class GraphCompiler
                     || Uses(v) != 1 || !Nhwc4(v) || !Nhwc4(m.Out[0])) continue;
                 int[] cs = values[v].Shape, ps = values[m.Out[0]].Shape;
                 if (cs[2] != ps[2] * 2 || cs[3] != ps[3] * 2) continue;
+                if (gpu && (!GpuSmallConv(cp, values[nodes[ci].In[1]].Shape, values[nodes[ci].In[0]].Shape[1]) || !SameHw(nodes[ci].In[0], v))) continue;
                 cp.Pool = pp;
                 nodes[ci].Out = [m.Out[0]];
                 nodes.RemoveAt(pi);
