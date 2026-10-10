@@ -90,7 +90,7 @@ and `DOTNET_EnableAVX512=0`.
 ### Notes
 
 - Vulkan path requires a compute-capable device; `GcdrBackend.Auto` falls back to CPU.
-- Thread-safety: `GcdrEnhancer` is thread-safe (per-size session pooling); individual
+- Thread-safety: `GcdrEnhancer` is thread-safe (CPU: per-size session pools; Vulkan: size-agnostic worker pool); individual
   `InferenceSession`/`VkInferenceSession` objects are not.
 - Not covered: batched inference (N>1), fp16/int8, Metal (interface-ready).
 

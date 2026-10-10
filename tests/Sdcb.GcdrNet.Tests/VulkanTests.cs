@@ -103,6 +103,31 @@ public class VulkanTests
         Assert.True(maxd <= u8tol, $"pipeline-vk-strided[{tag}] max u8 diff {maxd} (tol {u8tol})");
     }
 
+    [SkippableFact]
+    public void Pipeline_SizeSwitching_MatchesFresh_Vulkan()
+    {
+        // one size-agnostic worker re-records across sizes and reuses (dirty,
+        // larger) arenas: every size must match a fresh enhancer byte for byte
+        Skip.IfNot(VkAvailable());
+        string[] tags = ["mid", "small", "pad", "mid", "small"];
+        var fresh = new Dictionary<string, byte[]>();
+        foreach (string tag in tags.Distinct())
+        {
+            var (_, _, _, _, oh, ow) = Golden.Dims(tag);
+            using var e = GcdrEnhancer.FromFiles(GcPath, DrPath, GcdrBackend.Vulkan);
+            fresh[tag] = e.Enhance(Golden.Bgr(tag), ow, oh);
+        }
+
+        using var enh = GcdrEnhancer.FromFiles(GcPath, DrPath, GcdrBackend.Vulkan);
+        foreach (string tag in tags)
+        {
+            var (_, _, _, _, oh, ow) = Golden.Dims(tag);
+            byte[] dst = enh.Enhance(Golden.Bgr(tag), ow, oh);
+            Assert.True(dst.AsSpan().SequenceEqual(fresh[tag]), $"size-switch[{tag}] differs from a fresh worker");
+        }
+        Assert.Equal(1, enh.PoolStats.workers);
+    }
+
     private static bool VkAvailable()
     {
         try { _ = VkBackend.Default.Dev.DeviceName; return true; }

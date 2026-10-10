@@ -41,7 +41,8 @@ internal sealed class VkGraphModel : IDisposable
     private readonly VkDevice _dev;
     private readonly ExecPlan _plan;
     private int _refs = 1;  // the graph cache holds the first reference
-    internal readonly VkBuffer Consts;       // all const tensors, backend-packed
+    private readonly VkConstStore _store;
+    internal readonly VkBuffer Consts;       // all const tensors, backend-packed (shared store)
     private readonly Dictionary<(int v, CK k), ulong> _constOff = new();
     internal readonly VkBuffer Dummy;        // 64B zero buffer for unused bindings
     internal readonly VkDispatch[] Dispatches;
@@ -54,7 +55,9 @@ internal sealed class VkGraphModel : IDisposable
     /// <summary>How a const is laid out on the device (decided by its consumer).</summary>
     private enum CK { Raw, F32, ConvW, DwW }
 
-    internal VkGraphModel(VkDevice dev, ExecPlan plan, bool f16)
+    /// <param name="constKey">Sharing key for the const store (the source model): graphs of the
+    /// same model at other sizes reuse its uploaded weights. Null = private store.</param>
+    internal VkGraphModel(VkDevice dev, ExecPlan plan, bool f16, object? constKey = null)
     {
         _dev = dev;
         _plan = plan;
@@ -89,46 +92,52 @@ internal sealed class VkGraphModel : IDisposable
                     break;
             }
         }
-        ulong total = 0;
-        var items = new List<(ulong off, float[] data, bool half)>();
         foreach (var (v, k) in need)
         {
             CValue cv = plan.Values[v];
             if (k == CK.Raw && cv.Layout is { } l && !Engine.Layout.IsIdentity(l))
                 throw new NotSupportedException($"Vulkan: const '{cv.Name}' with non-identity layout");
-            float[] data = k switch
-            {
-                CK.ConvW => PackConv(cv),
-                CK.DwW => PackDw(cv),
-                _ => cv.Floats!,
-            };
-            bool half = f16 && k != CK.F32;
-            total = (total + 63) & ~63UL;
-            _constOff[(v, k)] = total;
-            items.Add((total, data, half));
-            total += (ulong)data.Length * (half ? 2UL : 4UL);
         }
-        ConstBytes = Math.Max((total + 63) & ~63UL, 64);
-        byte[] host = new byte[ConstBytes];
-        foreach (var (off, data, half) in items)
+        float[][] srcs = need.Select(x => plan.Values[x.v].Floats!).ToArray();
+        int[] kinds = need.Select(x => (int)x.k).ToArray();
+        _store = VkConstStore.Acquire(dev, constKey, f16, srcs, kinds, () =>
         {
-            if (half)
+            ulong total = 0;
+            var offs = new ulong[need.Count];
+            var items = new List<(ulong off, float[] data, bool half)>();
+            for (int i = 0; i < need.Count; i++)
             {
-                Span<Half> dst = MemoryMarshal.Cast<byte, Half>(host.AsSpan(checked((int)off), data.Length * 2));
-                for (int i = 0; i < data.Length; i++) dst[i] = (Half)data[i];
+                var (v, k) = need[i];
+                CValue cv = plan.Values[v];
+                float[] data = k switch
+                {
+                    CK.ConvW => PackConv(cv),
+                    CK.DwW => PackDw(cv),
+                    _ => cv.Floats!,
+                };
+                bool half = f16 && k != CK.F32;
+                total = (total + 63) & ~63UL;
+                offs[i] = total;
+                items.Add((total, data, half));
+                total += (ulong)data.Length * (half ? 2UL : 4UL);
             }
-            else
-                MemoryMarshal.AsBytes(data.AsSpan()).CopyTo(host.AsSpan(checked((int)off)));
-        }
-        Consts = dev.NewStorageBuffer(ConstBytes, hostVisible: dev.CoherentDeviceLocal);
-        Dummy = dev.NewStorageBuffer(64, hostVisible: dev.CoherentDeviceLocal);
-        unsafe
-        {
-            fixed (byte* hp = host) dev.Upload(Consts, hp, ConstBytes);
-            byte* z = stackalloc byte[64];
-            new Span<byte>(z, 64).Clear();
-            dev.Upload(Dummy, z, 64);
-        }
+            byte[] host = new byte[Math.Max((total + 63) & ~63UL, 64)];
+            foreach (var (off, data, half) in items)
+            {
+                if (half)
+                {
+                    Span<Half> dst = MemoryMarshal.Cast<byte, Half>(host.AsSpan(checked((int)off), data.Length * 2));
+                    for (int i = 0; i < data.Length; i++) dst[i] = (Half)data[i];
+                }
+                else
+                    MemoryMarshal.AsBytes(data.AsSpan()).CopyTo(host.AsSpan(checked((int)off)));
+            }
+            return (offs, host);
+        });
+        for (int i = 0; i < need.Count; i++) _constOff[need[i]] = _store.Offsets[i];
+        Consts = _store.Consts;
+        Dummy = _store.Dummy;
+        ConstBytes = _store.Bytes;
 
         var disps = new List<VkDispatch>();
         NodeRanges = new (int start, int count)[plan.Nodes.Length];
@@ -527,9 +536,22 @@ internal sealed class VkGraphModel : IDisposable
         if (Interlocked.Increment(ref _refs) <= 1)
             throw new ObjectDisposedException(nameof(VkGraphModel), "const buffers already freed");
     }
+    /// <summary>Acquire unless already freed (no resurrection; for racing cache readers).</summary>
+    public bool TryAcquire()
+    {
+        while (true)
+        {
+            int r = Volatile.Read(ref _refs);
+            if (r <= 0) return false;
+            if (Interlocked.CompareExchange(ref _refs, r + 1, r) == r) return true;
+        }
+    }
     public void Release()
     {
-        if (Interlocked.Decrement(ref _refs) == 0) { Consts.Free(); Dummy.Free(); }
+        if (Interlocked.Decrement(ref _refs) == 0) _store.Release();
     }
+
+    /// <summary>The plan this graph was compiled from (arena offsets, I/O values).</summary>
+    internal ExecPlan Plan => _plan;
     public void Dispose() => Release();
 }

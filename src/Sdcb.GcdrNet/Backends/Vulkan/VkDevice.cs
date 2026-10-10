@@ -530,6 +530,38 @@ internal unsafe sealed class VkDevice : IDisposable
         if (cmd != IntPtr.Zero) Vk.vkFreeCommandBuffers(Device, _commandPool, 1, &cmd);
     }
 
+    /// <summary>Private resettable command pool (command pools are externally synchronized:
+    /// a worker that re-records on its own thread must not share the device pool).</summary>
+    public IntPtr NewCommandPool()
+    {
+        Vk.VkCommandPoolCreateInfo ci = new()
+        {
+            SType = VkConst.StCommandPoolCreateInfo,
+            Flags = VkConst.CmdPoolResetCommandBuffer,
+            QueueFamilyIndex = QueueFamily,
+        };
+        Vk.Check(Vk.vkCreateCommandPool(Device, &ci, null, out IntPtr pool), "vkCreateCommandPool");
+        return pool;
+    }
+
+    public IntPtr AllocateCommandBuffer(IntPtr pool)
+    {
+        Vk.VkCommandBufferAllocateInfo ai = new()
+        {
+            SType = VkConst.StCommandBufferAllocateInfo,
+            CommandPool = pool, Level = VkConst.CmdBufferLevelPrimary, CommandBufferCount = 1,
+        };
+        IntPtr cmd;
+        Vk.Check(Vk.vkAllocateCommandBuffers(Device, &ai, &cmd), "vkAllocateCommandBuffers");
+        return cmd;
+    }
+
+    /// <summary>Destroys a private command pool (frees its command buffers).</summary>
+    public void DestroyCommandPool(IntPtr pool)
+    {
+        if (pool != IntPtr.Zero) Vk.vkDestroyCommandPool(Device, pool, null);
+    }
+
     public IntPtr NewFence(bool signaled = false)
     {
         Vk.VkFenceCreateInfo ci = new() { SType = VkConst.StFenceCreateInfo, Flags = signaled ? 1u : 0u };

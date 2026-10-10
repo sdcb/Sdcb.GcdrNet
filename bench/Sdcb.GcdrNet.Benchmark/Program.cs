@@ -370,7 +370,7 @@ public static class Program
 
     // Iterate the RealDAE corpus (manifest.json + *.webp; *_gt.webp for PSNR when present).
     // First image warms up global init (model load/JIT); every remaining image is timed once —
-    // cold e2e including per-size pipeline creation, excluding decode.
+    // cold e2e including per-size setup (plans, graphs, buffer growth), excluding decode.
     private static int Corpus(string gcPath, string drPath, string corpusDir, string backend)
     {
         var be = backend.ToLowerInvariant() switch
@@ -536,10 +536,10 @@ public static class Program
         Console.WriteLine($"corpus[{backend}] {run.Length} timed images: {totalMs:F1} ms total, " +
             $"{totalMp / (totalMs / 1000):F2} MP/s, mean {totalMs / run.Length:F1} ms");
         Console.WriteLine($"  2nd pass: {warmMs:F1} ms total, {totalMp / (warmMs / 1000):F2} MP/s " +
-            $"(delta = per-size pipeline creation {totalMs - warmMs:F0} ms, {100.0 * (totalMs - warmMs) / totalMs:F0}%)");
+            $"(delta = per-size setup {totalMs - warmMs:F0} ms, {100.0 * (totalMs - warmMs) / totalMs:F0}%)");
         if (psnrN > 0) Console.WriteLine($"  psnr mean {psnrSum / psnrN:F2} dB over {psnrN} images");
         var (pools, workers, evicted) = enh.PoolStats;
-        Console.WriteLine($"  pools: {pools} size pools created ({workers} workers), {evicted} evicted");
+        Console.WriteLine($"  pools: {pools} pools created ({workers} workers), {evicted} evicted");
         Console.WriteLine($"  ws: init {wsInit0:F0} -> loaded {wsLoaded:F0} MB ({wsLoaded - wsInit0:+0;-0}), " +
             $"loaded -> last {wsLast:F0} MB (delta {wsLast - wsLoaded:+0;-0} MB), peak {wsPeak:F0} MB");
         Console.WriteLine($"  mem: managed {gcD / 1048576.0:+0;-0} MB (after forced GC), " +

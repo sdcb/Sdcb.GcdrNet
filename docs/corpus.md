@@ -30,9 +30,10 @@
   图 ~11dB 是模型对该样本的能力边界，不是 bug。
 - **内存**：引擎初始化前后 + 每张图后采样 working set（逐图 `ws` 列；汇总
   ΔWS = loaded→pass1 末张、peak = 全部采样最大值）/ managed delta / `VkDevice` live+peak
-  （单点计数 `vkAllocateMemory`，直接反映池化 pipeline 驻留）。
-- **池统计**：`pools created / workers / evicted`——池按估算字节预算驱逐
-  （~1KB/px/pipeline），50 个不同尺寸下驱逐是常态。
+  （单点计数 `vkAllocateMemory`，直接反映 worker arena 驻留）。
+- **池统计**：`pools created / workers / evicted`——CPU 按尺寸建池、按估算字节预算驱逐
+  （~1KB/px），50 个不同尺寸下驱逐是常态；Vulkan worker 与尺寸无关（只增不减的 arena，
+  换尺寸只重录命令缓冲），只有 1 个池、不驱逐。下方结果段落是复用前的历史记录。
 
 ## 环境变量
 
