@@ -4,3 +4,4 @@ obj/
 artifacts/
 *.user
 vstest*.log
+.windsurf/
