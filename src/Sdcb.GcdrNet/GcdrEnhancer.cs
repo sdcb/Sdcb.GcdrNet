@@ -9,7 +9,7 @@ namespace Sdcb.GcdrNet;
 /// <summary>Compute backend selection for <see cref="GcdrEnhancer"/>.</summary>
 public enum GcdrBackend
 {
-    /// <summary>CPU: Scalar → Vector&lt;float&gt; → AVX2 dispatch.</summary>
+    /// <summary>CPU: Scalar → Vector&lt;float&gt; → AVX2 → AVX-512 dispatch.</summary>
     Cpu,
     /// <summary>Vulkan compute on a discrete GPU.</summary>
     Vulkan,

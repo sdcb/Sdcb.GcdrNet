@@ -33,7 +33,8 @@ internal sealed class UpHeadPlan
 /// (-1 = constant pad → a pad-value pixel vector), so the inner loops never
 /// branch on borders. Dense/pointwise conv: register-tiled 6 pixels × 16 oc
 /// AVX2 micro-kernel (after SimdPaddleOCR's Nhwc.Conv) with bias-init and a
-/// fused residual + activation epilogue; other tiers use Vector&lt;float&gt;.
+/// fused residual + activation epilogue; AVX-512 widens it to 10 × 32 (Nhwc.Avx512.cs);
+/// other tiers use Vector&lt;float&gt;.
 /// </summary>
 internal static unsafe partial class Nhwc
 {
@@ -126,6 +127,7 @@ internal static unsafe partial class Nhwc
     public static void Gemm(ReadOnlySpan<float> a, int m, int k, Span<float> dst, int n,
         NhwcConvPlan kp, ActivationKind act)
     {
+        if (UseAvx512) { Gemm512(a, m, k, dst, n, kp, act); return; }
         const int G = 8;   // row tiles per task sharing one weight panel walk
         int nb = kp.Blocks, tiles = (m + Tile - 1) / Tile, groups = (tiles + G - 1) / G;
         bool avx = UseAvx;
@@ -164,10 +166,12 @@ internal static unsafe partial class Nhwc
         int kh = p.Kernel[0], kw = p.Kernel[1];
         int[] rm = Map(oh, kh, p.Strides[0], p.Pads[0], ih, p.PadMode);
         int[] cm = Map(ow, kw, p.Strides[1], p.Pads[1], iw, p.PadMode);
-        float[] padVec = new float[ic + Ob];
+        float[] padVec = new float[ic * kw + Ob];   // one constant-pad kernel row (Dense512 row runs)
         Array.Fill(padVec, p.PadValue);
         if (kp.Depthwise)
             Depthwise(src, iw, ic, dst, oh, ow, kh, kw, rm, cm, padVec, kp, add, p.Act);
+        else if (UseAvx512)
+            Dense512(src, iw, ic, dst, oh, ow, oc, kh, kw, rm, cm, padVec, kp, add, p.Act);
         else
             Dense(src, iw, ic, dst, oh, ow, oc, kh, kw, rm, cm, padVec, kp, add, p.Act);
     }

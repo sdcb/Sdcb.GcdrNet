@@ -1,0 +1,250 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
+using Sdcb.GcdrNet.Engine;
+
+using F32x8 = System.Runtime.Intrinsics.Vector256<float>;
+using F32x16 = System.Runtime.Intrinsics.Vector512<float>;
+
+namespace Sdcb.GcdrNet.Kernels;
+
+/// <summary>
+/// AVX-512 tier of the NHWC conv / Gemm micro-kernel: <see cref="Tile5"/> pixels × 32 oc
+/// (two packed 16-oc blocks, one zmm each) per pass, so every broadcast feeds two FMAs and
+/// the 32 zmm registers hold the whole accumulator tile. Per output element the reduction
+/// is the AVX2 one (bias-init, taps then channels ascending, one FMA each) and the
+/// epilogue reuses <see cref="Store16"/>'s math, so results are bit-identical to AVX2.
+/// The k loops store to a scratch tile and never call out (calls make RyuJIT spill the
+/// accumulators); the residual/activation epilogue runs afterwards.
+/// </summary>
+internal static unsafe partial class Nhwc
+{
+    private const int Tile5 = 10;
+
+    /// <summary>AVX-512 tier switch: <c>Avx512F.IsSupported</c>, off with GCDRNET_AVX512=0 or the
+    /// .NET 8/9-style DOTNET_EnableAVX512F=0 (the .NET 10 JIT only honours DOTNET_EnableAVX512).
+    /// Mutable for in-process A/B tests.</summary>
+    internal static bool UseAvx512 = Avx512F.IsSupported
+        && Environment.GetEnvironmentVariable("GCDRNET_AVX512") != "0"
+        && Environment.GetEnvironmentVariable("DOTNET_EnableAVX512F") != "0";
+
+    /// <summary>Tile5 rows × 32 oc: dst[r*ds + 0..15] ← block wb, dst[r*ds + 16..31] ← block wb + wStep.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Tile512x32(float** ptrs, int taps, int ic, float* wb, long wStep, float* bb, float* dst, int ds)
+    {
+        F32x16 a0 = Avx512F.LoadVector512(bb), b0 = Avx512F.LoadVector512(bb + Ob);
+        F32x16 a1 = a0, a2 = a0, a3 = a0, a4 = a0, a5 = a0, a6 = a0, a7 = a0, a8 = a0, a9 = a0;
+        F32x16 b1 = b0, b2 = b0, b3 = b0, b4 = b0, b5 = b0, b6 = b0, b7 = b0, b8 = b0, b9 = b0;
+        for (int tap = 0; tap < taps; tap++)
+        {
+            float** pp = ptrs + tap * Tile5;
+            float* p0 = pp[0], p1 = pp[1], p2 = pp[2], p3 = pp[3], p4 = pp[4], p5 = pp[5], p6 = pp[6], p7 = pp[7], p8 = pp[8], p9 = pp[9];
+            float* w = wb + (long)tap * ic * Ob;
+            float* x = w + wStep;
+            for (int c = 0; c < ic; c++, w += Ob, x += Ob)
+            {
+                F32x16 wa = Avx512F.LoadVector512(w), wx = Avx512F.LoadVector512(x);
+                F32x16 v = Vector512.Create(p0[c]);
+                a0 = Avx512F.FusedMultiplyAdd(v, wa, a0); b0 = Avx512F.FusedMultiplyAdd(v, wx, b0);
+                v = Vector512.Create(p1[c]);
+                a1 = Avx512F.FusedMultiplyAdd(v, wa, a1); b1 = Avx512F.FusedMultiplyAdd(v, wx, b1);
+                v = Vector512.Create(p2[c]);
+                a2 = Avx512F.FusedMultiplyAdd(v, wa, a2); b2 = Avx512F.FusedMultiplyAdd(v, wx, b2);
+                v = Vector512.Create(p3[c]);
+                a3 = Avx512F.FusedMultiplyAdd(v, wa, a3); b3 = Avx512F.FusedMultiplyAdd(v, wx, b3);
+                v = Vector512.Create(p4[c]);
+                a4 = Avx512F.FusedMultiplyAdd(v, wa, a4); b4 = Avx512F.FusedMultiplyAdd(v, wx, b4);
+                v = Vector512.Create(p5[c]);
+                a5 = Avx512F.FusedMultiplyAdd(v, wa, a5); b5 = Avx512F.FusedMultiplyAdd(v, wx, b5);
+                v = Vector512.Create(p6[c]);
+                a6 = Avx512F.FusedMultiplyAdd(v, wa, a6); b6 = Avx512F.FusedMultiplyAdd(v, wx, b6);
+                v = Vector512.Create(p7[c]);
+                a7 = Avx512F.FusedMultiplyAdd(v, wa, a7); b7 = Avx512F.FusedMultiplyAdd(v, wx, b7);
+                v = Vector512.Create(p8[c]);
+                a8 = Avx512F.FusedMultiplyAdd(v, wa, a8); b8 = Avx512F.FusedMultiplyAdd(v, wx, b8);
+                v = Vector512.Create(p9[c]);
+                a9 = Avx512F.FusedMultiplyAdd(v, wa, a9); b9 = Avx512F.FusedMultiplyAdd(v, wx, b9);
+            }
+        }
+        Avx512F.Store(dst, a0); Avx512F.Store(dst + Ob, b0); dst += ds;
+        Avx512F.Store(dst, a1); Avx512F.Store(dst + Ob, b1); dst += ds;
+        Avx512F.Store(dst, a2); Avx512F.Store(dst + Ob, b2); dst += ds;
+        Avx512F.Store(dst, a3); Avx512F.Store(dst + Ob, b3); dst += ds;
+        Avx512F.Store(dst, a4); Avx512F.Store(dst + Ob, b4); dst += ds;
+        Avx512F.Store(dst, a5); Avx512F.Store(dst + Ob, b5); dst += ds;
+        Avx512F.Store(dst, a6); Avx512F.Store(dst + Ob, b6); dst += ds;
+        Avx512F.Store(dst, a7); Avx512F.Store(dst + Ob, b7); dst += ds;
+        Avx512F.Store(dst, a8); Avx512F.Store(dst + Ob, b8); dst += ds;
+        Avx512F.Store(dst, a9); Avx512F.Store(dst + Ob, b9);
+    }
+
+    /// <summary>Tile5 rows × 16 oc (odd block count tail): dst[r*ds + 0..15].</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Tile512x16(float** ptrs, int taps, int ic, float* wb, float* bb, float* dst, int ds)
+    {
+        F32x16 a0 = Avx512F.LoadVector512(bb);
+        F32x16 a1 = a0, a2 = a0, a3 = a0, a4 = a0, a5 = a0, a6 = a0, a7 = a0, a8 = a0, a9 = a0;
+        for (int tap = 0; tap < taps; tap++)
+        {
+            float** pp = ptrs + tap * Tile5;
+            float* p0 = pp[0], p1 = pp[1], p2 = pp[2], p3 = pp[3], p4 = pp[4], p5 = pp[5], p6 = pp[6], p7 = pp[7], p8 = pp[8], p9 = pp[9];
+            float* w = wb + (long)tap * ic * Ob;
+            for (int c = 0; c < ic; c++, w += Ob)
+            {
+                F32x16 wa = Avx512F.LoadVector512(w);
+                a0 = Avx512F.FusedMultiplyAdd(Vector512.Create(p0[c]), wa, a0);
+                a1 = Avx512F.FusedMultiplyAdd(Vector512.Create(p1[c]), wa, a1);
+                a2 = Avx512F.FusedMultiplyAdd(Vector512.Create(p2[c]), wa, a2);
+                a3 = Avx512F.FusedMultiplyAdd(Vector512.Create(p3[c]), wa, a3);
+                a4 = Avx512F.FusedMultiplyAdd(Vector512.Create(p4[c]), wa, a4);
+                a5 = Avx512F.FusedMultiplyAdd(Vector512.Create(p5[c]), wa, a5);
+                a6 = Avx512F.FusedMultiplyAdd(Vector512.Create(p6[c]), wa, a6);
+                a7 = Avx512F.FusedMultiplyAdd(Vector512.Create(p7[c]), wa, a7);
+                a8 = Avx512F.FusedMultiplyAdd(Vector512.Create(p8[c]), wa, a8);
+                a9 = Avx512F.FusedMultiplyAdd(Vector512.Create(p9[c]), wa, a9);
+            }
+        }
+        Avx512F.Store(dst, a0); dst += ds;
+        Avx512F.Store(dst, a1); dst += ds;
+        Avx512F.Store(dst, a2); dst += ds;
+        Avx512F.Store(dst, a3); dst += ds;
+        Avx512F.Store(dst, a4); dst += ds;
+        Avx512F.Store(dst, a5); dst += ds;
+        Avx512F.Store(dst, a6); dst += ds;
+        Avx512F.Store(dst, a7); dst += ds;
+        Avx512F.Store(dst, a8); dst += ds;
+        Avx512F.Store(dst, a9);
+    }
+
+    /// <summary>Runs the 32- or 16-wide kernel for one tile into <paramref name="part"/> ([Tile5][32]).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Tile512(float** ptrs, int nblk, int taps, int ic, float* wb, long wStep, float* bb, float* part)
+    {
+        if (nblk == 2) Tile512x32(ptrs, taps, ic, wb, wStep, bb, part, 2 * Ob);
+        else Tile512x16(ptrs, taps, ic, wb, bb, part, 2 * Ob);
+    }
+
+    /// <summary>Epilogue of one tile: part ([Tile5][32]) → rows × (lanes0 + lanes1) outputs, + residual, act.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Epilogue512(float* part, int rows, int nblk, float* outp, float* addp, int oc,
+        int lanes0, int lanes1, ActivationKind act)
+    {
+        bool simple = act is ActivationKind.None or ActivationKind.Relu;
+        for (int r = 0; r < rows; r++, part += 2 * Ob)
+        {
+            float* o = outp + (long)r * oc;
+            float* ad = addp == null ? null : addp + (long)r * oc;
+            for (int h = 0; h < nblk; h++)
+            {
+                int lanes = h == 0 ? lanes0 : lanes1;
+                float* s = part + h * Ob, oh = o + h * Ob, ah = ad == null ? null : ad + h * Ob;
+                if (lanes == Ob && simple)
+                {
+                    F32x16 v = Avx512F.LoadVector512(s);
+                    if (ah != null) v = Avx512F.Add(v, Avx512F.LoadVector512(ah));
+                    if (act == ActivationKind.Relu) v = Avx512F.Max(v, F32x16.Zero);
+                    Avx512F.Store(oh, v);
+                }
+                else
+                    Store16(oh, ah, Avx.LoadVector256(s), Avx.LoadVector256(s + 8), lanes, act);
+            }
+        }
+    }
+
+    private static void Dense512(ReadOnlySpan<float> src, int iw, int ic, Span<float> dst,
+        int oh, int ow, int oc, int kh, int kw, int[] rm, int[] cm, float[] padVec,
+        NhwcConvPlan kp, ReadOnlySpan<float> add, ActivationKind act)
+    {
+        int taps = kh * kw, nb = kp.Blocks, np = (nb + 1) / 2;
+        long wStep = (long)taps * ic * Ob;
+        bool hasAdd = !add.IsEmpty;
+        // run[x]: output column x reads kw adjacent input pixels (no column pad/reflect), so one
+        // kernel row is a single kw*ic float run in the same order as the packed [tap][ic] weights;
+        // tiles of such columns walk kh "taps" of kw*ic channels (fewer pointers, longer k loops)
+        bool[] run = new bool[ow];
+        for (int x = 0; x < ow && kw > 1; x++)
+        {
+            bool ok = cm[x * kw] >= 0;
+            for (int kx = 1; kx < kw; kx++) ok &= cm[x * kw + kx] == cm[x * kw] + kx;
+            run[x] = ok;
+        }
+        fixed (float* sp0 = src, dp0 = dst, ap0 = add, wp0 = kp.W, bp0 = kp.Bias, pv0 = padVec)
+        fixed (int* rm0 = rm, cm0 = cm)
+        fixed (bool* run0 = run)
+        {
+            float* sp = sp0, dp = dp0, ap = ap0, wp = wp0, bp = bp0, pv = pv0;
+            int* rmp = rm0, cmp = cm0;
+            bool* runp = run0;
+            For(oh * np, (long)oh * ow * oc * taps * ic / 64, t =>
+            {
+                int y = t / np, blk = t % np * 2, nblk = Math.Min(2, nb - blk);
+                float** ptrs = stackalloc float*[Tile5 * taps];
+                float* part = stackalloc float[Tile5 * 2 * Ob];
+                float* wb = wp + blk * wStep;
+                float* bb = bp + blk * Ob;
+                int lanes0 = Math.Min(Ob, oc - blk * Ob), lanes1 = nblk == 2 ? Math.Min(Ob, oc - (blk + 1) * Ob) : 0;
+                for (int x0 = 0; x0 < ow; x0 += Tile5)
+                {
+                    int rows = Math.Min(Tile5, ow - x0);
+                    bool merged = true;
+                    for (int i = 0; i < rows; i++) merged &= runp[x0 + i];
+                    long o = ((long)y * ow + x0) * oc + blk * Ob;
+                    if (merged)
+                    {
+                        for (int ky = 0; ky < kh; ky++)
+                        {
+                            int r = rmp[y * kh + ky];
+                            for (int i = 0; i < Tile5; i++)
+                            {
+                                int c = cmp[(x0 + Math.Min(i, rows - 1)) * kw];
+                                ptrs[ky * Tile5 + i] = r < 0 ? pv : sp + ((long)r * iw + c) * ic;
+                            }
+                        }
+                        Tile512(ptrs, nblk, kh, kw * ic, wb, wStep, bb, part);
+                    }
+                    else
+                    {
+                        for (int tap = 0; tap < taps; tap++)
+                        {
+                            int r = rmp[y * kh + tap / kw];
+                            for (int i = 0; i < Tile5; i++)
+                            {
+                                int c = cmp[(x0 + Math.Min(i, rows - 1)) * kw + tap % kw];
+                                ptrs[tap * Tile5 + i] = r < 0 || c < 0 ? pv : sp + ((long)r * iw + c) * ic;
+                            }
+                        }
+                        Tile512(ptrs, nblk, taps, ic, wb, wStep, bb, part);
+                    }
+                    Epilogue512(part, rows, nblk, dp + o, hasAdd ? ap + o : null, oc, lanes0, lanes1, act);
+                }
+            });
+        }
+    }
+
+    private static void Gemm512(ReadOnlySpan<float> a, int m, int k, Span<float> dst, int n,
+        NhwcConvPlan kp, ActivationKind act)
+    {
+        const int G = 8;   // row tiles per task sharing one weight panel walk
+        int nb = kp.Blocks, np = (nb + 1) / 2, tiles = (m + Tile5 - 1) / Tile5, groups = (tiles + G - 1) / G;
+        long wStep = (long)k * Ob;
+        fixed (float* ap0 = a, dp0 = dst, wp0 = kp.W, bp0 = kp.Bias)
+        {
+            float* ap = ap0, dp = dp0, wp = wp0, bp = bp0;
+            For(groups * np, (long)m * n * k / 64, t =>
+            {
+                int g = t / np, blk = t % np * 2, nblk = Math.Min(2, nb - blk);
+                float** ptrs = stackalloc float*[Tile5];
+                float* part = stackalloc float[Tile5 * 2 * Ob];
+                float* wb = wp + blk * wStep, bb = bp + blk * Ob;
+                int lanes0 = Math.Min(Ob, n - blk * Ob), lanes1 = nblk == 2 ? Math.Min(Ob, n - (blk + 1) * Ob) : 0;
+                for (int tile = g * G, te = Math.Min(tiles, tile + G); tile < te; tile++)
+                {
+                    int m0 = tile * Tile5, rows = Math.Min(Tile5, m - m0);
+                    for (int i = 0; i < Tile5; i++) ptrs[i] = ap + (long)(m0 + Math.Min(i, rows - 1)) * k;
+                    Tile512(ptrs, nblk, 1, k, wb, wStep, bb, part);
+                    Epilogue512(part, rows, nblk, dp + (long)m0 * n + blk * Ob, null, n, lanes0, lanes1, act);
+                }
+            });
+        }
+    }
+}
