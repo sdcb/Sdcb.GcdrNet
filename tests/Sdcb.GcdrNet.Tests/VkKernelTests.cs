@@ -64,6 +64,77 @@ public unsafe class VkKernelTests
         AssertClose(got, cpu, 1e-4f, "uphead");
     }
 
+    [SkippableTheory]
+    [InlineData(6, 32, 1, false, "conv_cm_n32s")]    // dr stem (scalar k gather)
+    [InlineData(3, 16, 1, true, "conv_cm_n32s")]     // gc stem, reflect
+    [InlineData(32, 64, 1, true, "conv_cm_n64")]
+    [InlineData(64, 128, 2, false, "conv_cm")]       // stride 2
+    [InlineData(16, 32, 1, false, "conv_cm_n32")]
+    public void ConvCm_MatchesCpu(int ic, int oc, int stride, bool reflect, string shader)
+    {
+        Skip.IfNot(VkOk() && VkBackend.Default.Dev.CoopMat16, "no coopmat device");
+        var dev = VkBackend.Default.Dev;
+        var rng = new Random(ic * 7 + oc);
+        int ih = 13, iw = 21, oh = (ih + 2 - 3) / stride + 1, ow = (iw + 2 - 3) / stride + 1;
+        // fp16-representable inputs so CPU and GPU see identical operands
+        float[] x = Rand(rng, ih * iw * ic).Select(v => (float)(Half)v).ToArray();
+        float[] w = Rand(rng, oc * ic * 9).Select(v => (float)(Half)(v * 0.25f)).ToArray();
+        float[] b = Rand(rng, oc);
+        var p = new ConvP
+        {
+            Pads = [1, 1, 1, 1], Strides = [stride, stride], Dilations = [1, 1], Kernel = [3, 3],
+            PadMode = reflect ? PadMode.Reflect : PadMode.Constant, Act = ActivationKind.Relu,
+        };
+        float[] cpu = new float[oh * ow * oc];
+        NhwcConvPlan kp = Nhwc.Pack(w, [oc, ic, 3, 3], b, 1, ic);
+        Nhwc.Conv(x, ih, iw, ic, cpu, oh, ow, oc, p, kp, default);
+
+        int kr = 9 * ic, kd = (kr + 7) & ~7;
+        float[] wt = new float[oc * kd];
+        for (int o = 0; o < oc; o++)
+            for (int c = 0; c < ic; c++)
+                for (int t = 0; t < 9; t++) wt[o * kd + t * ic + c] = w[(o * ic + c) * 9 + t];
+        uint flags = 1u | (reflect ? 4u : 0u) | (1u << 4);
+        uint m = (uint)(oh * ow);
+        byte[] pc = new byte[56];
+        Buffer.BlockCopy(new uint[] { m, (uint)oc, (uint)kd, flags, (uint)ow, (uint)iw, (uint)ih, (uint)ic, 3u,
+            (uint)stride, (uint)stride, 1u, 1u, (uint)kr }, 0, pc, 0, 56);
+        uint bn = shader == "conv_cm" ? 128u : shader == "conv_cm_n64" ? 64u : 32u;
+        var bufs = new List<VkBuffer> { Half16(dev, x), Half16(dev, wt), F32(dev, b), Half16(dev, new float[8]) };
+        VkBuffer ob = dev.NewStorageBuffer((ulong)cpu.Length * 2 + 16, true, preferHost: true);
+        bufs.Add(ob);
+        VkPipeline pipe = dev.GetPipeline(shader + "_h", 5, 56);
+        IntPtr cmd = dev.NewCommandBuffer();
+        IntPtr fence = dev.NewFence();
+        var begin = new Vk.VkCommandBufferBeginInfo { SType = VkConst.StCommandBufferBeginInfo };
+        Vk.Check(Vk.vkBeginCommandBuffer(cmd, &begin), "begin");
+        VkInferenceSession.RecordOne(dev, cmd, pipe, bufs.Select(bb => (bb, 0UL, bb.Size)).ToArray(), pc,
+            (m + 127) / 128, ((uint)oc + bn - 1) / bn);
+        Vk.Check(Vk.vkEndCommandBuffer(cmd), "end");
+        dev.Submit(cmd, fence); dev.WaitFence(fence);
+        dev.DestroyFence(fence); dev.FreeCommandBuffer(cmd);
+        Half[] gh = new Half[cpu.Length];
+        fixed (Half* gp = gh) dev.Download(ob, gp, (ulong)gh.Length * 2);
+        foreach (VkBuffer bb in bufs) bb.Free();
+        float[] got = gh.Select(h => (float)h).ToArray();
+        float scale = Math.Max(1f, cpu.Max(MathF.Abs));
+        AssertClose(got, cpu, 2e-3f * scale, shader);
+    }
+
+    private static VkBuffer Half16(VkDevice dev, float[] a)
+    {
+        Half[] h = a.Select(v => (Half)v).ToArray();
+        VkBuffer bb = dev.NewStorageBuffer((ulong)h.Length * 2 + 16, true);
+        fixed (Half* hp = h) dev.Upload(bb, hp, (ulong)h.Length * 2);
+        return bb;
+    }
+
+    private static VkBuffer F32(VkDevice dev, float[] a)
+    {
+        VkBuffer bb = dev.NewStorageBuffer((ulong)a.Length * 4, true);
+        fixed (float* fp = a) dev.Upload(bb, fp, (ulong)a.Length * 4);
+        return bb;
+    }
     private static float[] Rand(Random rng, int n) =>
         Enumerable.Range(0, n).Select(_ => (float)rng.NextDouble() * 4 - 2).ToArray();
 

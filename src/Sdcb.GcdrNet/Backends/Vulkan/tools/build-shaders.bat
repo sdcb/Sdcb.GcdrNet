@@ -13,7 +13,7 @@ if not exist "%GLSLC%" (
 set "DIR=%~dp0..\Shaders"
 set "O=-O --target-env=vulkan1.1"
 for %%f in ("%DIR%\*.comp") do (
-    if not "%%~nxf"=="conv_tile.comp" (
+    if not "%%~nxf"=="conv_tile.comp" if not "%%~nxf"=="conv_cm.comp" (
         echo glslc %%~nxf
         "%GLSLC%" %O% "%%f" -o "%%~dpnf.spv" || exit /b 1
         "%GLSLC%" %O% -DF16 "%%f" -o "%%~dpnf_h.spv" || exit /b 1
@@ -22,6 +22,13 @@ for %%f in ("%DIR%\*.comp") do (
 rem conv_tile specialization variants (constant kernel/stride -> fast index math)
 call :conv "" ""   || exit /b 1
 call :conv -DF16 _h || exit /b 1
+rem tensor-core conv (fp16 storage only): BN=128 / 64 / 32 output-channel tiles
+set "CM=%DIR%\conv_cm.comp"
+"%GLSLC%" %O% "%CM%" -o "%DIR%\conv_cm_h.spv" || exit /b 1
+"%GLSLC%" %O% -DSGX=2u -DSGY=2u -DTSM=4u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_n64_h.spv" || exit /b 1
+"%GLSLC%" %O% -DSGX=1u -DSGY=4u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_n32_h.spv" || exit /b 1
+rem any-cin stems (k elements gathered one by one)
+"%GLSLC%" %O% -DSCALARK -DSGX=1u -DSGY=4u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_n32s_h.spv" || exit /b 1
 exit /b 0
 
 :conv

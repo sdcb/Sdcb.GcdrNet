@@ -53,7 +53,7 @@ internal sealed class VkGraphModel : IDisposable
     internal int Es => F16 ? 2 : 4;
 
     /// <summary>How a const is laid out on the device (decided by its consumer).</summary>
-    private enum CK { Raw, F32, ConvW, DwW }
+    private enum CK { Raw, F32, ConvW, DwW, ConvWT }
 
     /// <param name="constKey">Sharing key for the const store (the source model): graphs of the
     /// same model at other sizes reuse its uploaded weights. Null = private store.</param>
@@ -77,7 +77,7 @@ internal sealed class VkGraphModel : IDisposable
             {
                 case ConvP cp:
                     Need(n.In[0], CK.Raw);
-                    Need(n.In[1], cp.Group > 1 ? CK.DwW : CK.ConvW);
+                    Need(n.In[1], cp.Group > 1 ? CK.DwW : UseCoopConv(dev, f16, plan, n, cp) ? CK.ConvWT : CK.ConvW);
                     Need(cp.BiasValue, CK.F32);
                     Need(cp.AddValue, CK.Raw);
                     break;
@@ -116,6 +116,7 @@ internal sealed class VkGraphModel : IDisposable
                 float[] data = k switch
                 {
                     CK.ConvW => PackConv(cv),
+                CK.ConvWT => PackConvT(cv),
                     CK.DwW => PackDw(cv),
                     _ => cv.Floats!,
                 };
@@ -166,6 +167,31 @@ internal sealed class VkGraphModel : IDisposable
         return dst;
     }
 
+    // ONNX [OC][IC][KH][KW] -> [OC][Kpad], k = (ky*KW + kx)*IC + ic, Kpad = K rounded up to 8
+    // (zero-filled; matches conv_cm.comp)
+    private static float[] PackConvT(CValue w)
+    {
+        int oc = w.Shape[0], ic = w.Shape[1], taps = w.Shape[2] * w.Shape[3], k = (taps * ic + 7) & ~7;
+        float[] src = w.Floats!, dst = new float[oc * k];
+        for (int o = 0; o < oc; o++)
+            for (int c = 0; c < ic; c++)
+                for (int t = 0; t < taps; t++)
+                    dst[o * k + t * ic + c] = src[(o * ic + c) * taps + t];
+        return dst;
+    }
+
+    /// <summary>Tensor-core conv eligibility (conv_cm.comp): fp16 storage on a coopmat device,
+    /// dense, channel counts in 16 B quads, an epilogue it implements, M within the grid limit.</summary>
+    private static bool UseCoopConv(VkDevice dev, bool f16, ExecPlan plan, ExecNode n, ConvP cp)
+    {
+        if (!dev.CoopMat16 || !f16 || cp.Group != 1 || cp.Dilations.Any(d => d != 1)) return false;
+        if (cp.Act is not (ActivationKind.None or ActivationKind.Relu or ActivationKind.Gelu)) return false;
+        if (cp.PadMode == PadMode.Constant && cp.PadValue != 0f) return false;
+        int[] si = plan.Values[n.In[0]].PhysShape, so = plan.Values[n.Out[0]].PhysShape;   // [1,h,w,c]
+        long m = (long)so[1] * so[2];
+        return so[3] % 8 == 0 && (m + 127) / 128 <= 65535;   // cin % 8 != 0 -> scalar-gather stem variant
+    }
+
     // ONNX [C][1][KH][KW] -> [tap][C]
     private static float[] PackDw(CValue w)
     {
@@ -189,7 +215,11 @@ internal sealed class VkGraphModel : IDisposable
         if (_constOff.TryGetValue((valueId, kind), out ulong off))
         {
             ulong es = F16 && kind != CK.F32 ? 2UL : 4UL;
-            return new VkBind(VkSlot.Consts, off, (ulong)Math.Max(v.ElementCount, 1) * es);
+            // ConvWT rows are K-padded to 8: bind the packed length, not the logical one
+            long elems = kind == CK.ConvWT
+                ? (long)v.Shape[0] * ((v.Shape[1] * v.Shape[2] * v.Shape[3] + 7) & ~7)
+                : Math.Max(v.ElementCount, 1);
+            return new VkBind(VkSlot.Consts, off, (ulong)elems * es);
         }
         if (v.Floats != null)
             throw new InvalidOperationException($"const value '{v.Name}' not packed as {kind}");
@@ -320,6 +350,22 @@ internal sealed class VkGraphModel : IDisposable
                         PcOfF(U((int)ic, (int)ih, (int)iw, (int)oh, (int)ow, p.Kernel[0], p.Kernel[1],
                             p.Strides[0], p.Strides[1], p.Pads[0], p.Pads[1], (int)(flags & ~8u)), p.PadValue),
                         G(ic * oh * ow), name: "depthwise");
+                    break;
+                }
+                if (UseCoopConv(_dev, F16, _plan, n, p))
+                {
+                    // BM = 128 rows (pixels) in every variant; BN by oc divisibility
+                    (string cm, uint bn) = ic % 8 != 0 ? ("conv_cm_n32s", 32u)
+                        : oc % 128 == 0 ? ("conv_cm", 128u) : oc % 64 == 0 ? ("conv_cm_n64", 64u) : ("conv_cm_n32", 32u);
+                    uint m = oh * ow, kr = (uint)(p.Kernel[0] * p.Kernel[1]) * ic, kd = (kr + 7u) & ~7u;
+                    uint cflags = (p.BiasValue >= 0 ? 1u : 0u) | (p.AddValue >= 0 ? 2u : 0u)
+                        | (p.PadMode == PadMode.Reflect ? 4u : 0u)
+                        | ((p.Act == ActivationKind.Relu ? 1u : p.Act == ActivationKind.Gelu ? 2u : 0u) << 4);
+                    yield return ND(cm,
+                        [Bind(n.In[0]), Bind(n.In[1], CK.ConvWT), B(p.BiasValue, CK.F32), B(p.AddValue), Bind(n.Out[0])],
+                        PcOf(m, oc, kd, cflags, ow, iw, ih, ic, (uint)p.Kernel[1],
+                            (uint)p.Strides[0], (uint)p.Strides[1], (uint)p.Pads[0], (uint)p.Pads[1], kr),
+                        (m + 127) / 128, (oc + bn - 1) / bn, name: "conv_cm");
                     break;
                 }
                 string convShader =

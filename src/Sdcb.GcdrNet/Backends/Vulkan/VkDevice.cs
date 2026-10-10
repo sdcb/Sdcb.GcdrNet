@@ -19,6 +19,9 @@ internal unsafe sealed class VkDevice : IDisposable
     public uint MaxSharedMemory;
     public ulong MaxStorageRange = uint.MaxValue;
     public bool PushDescriptors;
+    /// <summary>VK_KHR_cooperative_matrix with a 16x16x16 fp16 x fp16 -> fp32 subgroup
+    /// config, 32-lane subgroups and shaderFloat16 (tensor-core convs; GCDRNET_VK_COOPMAT=0 disables).</summary>
+    public bool CoopMat16;
     private unsafe delegate* unmanaged[Cdecl]<IntPtr, uint, IntPtr, uint, uint, Vk.VkWriteDescriptorSet*, void> _pushDesc;
     public double TimestampPeriodNs = 1;
     private IntPtr _commandPool;
@@ -134,11 +137,13 @@ internal unsafe sealed class VkDevice : IDisposable
         byte* wantPush = stackalloc byte[] { (byte)'V', (byte)'K', (byte)'_', (byte)'K', (byte)'H', (byte)'R',
             (byte)'_', (byte)'p', (byte)'u', (byte)'s', (byte)'h', (byte)'_', (byte)'d', (byte)'e', (byte)'s', (byte)'c',
             (byte)'r', (byte)'i', (byte)'p', (byte)'t', (byte)'o', (byte)'r', 0 };
-        bool hasPush = false;
+        bool hasPush = false, hasCoop = false, hasF16Int8 = false;
         for (int i = 0; i < (int)next; i++)
         {
             string en = new((sbyte*)exts[i].ExtensionName);
             if (en == "VK_KHR_push_descriptor") hasPush = true;
+            else if (en == "VK_KHR_cooperative_matrix") hasCoop = true;
+            else if (en == "VK_KHR_shader_float16_int8") hasF16Int8 = true;
         }
         if (Environment.GetEnvironmentVariable("GCDRNET_VK_NOPUSH") == "1") hasPush = false;
 
@@ -166,9 +171,36 @@ internal unsafe sealed class VkDevice : IDisposable
         Vk.vkGetPhysicalDeviceFeatures2(d.PhysDevice, &feats2);
         d.StorageBuffer16 = feat16.StorageBuffer16BitAccess != 0;
 
-        byte** extsToEnable = stackalloc byte*[1];
+        // tensor-core path: coopmat + shaderFloat16 on top of 16-bit storage, 32-lane subgroups
+        Vk.VkPhysicalDeviceShaderFloat16Int8Features f16q = new() { SType = VkConst.StPhysicalDeviceShaderFloat16Int8Features };
+        Vk.VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopQ = new() { SType = VkConst.StPhysicalDeviceCooperativeMatrixFeaturesKHR };
+        bool wantCm = hasCoop && hasF16Int8 && d.StorageBuffer16 && d.SubgroupSize == 32
+            && Environment.GetEnvironmentVariable("GCDRNET_VK_COOPMAT") != "0";
+        if (wantCm)
+        {
+            f16q.PNext = &coopQ;
+            Vk.VkPhysicalDeviceFeatures2 fq = new() { SType = VkConst.StPhysicalDeviceFeatures2, PNext = &f16q };
+            Vk.vkGetPhysicalDeviceFeatures2(d.PhysDevice, &fq);
+            wantCm = f16q.ShaderFloat16 != 0 && coopQ.CooperativeMatrix != 0 && Coop16(d);
+        }
+
+        byte** extsToEnable = stackalloc byte*[3];
         uint nExt = 0;
         if (hasPush) extsToEnable[nExt++] = wantPush;
+        byte* pCm = stackalloc byte[32], pF16 = stackalloc byte[32];
+        System.Text.Encoding.ASCII.GetBytes("VK_KHR_cooperative_matrix\0", new Span<byte>(pCm, 32));
+        System.Text.Encoding.ASCII.GetBytes("VK_KHR_shader_float16_int8\0", new Span<byte>(pF16, 32));
+        if (wantCm) { extsToEnable[nExt++] = pCm; extsToEnable[nExt++] = pF16; }
+        Vk.VkPhysicalDeviceShaderFloat16Int8Features f16en = new()
+        {
+            SType = VkConst.StPhysicalDeviceShaderFloat16Int8Features, ShaderFloat16 = 1,
+        };
+        Vk.VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopEn = new()
+        {
+            SType = VkConst.StPhysicalDeviceCooperativeMatrixFeaturesKHR, CooperativeMatrix = 1,
+        };
+        f16en.PNext = &coopEn;
+        feat16.PNext = wantCm ? &f16en : null;
 
         // To enable 16-bit storage we chain feat16 into VkDeviceCreateInfo.pNext
         // (VK 1.1 core: no extension needed). PEnabledFeatures must be null when
@@ -188,6 +220,7 @@ internal unsafe sealed class VkDevice : IDisposable
             PpEnabledExtensionNames = nExt > 0 ? extsToEnable : null,
         };
         Vk.Check(Vk.vkCreateDevice(d.PhysDevice, &dci, null, out d.Device), "vkCreateDevice");
+        d.CoopMat16 = wantCm;
         Vk.vkGetDeviceQueue(d.Device, d.QueueFamily, 0, out d.Queue);
 
         if (hasPush)
@@ -204,7 +237,7 @@ internal unsafe sealed class VkDevice : IDisposable
             }
         }
         if (Environment.GetEnvironmentVariable("GCDRNET_VK_VERBOSE") == "1")
-            Console.Error.WriteLine($"[vk] device={d.DeviceName} qfamily={d.QueueFamily} sg={d.SubgroupSize} push={d.PushDescriptors} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
+            Console.Error.WriteLine($"[vk] device={d.DeviceName} qfamily={d.QueueFamily} sg={d.SubgroupSize} push={d.PushDescriptors} coopmat={d.CoopMat16} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
 
         fixed (Vk.VkPhysicalDeviceMemoryProperties* mp = &d.MemProps)
             Vk.vkGetPhysicalDeviceMemoryProperties(d.PhysDevice, mp);
@@ -234,6 +267,27 @@ internal unsafe sealed class VkDevice : IDisposable
         };
         Vk.Check(Vk.vkCreateDescriptorPool(d.Device, &dpci, null, out d._descPool), "vkCreateDescriptorPool");
         return d;
+    }
+
+    /// <summary>True when the device offers a 16x16x16 fp16 x fp16 -> fp32 (C and result) subgroup coopmat.</summary>
+    private static bool Coop16(VkDevice d)
+    {
+        byte[] name = System.Text.Encoding.ASCII.GetBytes("vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR\0");
+        IntPtr fn;
+        fixed (byte* pn = name) fn = Vk.vkGetInstanceProcAddr(d.Instance, pn);
+        if (fn == IntPtr.Zero) return false;
+        var query = (delegate* unmanaged[Cdecl]<IntPtr, uint*, Vk.VkCooperativeMatrixPropertiesKHR*, VkResult>)fn;
+        uint np = 0;
+        if (query(d.PhysDevice, &np, null) != VkResult.Success || np == 0) return false;
+        var props = new Vk.VkCooperativeMatrixPropertiesKHR[np];
+        for (int i = 0; i < props.Length; i++) props[i].SType = VkConst.StCooperativeMatrixPropertiesKHR;
+        fixed (Vk.VkCooperativeMatrixPropertiesKHR* pp = props)
+            if (query(d.PhysDevice, &np, pp) != VkResult.Success) return false;
+        // component types: 0 = float16, 1 = float32; scope 3 = subgroup
+        foreach (var p in props)
+            if (p.MSize == 16 && p.NSize == 16 && p.KSize == 16 && p.AType == 0 && p.BType == 0
+                && p.CType == 1 && p.ResultType == 1 && p.Scope == 3) return true;
+        return false;
     }
 
     /// <summary>Allocate a storage buffer. hostVisible=false prefers DEVICE_LOCAL;

@@ -75,10 +75,14 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         int h = ih + pt, w = iw + pl;
         if (_gcG is null || h != _h || w != _w)
         {
-            VkGraphModel gg = _be.AcquireGraph(_gcModel, [1, 3, h, w], physIo: true);
+            // a new size compiles two plans + graphs: build them side by side
+            var tg = Task.Run(() => _be.AcquireGraph(_gcModel, [1, 3, h, w], physIo: true));
             VkGraphModel gd;
             try { gd = _be.AcquireGraph(_drModel, [1, 6, h, w], physIo: true); }
-            catch { gg.Release(); throw; }
+            catch { try { tg.GetAwaiter().GetResult().Release(); } catch { } throw; }
+            VkGraphModel gg;
+            try { gg = tg.GetAwaiter().GetResult(); }
+            catch { gd.Release(); throw; }
             if (gg.F16 != _f16 || gd.F16 != _f16)
             {
                 gg.Release(); gd.Release();
@@ -96,9 +100,12 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         // is dropped to exact size as soon as a size that fits the budget comes along
         bool shrink = _gcArena is not null && _drArena is not null
             && _gcArena.Size + _drArena.Size > ArenaBudget && needGc + needDr <= ArenaBudget;
-        bool headroom = _gcArena is not null && (needGc + needDr) / 4 * 5 <= ArenaBudget;
-        Arena(ref _gcArena, needGc, shrink, headroom);
-        Arena(ref _drArena, needDr, shrink, headroom);
+        // headroom (within budget): 1/8 on the first allocation so neighbouring sizes fit,
+        // 1/4 on regrowth — a fresh multi-GB arena costs ~50-70 ms to allocate and first-touch
+        ulong div = _gcArena is null ? 8UL : 4UL;
+        ulong head = (needGc + needDr) / div * (div + 1) <= ArenaBudget ? div : 0UL;
+        Arena(ref _gcArena, needGc, shrink, head);
+        Arena(ref _drArena, needDr, shrink, head);
         ulong bgrBytes = (ulong)ih * (ulong)iw * 3 + 4;
         Staging(ref _bgrIn, ref _bgrInMap, bgrBytes, preferHost: false);
         Staging(ref _bgrOut, ref _bgrOutMap, bgrBytes, preferHost: true);
@@ -107,19 +114,20 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     }
 
     /// <summary>Per-worker device-arena budget (gc + dr). Within it arenas are grow-only
-    /// (25% headroom on regrowth) so mixed sizes don't reallocate.</summary>
+    /// (12.5% headroom on the first allocation, 25% on regrowth) so mixed sizes don't reallocate.</summary>
     internal const ulong ArenaBudget = 3UL << 30;
 
     /// <summary>Device bytes held by this worker (arenas + BGR staging).</summary>
     internal long DeviceBytes => (long)((_gcArena?.Size ?? 0) + (_drArena?.Size ?? 0)
         + (_bgrIn?.Size ?? 0) + (_bgrOut?.Size ?? 0));
 
-    private void Arena(ref VkBuffer? buf, ulong need, bool shrink, bool headroom)
+    /// <param name="headDiv">0 = exact size, else allocate need * (1 + 1/headDiv).</param>
+    private void Arena(ref VkBuffer? buf, ulong need, bool shrink, ulong headDiv)
     {
         if (buf is not null && buf.Size >= need && !shrink) return;
         buf?.Free();
         buf = null;
-        buf = _dev.NewStorageBuffer(headroom && !shrink ? need / 4 * 5 : need, hostVisible: false);
+        buf = _dev.NewStorageBuffer(headDiv != 0 && !shrink ? need / headDiv * (headDiv + 1) : need, hostVisible: false);
     }
 
     /// <summary>Grow-only mapped staging buffer; the map pointer is cleared with the buffer
