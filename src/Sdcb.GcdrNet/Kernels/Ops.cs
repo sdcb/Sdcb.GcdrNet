@@ -6,9 +6,10 @@ using Sdcb.GcdrNet.Engine;
 namespace Sdcb.GcdrNet.Kernels;
 
 /// <summary>
-/// Flat-float NCHW kernel library. Every op dispatches on
-/// <see cref="KernelDispatch.Current"/>; Scalar is the reference tier,
-/// Vector the portable SIMD tier, Avx2/Avx512/AdvSimd the hot paths.
+/// Flat-float NCHW kernel library. Dispatch is a plain IsSupported chain:
+/// AVX2+FMA hot paths, then the portable Vector&lt;float&gt; tier, else scalar
+/// (the reference). Runtime knobs: DOTNET_EnableAVX2 / DOTNET_EnableAVX /
+/// DOTNET_EnableHWIntrinsic.
 /// </summary>
 internal static unsafe class Ops
 {
@@ -42,7 +43,7 @@ internal static unsafe class Ops
         int pt = p.Pads[0], pl = p.Pads[1], pb = p.Pads[2], pr = p.Pads[3];
         int group = p.Group;
 
-        if (KernelDispatch.Current == KernelIsa.Scalar)
+        if (!Vector.IsHardwareAccelerated)
         {
             ConvScalar(src, ic, ih, iw, w, bias, dst, oc, oh, ow, kh, kw, sh, sw,
                 pt, pl, group, p.PadMode, p.PadValue, p.Act);
@@ -50,7 +51,7 @@ internal static unsafe class Ops
         }
 
         bool symmetricPad = pt == pb && pl == pr;
-        if (KernelDispatch.Current >= KernelIsa.Avx2 && Avx2.IsSupported)
+        if (UseAvx2)
         {
             if (group > 1 && group == ic)
             {
@@ -344,7 +345,7 @@ internal static unsafe class Ops
         int oh = outShape[2], ow = outShape[3];
         int kh = p.Kernel[0], kw = p.Kernel[1], sh = p.Strides[0], sw = p.Strides[1];
         int pt = p.Pads[0], pl = p.Pads[1];
-        if (KernelDispatch.Current >= KernelIsa.Avx2 && Avx2.IsSupported &&
+        if (UseAvx2 &&
             kh == 2 && kw == 2 && sh == 2 && sw == 2 && pt == 0 && pl == 0)
         {
             Avx2Kernels.MaxPool2x2(src, c, ih, iw, dst, oh, ow, p.FuseRelu);
@@ -377,8 +378,7 @@ internal static unsafe class Ops
     }
 
     // ======================== elementwise ========================
-    internal static bool UseAvx2 =>
-        KernelDispatch.Current >= KernelIsa.Avx2 && Avx2.IsSupported;
+    internal static bool UseAvx2 => Avx2.IsSupported && Fma.IsSupported;
 
     public static void Elementwise(ReadOnlySpan<float> a, int[] aShape,
         ReadOnlySpan<float> b, int[] bShape, Span<float> dst, int[] outShape, EwOp op,
@@ -549,7 +549,7 @@ internal static unsafe class Ops
     {
         int c = shape[^1];
         int rows = (int)(x.Length / c);
-        if (KernelDispatch.Current >= KernelIsa.Avx2 && Avx2.IsSupported)
+        if (UseAvx2)
         {
             Avx2Kernels.LayerNorm(x, rows, c, w, b, dst, eps);
             return;
@@ -578,7 +578,7 @@ internal static unsafe class Ops
         for (int i = 0; i < aShape.Length - 1; i++) m *= aShape[i];
         int k = aShape[^1];
         int n = outShape[^1];
-        if (!p.TransB && KernelDispatch.Current >= KernelIsa.Avx2 && Avx2.IsSupported)
+        if (!p.TransB && UseAvx2)
         {
             Avx2Kernels.GemmKN(a, m, k, b, n, bias, dst);
             return;
