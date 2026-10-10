@@ -22,12 +22,12 @@ The model is a two-stage pipeline:
 
 - **Zero inference-engine dependency** — self-contained ONNX proto reader, graph compiler
   (shape specialization, constant folding, operator fusion, buffer-arena planning).
-- **CPU backend** with ISA tiered dispatch: AVX2 (+FMA, multithreaded) → `Vector<float>` → Scalar.
+- **CPU backend** with ISA tiered dispatch: AVX-512 → AVX2 (+FMA, multithreaded) → `Vector<float>` → Scalar.
 - **Vulkan compute backend** (Windows/Linux/Android `libvulkan`): push-descriptors, ReBAR-aware
   staging, single-recorded-command-buffer graph execution, fused `bgr2nchw → GC → div6 → DR →
   nchw2bgr` pipeline with arbitrary source/destination strides.
 - Backend abstraction (`GcdrBackend`) leaves room for a future Metal backend;
-  AVX-512 / NEON kernel slots reserved in the ISA hierarchy.
+  a NEON kernel slot is reserved in the ISA hierarchy.
 
 ### Performance (RTX 3080 Ti, 1600×1152)
 
@@ -37,6 +37,9 @@ The model is a two-stage pipeline:
 | Vulkan corpus (49 RealDAE, seq order) | **~28 ms/img** | methodology: [docs/corpus.md](docs/corpus.md), current numbers: [docs/perf.md](docs/perf.md) |
 | CPU AVX2 corpus (same set) | ~722 ms/img | peak working set ~0.8 GB (Vulkan: 0.33 GB + 0.42 GB VRAM) |
 | CPU AVX2 (16 threads) gc+dr inference | ~365 ms | — |
+
+Ryzen AI 9 H 365 (AVX-512) + Radeon 880M (RDNA 3.5 iGPU): see [docs/amd-h365-880m.md](docs/amd-h365-880m.md)
+(Vulkan ~100 ms/img, CPU AVX-512 ~285 ms/img on the same corpus).
 
 ### Quick start
 
@@ -60,7 +63,7 @@ matching the reference Python implementation.
 - `src/Sdcb.GcdrNet/Onnx` — minimal protobuf reader + ONNX model/graph objects
 - `src/Sdcb.GcdrNet/Engine` — `GraphCompiler` (specialize → fold → fuse → arena-plan),
   `InferenceSession`
-- `src/Sdcb.GcdrNet/Kernels` — Scalar / `Vector<float>` / AVX2 kernels (`Ops`, `Avx2Kernels`,
+- `src/Sdcb.GcdrNet/Kernels` — Scalar / `Vector<float>` / AVX2 / AVX-512 kernels (`Ops`, `Avx2Kernels`, `Nhwc`,
   `PixelOps`, `SimdMath`)
 - `src/Sdcb.GcdrNet/Backends/Vulkan` — `Vk` P/Invoke layer, `VkDevice`, `VkShaders` (embedded
   SPIR-V), `VkGraph` dispatch lowering, `VkSession`, `VkPipeline2` (fused pipeline), `VkBackend`
@@ -83,9 +86,9 @@ RealDAE corpus (`NN_<color|shadow|bleed>.webp` + paired `NN_gt.webp` ground trut
 mode reports per-image ms, MP/s, memory and PSNR/MAE vs the `_gt` pairs.
 Kernel dispatch follows the runtime's
 `IsSupported` flags, so ISA tiers are exercised via the standard runtime knobs —
-`test-all.ps1` runs `DOTNET_EnableAVX2=0` (128-bit `Vector<float>`),
-`DOTNET_EnableAVX=0` (SSE, no FMA), `DOTNET_EnableHWIntrinsic=0` (scalar),
-and `DOTNET_EnableAVX512=0`.
+`test-all.ps1` runs the default tier (AVX-512 where supported), `DOTNET_EnableAVX512=0` and
+`DOTNET_EnableAVX512F=0` (AVX2), `DOTNET_EnableAVX2=0` (128-bit `Vector<float>`),
+`DOTNET_EnableAVX=0` (SSE, no FMA) and `DOTNET_EnableHWIntrinsic=0` (scalar).
 
 ### Notes
 
@@ -108,10 +111,10 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 ### 特性
 
 - **零推理引擎依赖**：自带 ONNX proto 读取 + 图编译（shape 特化、常量折叠、算子融合、arena 规划）
-- **CPU 后端**：AVX2+FMA 多线程 → `Vector<float>` → Scalar 三档 ISA 自动分发
+- **CPU 后端**：AVX-512 → AVX2+FMA 多线程 → `Vector<float>` → Scalar 四档 ISA 自动分发
 - **Vulkan 后端**：push-descriptor、ReBAR 感知 staging、单命令缓冲图执行、
   融合流水线（bgr2nchw→GC→div6→DR→nchw2bgr），支持任意 src/dst stride
-- 预留 Metal 后端接口位与 AVX-512/NEON 内核位
+- 预留 Metal 后端接口位与 NEON 内核位
 
 ### 性能（RTX 3080 Ti，1600×1152）
 
@@ -121,6 +124,9 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 | Vulkan corpus（49 张 RealDAE，序号序） | **~28 ms/张** | 口径见 [docs/corpus.md](docs/corpus.md)，最新数据见 [docs/perf.md](docs/perf.md) |
 | CPU AVX2 corpus（同集） | ~722 ms/张 | 峰值 working set ~0.8 GB（Vulkan：0.33 GB + 显存 0.42 GB） |
 | CPU AVX2（16 线程）gc+dr 推理 | ~365 ms | — |
+
+锐龙 AI 9 H 365（AVX-512）+ Radeon 880M（RDNA 3.5 核显）见 [docs/amd-h365-880m.md](docs/amd-h365-880m.md)
+（同一语料 Vulkan ~100 ms/张，CPU AVX-512 ~285 ms/张）。
 
 ### 快速上手
 
@@ -156,4 +162,4 @@ SkiaSharp 解码）。`tests/testdata/realdae/` 存 50 张 RealDAE 语料
 内核分发直接跟随 runtime 的 `IsSupported` 标志，
 改 CPU 内核请用 `test-all.ps1` 跑 ISA 矩阵：
 `DOTNET_EnableAVX2=0`（128 位 Vector）、`DOTNET_EnableAVX=0`（SSE 无 FMA）、
-`DOTNET_EnableHWIntrinsic=0`（纯标量）、`DOTNET_EnableAVX512=0`。
+`DOTNET_EnableHWIntrinsic=0`（纯标量），以及 `DOTNET_EnableAVX512=0` / `DOTNET_EnableAVX512F=0`（AVX2）。
