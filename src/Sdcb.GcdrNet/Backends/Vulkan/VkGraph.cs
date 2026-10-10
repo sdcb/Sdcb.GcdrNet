@@ -87,6 +87,10 @@ internal sealed class VkGraphModel : IDisposable
                 case LnP:
                     Need(n.In[0], CK.Raw); Need(n.In[1], CK.F32); Need(n.In[2], CK.F32);
                     break;
+                case UpHeadP:
+                    Need(n.In[2], CK.Raw);
+                    if (n.In.Length > 3) Need(n.In[3], CK.F32);
+                    break;
                 default:
                     foreach (int iv in n.In) Need(iv, CK.Raw);
                     break;
@@ -378,12 +382,33 @@ internal sealed class VkGraphModel : IDisposable
             {
                 var p = (ResizeP)n.P!;
                 RequireNhwc(n.In[0]); RequireNhwc(n.Out[0]);
+                bool hasAdd = n.In.Length > 1;
+                if (hasAdd) RequireNhwc(n.In[1]);
                 int[] si = shapeIn(0), so = shapeOut();
-                yield return ND("bilinear", [Bind(n.In[0]), Bind(n.Out[0])],
-                    PcOfF([(uint)si[3], (uint)si[1], (uint)si[2], (uint)so[1], (uint)so[2],
-                        p.FuseRelu ? 1u : 0u],
+                uint flags = (p.FuseRelu ? 1u : 0u) | (hasAdd ? 2u : 0u) | (p.AddRelu ? 4u : 0u);
+                yield return ND("bilinear", [Bind(n.In[0]), hasAdd ? Bind(n.In[1]) : B(-1), Bind(n.Out[0])],
+                    PcOfF([(uint)si[3], (uint)si[1], (uint)si[2], (uint)so[1], (uint)so[2], flags],
                         p.Scales[2], p.Scales[3]),
                     G((uint)so[1] * (uint)so[2] * (uint)so[3]));
+                break;
+            }
+
+            case ExecOp.UpHead:
+            {
+                var p = (UpHeadP)n.P!;
+                RequireNhwc(n.In[0]); RequireNhwc(n.In[1]); RequireNhwc(n.Out[0]);
+                int[] si = shapeIn(0), so = shapeOut();
+                uint c = (uint)si[3], oc = (uint)so[3];
+                if (oc > 8 || c > 128 || c % 4 != 0) throw new NotSupportedException($"Vulkan UpHead: c={c} oc={oc}");
+                bool hasBias = n.In.Length > 3;
+                uint act = p.Act switch { ActivationKind.Relu => 1u, ActivationKind.Sigmoid => 2u, ActivationKind.None => 0u,
+                    _ => throw new NotSupportedException($"Vulkan UpHead: {p.Act}") };
+                uint flags = (p.ResizeRelu ? 1u : 0u) | (p.SkipRelu ? 2u : 0u) | (hasBias ? 4u : 0u) | (act << 3);
+                yield return ND("uphead",
+                    [Bind(n.In[0]), Bind(n.In[1]), Bind(n.In[2]), hasBias ? Bind(n.In[3], CK.F32) : B(-1, CK.F32), Bind(n.Out[0])],
+                    PcOfF([c, (uint)si[1], (uint)si[2], (uint)so[1], (uint)so[2], oc, flags],
+                        p.Scales[2], p.Scales[3]),
+                    G((uint)so[1] * (uint)so[2]));
                 break;
             }
 

@@ -173,6 +173,18 @@ internal sealed class LayoutPlanner
                     if (cp.AddValue >= 0) cp.AddValue = Need(cp.AddValue, Layout.Nhwc);
                 }
                 Need(n, 0, Layout.Nhwc);
+                if (n.Op == ExecOp.ResizeBilinear)
+                    for (int k = 1; k < n.In.Length; k++) Need(n, k, Layout.Nhwc);   // fused addend
+                SetOut(n, Layout.Nhwc);
+                break;
+            }
+            case ExecOp.UpHead:
+            {
+                // In = [x, skip, w, bias?]: activations channels-last, weights stay logical
+                if (_values[n.In[0]].Shape.Length != 4 || _values[n.In[1]].Shape.Length != 4)
+                    throw new NotSupportedException($"layout: UpHead '{n.Name}' is not rank-4.");
+                Need(n, 0, Layout.Nhwc);
+                Need(n, 1, Layout.Nhwc);
                 SetOut(n, Layout.Nhwc);
                 break;
             }

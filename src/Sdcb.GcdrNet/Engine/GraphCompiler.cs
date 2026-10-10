@@ -114,7 +114,12 @@ internal static class GraphCompiler
             // fusion passes operate on the logical graph and are layout-blind;
             // physical layout is decided afterwards by LayoutPlanner
             if (Environment.GetEnvironmentVariable("GCDRNET_NOFUSE") != "1")
+            {
                 Fuse(nodes, values);
+                // NHWC-only kernels (CPU channels-last + Vulkan); the NCHW oracle plan keeps the plain ops
+                if (opt.Nhwc && Environment.GetEnvironmentVariable("GCDRNET_NOFUSE_UP") != "1")
+                    FuseUpsample(nodes, values, outputValue);
+            }
             if (opt.Nhwc)
                 LayoutPlanner.Run(nodes, values, bufSize, inputValue, ref outputValue, opt.PhysicalIo);
 
@@ -344,6 +349,122 @@ internal static class GraphCompiler
                 }
                 nodes.RemoveAt(u);
                 if (u < i) i--;
+            }
+        }
+
+        /// <summary>
+        /// Upsample fusions (NHWC plans):
+        /// <list type="bullet">
+        /// <item>Resize → (Relu) → Add(·, [Relu](skip)) → 1x1 Conv (few outputs) → (Sigmoid|Relu)
+        ///   becomes one <see cref="ExecOp.UpHead"/> — the network tail, where every
+        ///   intermediate is a full-resolution tensor that would otherwise round-trip memory.</item>
+        /// <item>Resize → Add(·, [Relu](skip)) becomes a Resize with an addend (In[1]).</item>
+        /// </list>
+        /// Fused nodes take the position of the last node they replace, so every input is
+        /// produced before them. Uses are counted by buffer (aliases and conv/gemm param
+        /// value ids included), so an intermediate is only dropped when nothing else reads it.
+        /// </summary>
+        private static void FuseUpsample(List<ExecNode> nodes, List<CValue> values, int outputValue)
+        {
+            int Producer(int v) => nodes.FindIndex(m => m.Out.Length == 1 && m.Out[0] == v);
+            int Uses(int v)
+            {
+                int b = values[v].Buf;
+                if (b < 0 || v == outputValue || values[outputValue].Buf == b) return int.MaxValue;
+                int n = 0;
+                foreach (ExecNode m in nodes)
+                {
+                    foreach (int iv in m.In) if (values[iv].Buf == b) n++;
+                    int a1 = m.P switch { ConvP c => c.AddValue, _ => -1 };
+                    int a2 = m.P switch { ConvP c => c.BiasValue, GemmP g => g.BiasValue, _ => -1 };
+                    if (a1 >= 0 && values[a1].Buf == b) n++;
+                    if (a2 >= 0 && values[a2].Buf == b) n++;
+                }
+                return n;
+            }
+            bool Same(int a, int b) => values[a].Shape.SequenceEqual(values[b].Shape);
+
+            // resolve add(resize(x), other): (resize node, skip value, skip relu node or null)
+            (ExecNode rs, int skip, ExecNode? relu)? MatchAdd(ExecNode add)
+            {
+                if (add.Op != ExecOp.Elementwise || add.In.Length != 2 || add.P is not EwP { Op: EwOp.Add, Act: ActivationKind.None })
+                    return null;
+                for (int k = 0; k < 2; k++)
+                {
+                    int u = add.In[k], o = add.In[1 - k];
+                    int ri = Producer(u);
+                    if (ri < 0 || nodes[ri].Op != ExecOp.ResizeBilinear || nodes[ri].In.Length != 1) continue;
+                    if (Uses(u) != 1 || !Same(u, add.Out[0]) || !Same(o, add.Out[0]) || values[o].Buf < 0) continue;
+                    int pi = Producer(o);
+                    if (pi >= 0 && nodes[pi].Op == ExecOp.Relu && nodes[pi].In.Length == 1 && Uses(o) == 1
+                        && values[nodes[pi].In[0]].Buf >= 0 && Same(nodes[pi].In[0], o))
+                        return (nodes[ri], nodes[pi].In[0], nodes[pi]);
+                    return (nodes[ri], o, null);
+                }
+                return null;
+            }
+
+            // 1) tails: ... -> Add -> Conv1x1 -> (act)
+            for (int ci = 0; ci < nodes.Count; ci++)
+            {
+                ExecNode c = nodes[ci];
+                if (c.Op != ExecOp.Conv || c.P is not ConvP cp || cp.Group != 1 || cp.Act != ActivationKind.None
+                    || cp.AddValue >= 0 || cp.Kernel[0] != 1 || cp.Kernel[1] != 1 || cp.Strides.Any(s => s != 1)
+                    || cp.Pads.Any(p => p != 0) || cp.Dilations.Any(d => d != 1)) continue;
+                CValue w = values[c.In[1]];
+                if (w.Floats is null || w.Shape.Length != 4 || w.Shape[0] > 8 || w.Shape[1] > 128 || w.Shape[1] % 4 != 0) continue;   // kernel limits (oc lanes, staged weights, vec4 channels)
+                if (cp.BiasValue >= 0 && values[cp.BiasValue].Floats is null) continue;
+                int s = c.In[0];
+                int ai = Producer(s);
+                if (ai < 0 || Uses(s) != 1 || values[s].Shape.Length != 4) continue;
+                ExecNode addNode = nodes[ai];
+                if (MatchAdd(addNode) is not { } mt) continue;
+                var (rs, skip, relu) = mt;
+
+                ExecNode? act = null;
+                int y = c.Out[0];
+                if (Uses(y) == 1)
+                {
+                    act = nodes.FirstOrDefault(m => m.In.Length == 1 && m.In[0] == y
+                        && m.Op is ExecOp.Sigmoid or ExecOp.Relu && values[m.Out[0]].Buf >= 0);
+                }
+                var head = new ExecNode
+                {
+                    Op = ExecOp.UpHead,
+                    In = cp.BiasValue >= 0 ? [rs.In[0], skip, c.In[1], cp.BiasValue] : [rs.In[0], skip, c.In[1]],
+                    Out = [act?.Out[0] ?? y],
+                    P = new UpHeadP
+                    {
+                        Scales = ((ResizeP)rs.P!).Scales,
+                        ResizeRelu = ((ResizeP)rs.P!).FuseRelu,
+                        SkipRelu = relu is not null,
+                        Act = act is null ? ActivationKind.None : act.Op == ExecOp.Sigmoid ? ActivationKind.Sigmoid : ActivationKind.Relu,
+                    },
+                    SrcNode = c.SrcNode,
+                    Name = c.Name + ".uphead",
+                };
+                nodes[ci] = head;
+                nodes.Remove(rs); nodes.Remove(addNode);
+                if (relu is not null) nodes.Remove(relu);
+                if (act is not null) nodes.Remove(act);
+                ci = -1;   // indices shifted; rescan (few nodes, cheap)
+            }
+
+            // 2) Resize -> Add
+            for (int ai = 0; ai < nodes.Count; ai++)
+            {
+                ExecNode add = nodes[ai];
+                if (MatchAdd(add) is not { } mt) continue;
+                var (rs, skip, relu) = mt;
+                int ri = nodes.IndexOf(rs);
+                var rp = (ResizeP)rs.P!;
+                rs.In = [rs.In[0], skip];
+                rp.AddRelu = relu is not null;
+                rs.Out = [add.Out[0]];
+                nodes[ai] = rs;      // producer precedes consumer: ri < ai
+                nodes.RemoveAt(ri);
+                if (relu is not null) nodes.Remove(relu);
+                ai = -1;
             }
         }
 

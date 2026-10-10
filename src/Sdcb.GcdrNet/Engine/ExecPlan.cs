@@ -19,6 +19,7 @@ internal enum ExecOp
     Concat,          // axis join
     ChannelShift,    // fused shift-MLP: per channel group, shift along H or W (zero-fill)
     Copy,            // plain copy (for Squeeze/Unsqueeze/identity leftovers)
+    UpHead,          // fused NHWC tail: act(W·(resize(x) + [relu](skip)) + b), pointwise W with few outputs
 }
 
 internal enum ActivationKind { None, Relu, Sigmoid, Gelu }
@@ -74,7 +75,24 @@ internal sealed class GemmP
 internal sealed class ResizeP
 {
     public required float[] Scales; // per-dim, only [.., sh, sw] used
-    public bool FuseRelu;
+    public bool FuseRelu;           // relu on the resized value (before the optional add)
+    // optional same-shape addend in In[1] (NHWC plans): out = [relu](resize(x)) + [relu](In[1])
+    public bool AddRelu;            // relu on the addend
+}
+
+/// <summary>
+/// Fused NHWC network tail (In = [x, skip, w, bias?]):
+/// out[o] = act(bias[o] + Σ_c w[o,c]·s[c]) with s = [relu](resize(x)) + [relu](skip).
+/// Replaces Resize → (Relu) → Add → 1x1 Conv → (act) so the full-resolution
+/// intermediates are never stored.
+/// </summary>
+internal sealed class UpHeadP
+{
+    public required float[] Scales;
+    public bool ResizeRelu;
+    public bool SkipRelu;
+    public ActivationKind Act;
+    public object? KernelPlan;      // backend-private packed weights
 }
 
 internal sealed class PadP

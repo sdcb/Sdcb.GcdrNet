@@ -1,15 +1,17 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "et.glsl"
-// NHWC bilinear resize, half-pixel centers, optional relu.
-// src_coord = (dst + 0.5) / scale - 0.5
+// NHWC bilinear resize, half-pixel centers: src_coord = (dst + 0.5) / scale - 0.5.
+// flags: bit0 relu on the resized value, bit1 add same-shape A, bit2 relu on A.
+// out = [relu](resize(x)) + [relu](a)
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
-layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
+layout(set = 0, binding = 1) readonly buffer A { ET a[]; };    // addend (dummy if none)
+layout(set = 0, binding = 2) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
-    uint c, ih, iw, oh, ow, relu;
+    uint c, ih, iw, oh, ow, flags;
     float shy, shx;     // scales
 } p;
 
@@ -32,6 +34,11 @@ void main()
     float v10 = float(x[(y1 * p.iw + x0) * p.c + ch]);
     float v11 = float(x[(y1 * p.iw + x1) * p.c + ch]);
     float v = mix(mix(v00, v01, dx), mix(v10, v11, dx), dy);
-    if (p.relu != 0u) v = max(v, 0.0);
+    if ((p.flags & 1u) != 0u) v = max(v, 0.0);
+    if ((p.flags & 2u) != 0u)
+    {
+        float s = float(a[id]);
+        v += (p.flags & 4u) != 0u ? max(s, 0.0) : s;
+    }
     o[id] = ET(v);
 }

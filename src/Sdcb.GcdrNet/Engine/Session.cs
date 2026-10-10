@@ -50,6 +50,12 @@ public sealed unsafe class InferenceSession : IDisposable
                     Interlocked.CompareExchange(ref cp.KernelPlan,
                         Nhwc.Pack(w.Floats!, w.Shape, b, cp.Group, plan.Values[n.In[0]].Shape[1]), null);
                 }
+                else if (n.P is UpHeadP up && up.KernelPlan is null)
+                {
+                    CValue w = plan.Values[n.In[2]];
+                    ReadOnlySpan<float> b = n.In.Length > 3 ? plan.Values[n.In[3]].Floats : default;
+                    Interlocked.CompareExchange(ref up.KernelPlan, Nhwc.PackUpHead(w.Floats!, w.Shape[0], w.Shape[1], b), null);
+                }
     }
 
     /// <summary>Input tensor shape (e.g. [1,3,H,W]).</summary>
@@ -260,7 +266,16 @@ public sealed unsafe class InferenceSession : IDisposable
                 var p = (ResizeP)n.P!;
                 int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape;
                 Nhwc.ResizeBilinear(GetIn(n.In[0]), i[1], i[2], i[3], GetSpan(n.Out[0]), o[1], o[2],
-                    p.Scales[2], p.Scales[3], p.FuseRelu ? ActivationKind.Relu : ActivationKind.None);
+                    p.Scales[2], p.Scales[3], p.FuseRelu ? ActivationKind.Relu : ActivationKind.None,
+                    n.In.Length > 1 ? GetIn(n.In[1]) : default, p.AddRelu);
+                return true;
+            }
+            case ExecOp.UpHead:
+            {
+                var p = (UpHeadP)n.P!;
+                int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape;
+                Nhwc.UpHead(GetIn(n.In[0]), i[1], i[2], i[3], GetIn(n.In[1]), GetSpan(n.Out[0]), o[1], o[2],
+                    p.Scales[2], p.Scales[3], p, (UpHeadPlan)p.KernelPlan!);
                 return true;
             }
             case ExecOp.Pad:
