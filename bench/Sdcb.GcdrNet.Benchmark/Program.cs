@@ -389,11 +389,20 @@ public static class Program
                           h: e.GetProperty("h").GetInt32()))
             .ToArray();
 
+        // Working set (MB, Refresh()ed): sampled before/after engine init and after every
+        // Enhance (warmup + pass1 + pass2). ΔWS = last pass1 image − loaded; peak = max sample.
+        var proc = System.Diagnostics.Process.GetCurrentProcess();
+        double WsMb() { proc.Refresh(); return proc.WorkingSet64 / 1048576.0; }
+        double wsInit0 = WsMb();
         using var enh = GcdrEnhancer.FromFiles(gcPath, drPath, be);
+        double wsLoaded = WsMb(), wsPeak = wsLoaded;
+        Console.WriteLine($"engine loaded: ws {wsInit0:F1} -> {wsLoaded:F1} MB ({wsLoaded - wsInit0:+0.0;-0.0} MB)");
         {   // global warmup: model load, JIT, first pipeline — untimed
             var (name, w, h) = images[0];
             byte[] bgr = DecodeBgr(Path.Combine(corpusDir, name));
             enh.Enhance(bgr, w, h, w * 3, new byte[bgr.Length], w * 3);
+            double ws = WsMb(); wsPeak = Math.Max(wsPeak, ws);
+            Console.WriteLine($"{name + " (warmup)",-52} {w,5}x{h,-5} ws {ws,7:F1} MB");
         }
 
         // GCDR_INTER=1: per-image intermediate hashes (gcIn/gcOut/drIn) to bisect
@@ -464,8 +473,8 @@ public static class Program
         }
 
         Backends.Vulkan.VkDevice.ResetPeakDeviceBytes();
-        var proc = System.Diagnostics.Process.GetCurrentProcess();
-        long gc0 = GC.GetTotalMemory(true), ws0 = proc.WorkingSet64;
+        long gc0 = GC.GetTotalMemory(true);
+        double wsLast = wsLoaded;
         var hashes = new Dictionary<string, ulong>();
         double totalMs = 0, totalMp = 0, psnrSum = 0; int psnrN = 0;
         int from = int.TryParse(Environment.GetEnvironmentVariable("GCDR_FROM"), out int f0) ? f0 : 1;
@@ -481,6 +490,7 @@ public static class Program
             double ms = (Stopwatch.GetTimestamp() - t) * 1000.0 / Stopwatch.Frequency;
             double mp = w * h / 1e6;
             totalMs += ms; totalMp += mp;
+            wsLast = WsMb(); wsPeak = Math.Max(wsPeak, wsLast);
             ulong hsh = 1469598103934665603UL;
             for (int i = 0; i < dst.Length; i += 977) { hsh ^= dst[i]; hsh *= 1099511628211UL; }
             hashes[name] = hsh;
@@ -502,9 +512,9 @@ public static class Program
                     quality += $" {psnr,6:F2} dB  mae {ae / dst.Length,5:F2}";
                 }
             }
-            Console.WriteLine($"{name,-52} {w,5}x{h,-5} {mp,5:F2} MP {ms,9:F1} ms{quality}");
+            Console.WriteLine($"{name,-52} {w,5}x{h,-5} {mp,5:F2} MP {ms,9:F1} ms{quality}  ws {wsLast,7:F1} MB");
         }
-        long gcD = GC.GetTotalMemory(false) - gc0, wsD = proc.WorkingSet64 - ws0;
+        long gcD = GC.GetTotalMemory(true) - gc0;
 
         // second pass: measures pool-hit throughput AND cross-checks output hashes
         double warmMs = 0; int flaky = 0;
@@ -516,6 +526,7 @@ public static class Program
             long t = Stopwatch.GetTimestamp();
             enh.Enhance(bgr, w, h, w * 3, dst, w * 3);
             warmMs += (Stopwatch.GetTimestamp() - t) * 1000.0 / Stopwatch.Frequency;
+            wsPeak = Math.Max(wsPeak, WsMb());
             ulong h2 = 1469598103934665603UL;
             for (int i = 0; i < dst.Length; i += 977) { h2 ^= dst[i]; h2 *= 1099511628211UL; }
             if (h2 != hashes[name]) { flaky++; Console.WriteLine($"  HASH MISMATCH pass1={hashes[name]:x8} pass2={h2:x8}  {name}"); }
@@ -529,7 +540,9 @@ public static class Program
         if (psnrN > 0) Console.WriteLine($"  psnr mean {psnrSum / psnrN:F2} dB over {psnrN} images");
         var (pools, workers, evicted) = enh.PoolStats;
         Console.WriteLine($"  pools: {pools} size pools created ({workers} workers), {evicted} evicted");
-        Console.WriteLine($"  mem: managed +{gcD / 1048576.0:F0} MB, workingset +{wsD / 1048576.0:F0} MB, " +
+        Console.WriteLine($"  ws: init {wsInit0:F0} -> loaded {wsLoaded:F0} MB ({wsLoaded - wsInit0:+0;-0}), " +
+            $"loaded -> last {wsLast:F0} MB (delta {wsLast - wsLoaded:+0;-0} MB), peak {wsPeak:F0} MB");
+        Console.WriteLine($"  mem: managed {gcD / 1048576.0:+0;-0} MB (after forced GC), " +
             $"vkDevice live {Backends.Vulkan.VkDevice.LiveDeviceBytes / 1048576.0:F0} MB " +
             $"(peak {Backends.Vulkan.VkDevice.PeakDeviceBytes / 1048576.0:F0} MB)");
         return 0;
