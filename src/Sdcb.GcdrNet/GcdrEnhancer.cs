@@ -36,6 +36,14 @@ public sealed class GcdrEnhancer : IDisposable
     private readonly ConcurrentDictionary<long, SizePool<InferenceSession>> _gcPool = new();
     private readonly ConcurrentDictionary<long, SizePool<InferenceSession>> _drPool = new();
     private readonly ConcurrentDictionary<long, SizePool<Backends.Vulkan.VkGcdrPipeline>> _vkPool = new();
+    private long _poolsCreated, _workersCreated, _poolsEvicted;
+
+    /// <summary>Pool diagnostics: distinct size pools created, worker instances created, pools evicted.</summary>
+    public (long pools, long workers, long evicted) PoolStats =>
+        (_poolsCreated, _workersCreated, _poolsEvicted);
+
+    /// <summary>Debug/test hook: invoked with the just-used vulkan pipeline after each Enhance.</summary>
+    internal Action<Backends.Vulkan.VkGcdrPipeline>? DebugAfterEnhance;
 
     private GcdrEnhancer(OnnxModel gc, OnnxModel dr, GcdrBackend backend)
     {
@@ -62,9 +70,10 @@ public sealed class GcdrEnhancer : IDisposable
         var model = gc ? _gcModel : _drModel;
         int c = gc ? 3 : 6;
         p = new SizePool<InferenceSession>(MaxPerSize,
-            () => new InferenceSession(GraphCompiler.Compile(model, [1, c, h, w])));
+            () => { Interlocked.Increment(ref _workersCreated); return new InferenceSession(GraphCompiler.Compile(model, [1, c, h, w])); });
         if (!pools.TryAdd(key, p)) { p.Dispose(); return pools[key]; }
-        EvictIfNeeded(pools, key, SizeCap(h, w, CpuPoolBudget));
+        Interlocked.Increment(ref _poolsCreated);
+        EvictIfNeeded(pools, key, CpuPoolBudget);
         return p;
     }
 
@@ -73,26 +82,34 @@ public sealed class GcdrEnhancer : IDisposable
         long key = Key(ih, iw);
         if (_vkPool.TryGetValue(key, out var p)) return p;
         p = new SizePool<Backends.Vulkan.VkGcdrPipeline>(MaxPerSize,
-            () => Backends.Vulkan.VkBackend.Default.NewPipe(_gcModel, _drModel, ih, iw));
+            () => { Interlocked.Increment(ref _workersCreated); return Backends.Vulkan.VkBackend.Default.NewPipe(_gcModel, _drModel, ih, iw); });
         if (!_vkPool.TryAdd(key, p)) { p.Dispose(); return _vkPool[key]; }
-        EvictIfNeeded(_vkPool, key, SizeCap(ih, iw, VkPoolBudget));
+        Interlocked.Increment(ref _poolsCreated);
+        EvictIfNeeded(_vkPool, key, VkPoolBudget);
         return p;
     }
 
-    /// <summary>Max distinct pool entries for this size: 1KB/px/pipeline estimate.</summary>
-    private static int SizeCap(int h, int w, long budget) =>
-        (int)Math.Clamp(budget / ((long)h * w * 1024 + 1), 1, MaxSizes);
+    /// <summary>Per-pool footprint estimate for the eviction budget: ~1KB/px activations + 32MB base.</summary>
+    private static long Footprint(long key) => ((key >> 16) * (key & 0xFFFF) + 1) * 1024 + (32L << 20);
 
-    /// <summary>Bounded size cache: evict an arbitrary other entry beyond maxEntries.</summary>
-    private static void EvictIfNeeded<T>(ConcurrentDictionary<long, SizePool<T>> pools, long keep, int maxEntries)
+    /// <summary>Bounded size cache: evict pools until total estimated footprint fits the
+    /// budget and count ≤ MaxSizes. A single over-budget pool is kept.</summary>
+    private void EvictIfNeeded<T>(ConcurrentDictionary<long, SizePool<T>> pools, long keep, long budget)
         where T : IDisposable
     {
-        while (pools.Count > maxEntries)
+        long total = 0; int n = 0;
+        foreach (long k in pools.Keys) { total += Footprint(k); n++; }
+        while ((n > MaxSizes || total > budget) && pools.Count > 1)
         {
             long victim = -1;
-            foreach (var k in pools.Keys) if (k != keep) { victim = k; break; }
+            foreach (long k in pools.Keys) if (k != keep) { victim = k; break; }
             if (victim < 0) return;
-            if (pools.TryRemove(victim, out var p)) p.Dispose();
+            if (pools.TryRemove(victim, out var p))
+            {
+                p.Dispose();
+                total -= Footprint(victim); n--;
+                Interlocked.Increment(ref _poolsEvicted);
+            }
         }
     }
 
@@ -110,7 +127,11 @@ public sealed class GcdrEnhancer : IDisposable
         {
             var pool = VkPool(height, width);
             var pipe = pool.Rent();
-            try { pipe.Enhance(bgrSrc, srcStride, bgrDst, dstStride); }
+            try
+            {
+                pipe.Enhance(bgrSrc, srcStride, bgrDst, dstStride);
+                DebugAfterEnhance?.Invoke(pipe);
+            }
             finally { pool.Return(pipe); }
             return;
         }

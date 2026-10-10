@@ -29,6 +29,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
         _dev = dev;
         _plan = plan;
         _graph = graph;
+        _graph.Acquire();
 
         Arena = dev.NewStorageBuffer((ulong)plan.ArenaFloats * 4 + 64, hostVisible: false);
         _inFloats = checked((int)plan.Values[plan.InputValue].ElementCount);
@@ -296,6 +297,18 @@ public sealed unsafe class VkInferenceSession : IDisposable
     /// <summary>Per-dispatch timings from the last <see cref="DebugProfile"/> call.</summary>
     internal (string Name, double Ms)[]? PerDispatch;
 
+    /// <summary>Debug: the compiled plan backing this session.</summary>
+    internal ExecPlan DebugPlan => _plan;
+
+    /// <summary>Debug: download the whole arena (ArenaFloats floats) into dst.</summary>
+    internal void DebugArena(Span<float> dst)
+    {
+        fixed (float* p = dst) _dev.Download(Arena, p, (ulong)_plan.ArenaFloats * 4, 0);
+    }
+
+    /// <summary>Debug: graph consts buffer + the session's arena buffer.</summary>
+    internal (VkBuffer consts, VkBuffer arena) DebugBuffers => (_graph.Consts, Arena);
+
     /// <summary>Debug/test: download an activation value's region into dst.</summary>
     internal void DebugDownload(int valueId, float[] dst)
     {
@@ -342,6 +355,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
         _dev.FreeCommandBuffer(_cmd);
         // descriptor sets live in the device pool; pool teardown frees them
         Arena.Free(); _stageIn.Free(); _stageOut.Free();
+        _graph.Release();
     }
 }
 
