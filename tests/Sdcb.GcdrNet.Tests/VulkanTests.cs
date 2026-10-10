@@ -26,7 +26,7 @@ public class VulkanTests
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
-        Assert.True(max < 2e-3f, $"gcnet-vk[{tag}] max diff {max} rmse {rmse}");
+        Assert.True(max < 5e-4f, $"gcnet-vk[{tag}] max diff {max} rmse {rmse}");
     }
 
     [SkippableTheory]
@@ -45,7 +45,7 @@ public class VulkanTests
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
-        Assert.True(max < 2e-3f, $"drnet-vk[{tag}] max diff {max} rmse {rmse}");
+        Assert.True(max < 5e-4f, $"drnet-vk[{tag}] max diff {max} rmse {rmse}");
     }
 
     [SkippableTheory]

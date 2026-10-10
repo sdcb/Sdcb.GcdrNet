@@ -120,7 +120,7 @@ internal static unsafe class Ops
             dst[i] = act == ActivationKind.Relu ? MathF.Max(v, 0f) : v;
         }
         if (act != ActivationKind.None && act != ActivationKind.Relu)
-            throw new NotSupportedException($"conv residual epilogue does not support {act}.");
+            ApplyActVec(dst, act);
     }
 
     // ---- scalar reference conv (N==1, dense or grouped) ----
@@ -173,7 +173,8 @@ internal static unsafe class Ops
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static float ApplyAct(float v, ActivationKind act) =>
         act == ActivationKind.Relu ? MathF.Max(v, 0f) :
-        act == ActivationKind.Sigmoid ? 1f / (1f + MathF.Exp(-v)) : v;
+        act == ActivationKind.Sigmoid ? 1f / (1f + MathF.Exp(-v)) :
+        act == ActivationKind.Gelu ? 0.5f * v * (1f + SimdMath.ErfScalar(v * 0.70710678f)) : v;
 
     // ---- vector-over-output-W conv: one output row vector per (oc,y) ----
     private static void ConvVecW(ReadOnlySpan<float> src, int ic, int ih, int iw,
@@ -262,6 +263,8 @@ internal static unsafe class Ops
     {
         if (act == ActivationKind.None) return;
         if (act == ActivationKind.Relu) { Relu(row, row); return; }
+        if (act == ActivationKind.Gelu) { SimdMath.Gelu(row, row); return; }
+        if (act == ActivationKind.Sigmoid) { SimdMath.Sigmoid(row, row); return; }
         for (int i = 0; i < row.Length; i++) row[i] = ApplyAct(row[i], act);
     }
 
@@ -581,12 +584,17 @@ internal static unsafe class Ops
         int k = aShape[^1];
         int n = outShape[^1];
         if (!p.TransB && Avx2.IsSupported && Fma.IsSupported)
-        {
             Avx2Kernels.GemmKN(a, m, k, b, n, bias, dst);
-            return;
+        else if (p.TransB)
+            GemmBT(a, m, k, b, n, bias, dst);
+        else
+            GemmKN(a, m, k, b, n, bias, dst);
+        switch (p.Act)
+        {
+            case ActivationKind.Relu: Relu(dst, dst); break;
+            case ActivationKind.Gelu: SimdMath.Gelu(dst, dst); break;
+            case ActivationKind.Sigmoid: SimdMath.Sigmoid(dst, dst); break;
         }
-        if (p.TransB) GemmBT(a, m, k, b, n, bias, dst);
-        else GemmKN(a, m, k, b, n, bias, dst);
     }
 
     // B row-major [K,N]: dst[m,n] = Σ_k a[m,k]*b[k,n] — vector over N

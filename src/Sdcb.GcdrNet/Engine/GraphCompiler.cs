@@ -118,18 +118,6 @@ internal static class GraphCompiler
                 var hist = nodes.GroupBy(m => m.Op).OrderByDescending(g => g.Count());
                 Console.Error.WriteLine($"[plan] {nodes.Count} nodes, arena {arenaFloats * 4.0 / 1e6:F1} MB");
                 foreach (var h in hist) Console.Error.WriteLine($"  {h.Key,-14} x{h.Count()}");
-                foreach (var m in nodes.Where(m => m.Op is ExecOp.Relu or ExecOp.Elementwise or ExecOp.Transpose))
-                {
-                    var prod = nodes.Where(q => q.Out.Intersect(m.In).Any())
-                        .Select(q => q.Op.ToString());
-                    var sz = m.Out.Select(v => values[v].Shape.Aggregate(1, (a, b) => a * b));
-                    Console.Error.WriteLine($"  {m.Op} {m.Name} <- [{string.Join(",", prod)}] n={string.Join(",", sz)}" +
-                        (m.Op == ExecOp.Transpose && m.P is TransposeP tp
-                            ? $" perm={string.Join(",", tp.Perm)} in={string.Join("x", values[m.In[0]].Shape)} out={string.Join("x", values[m.Out[0]].Shape)}"
-                            : m.Op == ExecOp.Elementwise
-                                ? $" a={string.Join("x", values[m.In[0]].Shape)} b={string.Join("x", values[m.In[1]].Shape)}"
-                                : ""));
-                }
             }
             return new ExecPlan
             {
@@ -231,6 +219,101 @@ internal static class GraphCompiler
             }
             FuseGelu(nodes, values);
             FuseShift(nodes, values);
+            CommuteActBeforeTranspose(nodes, values);
+            FuseLateAct(nodes, values);
+        }
+
+        // act(T(x)) == T(act(x)) for elementwise unary act: move a sole-consumer
+        // act node in front of its transpose producer so producer fusions (e.g.
+        // Gemm->Gelu) can see it.
+        private static void CommuteActBeforeTranspose(List<ExecNode> nodes, List<CValue> values)
+        {
+            for (int g = 0; g < nodes.Count; g++)
+            {
+                ExecNode act = nodes[g];
+                if (act.Op is not (ExecOp.Relu or ExecOp.Gelu or ExecOp.Sigmoid or ExecOp.Erf)
+                    || act.In.Length != 1) continue;
+                int t = nodes.FindIndex(m => m.Out.Length == 1 && m.Out[0] == act.In[0]);
+                if (t < 0 || t >= g || nodes[t].Op != ExecOp.Transpose) continue;
+                ExecNode tr = nodes[t];
+                if (tr.In.Length != 1 || !SoleUse(nodes, tr.Out[0], g)) continue;
+                // rewire as x --act--> y --T--> z: swap the two Out ids so
+                // downstream consumers of z read the transposed value as before.
+                // y now holds act(x) in x's layout — fix its registered shape.
+                int y = tr.Out[0], z = act.Out[0];
+                values[y].Shape = values[tr.In[0]].Shape;
+                act.In[0] = tr.In[0]; act.Out[0] = y;
+                tr.In[0] = y; tr.Out[0] = z;
+                nodes.RemoveAt(g);
+                nodes.Insert(t, act);
+            }
+        }
+
+        // Sole-consumer activation fusion, buffer-aware (consumers reached through
+        // reshape/squeeze Buf-aliases count as uses of the producer's buffer) and
+        // adjacency-independent. Retargets the act's output buffer onto the
+        // producer's so downstream aliases keep their shape metadata.
+        private static void FuseLateAct(List<ExecNode> nodes, List<CValue> values)
+        {
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                ExecNode a = nodes[i];
+                bool can = a.P switch
+                {
+                    ConvP c => c.Act == ActivationKind.None,
+                    PoolP p => !p.FuseRelu,
+                    ResizeP r => !r.FuseRelu,
+                    EwP e => e.Act == ActivationKind.None,
+                    GemmP g => g.Act == ActivationKind.None,
+                    _ => false,
+                };
+                if (!can || a.Out.Length != 1) continue;
+                int ob = values[a.Out[0]].Buf;
+                if (ob < 0) continue;
+
+                int u = -1, uses = 0;
+                for (int j = 0; j < nodes.Count && uses <= 1; j++)
+                    if (j != i && nodes[j].In.Any(iv => values[iv].Buf == ob)) { u = j; uses++; }
+                if (uses != 1) continue;
+                ExecNode b = nodes[u];
+                if (b.In.Length != 1 || values[b.In[0]].Buf != ob) continue;
+                ActivationKind got = b.Op switch
+                {
+                    ExecOp.Relu => ActivationKind.Relu,
+                    ExecOp.Gelu => ActivationKind.Gelu,
+                    ExecOp.Sigmoid => ActivationKind.Sigmoid,
+                    _ => ActivationKind.None,
+                };
+                bool ok = a.P switch
+                {
+                    ConvP => got is ActivationKind.Relu or ActivationKind.Gelu,
+                    PoolP or ResizeP or EwP => got == ActivationKind.Relu,
+                    GemmP => got is ActivationKind.Relu or ActivationKind.Gelu,
+                    _ => false,
+                };
+                if (!ok) continue;
+
+                switch (a.P)
+                {
+                    case ConvP c: c.Act = got; break;
+                    case PoolP p: p.FuseRelu = true; break;
+                    case ResizeP r: r.FuseRelu = true; break;
+                    case EwP e: e.Act = ActivationKind.Relu; break;
+                    case GemmP g: g.Act = got; break;
+                }
+                int ab = values[b.Out[0]].Buf;
+                if (ab >= 0 && ab != ob)
+                {
+                    foreach (CValue v in values)
+                        if (v.Buf == ab) v.Buf = ob;
+                }
+                else
+                {
+                    Redirect(nodes, values, b.Out[0], a.Out[0]);
+                }
+                nodes.RemoveAt(u);
+                if (u < i) i--;
+            }
         }
 
         private static void Redirect(List<ExecNode> nodes, List<CValue> values, int oldValue, int newValue)

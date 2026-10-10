@@ -21,7 +21,7 @@ internal enum ExecOp
     Copy,            // plain copy (for Squeeze/Unsqueeze/identity leftovers)
 }
 
-internal enum ActivationKind { None, Relu, Sigmoid }
+internal enum ActivationKind { None, Relu, Sigmoid, Gelu }
 
 internal enum PadMode { Constant, Reflect }
 
@@ -67,6 +67,7 @@ internal sealed class GemmP
 {
     public bool TransB;             // B stored [N,K] when true (onnx transB=1)
     public int BiasValue = -1;
+    public ActivationKind Act;
 }
 
 internal sealed class ResizeP

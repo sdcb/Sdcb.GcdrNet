@@ -25,6 +25,19 @@ public class EngineTests
     }
 
     [Fact]
+    public void Fusion_Conv_Gelu_ThroughAlias()
+    {
+        // the gelu decomposition commutes before its producer transpose, then
+        // fuses into the 1x1 conv via the reshape Buf-alias — the plan must
+        // contain no Gelu node and the conv must carry the epilogue
+        ExecPlan gc = GraphCompiler.Compile(OnnxModel.Load(GcPath), [1, 3, 96, 128]);
+        Assert.DoesNotContain(gc.Nodes, n => n.Op == ExecOp.Gelu);
+        Assert.True(gc.Nodes.Count(n => n.Op == ExecOp.Conv &&
+                ((ConvP)n.P!).Act == ActivationKind.Gelu) >= 2,
+            "gc plan lost the Conv+Gelu fusion");
+    }
+
+    [Fact]
     public void NoFuse_MatchesFused()
     {
         float[] input = Golden.F32("small", "input");
@@ -52,6 +65,96 @@ public class EngineTests
 
         var (max, rmse, _) = Golden.Diff(Fused(), Unfused());
         Assert.True(max < 1e-5f, $"fused vs unfused max diff {max} rmse {rmse}");
+    }
+
+    [Theory]
+    [InlineData("small")]
+    [InlineData("pad")]
+    [InlineData("mid")]
+    public void DivConcat_MatchesOracle_Float(string tag)
+    {
+        // stage-2 math verified at float precision, not just through u8 output:
+        // our GC session on the oracle input -> our own div+concat -> oracle dr_in
+        float[] x = Golden.F32(tag, "input");
+        int[] shape = Golden.ShapeOf(tag, "input");
+        float[] expect = Golden.F32(tag, "dr_in");
+
+        OnnxModel m = OnnxModel.Load(GcPath);
+        CompiledModel cm = CompiledModel.Compile(m, shape);
+        using var sess = cm.CreateSession();
+        x.CopyTo(sess.Input);
+        sess.Run();
+        float[] shadow = sess.Output.ToArray();
+
+        int hw = shape[2] * shape[3];
+        float[] drIn = new float[6 * hw];
+        Array.Copy(x, drIn, 3 * hw);
+        Kernels.PixelOps.DivClampInto(x, shadow, drIn.AsSpan(3 * hw));
+
+        var (max, rmse, _) = Golden.Diff(drIn, expect);
+        Assert.True(max < 1e-3f, $"dr_in[{tag}] max diff {max} rmse {rmse}");
+    }
+
+    [Fact]
+    public void Transpose_NonIdentityLeadingPerm_Correct()
+    {
+        // perm [1,0,3,2] must NOT take the last-two-dim fast path (would be wrong);
+        // it should fall through to the generic permute and still be correct
+        var rng = new Random(5);
+        int d0 = 2, d1 = 3, d2 = 4, d3 = 5;
+        float[] src = rng.Array(d0 * d1 * d2 * d3);
+        float[] got = new float[src.Length];
+        Ops.Transpose(src, [d0, d1, d2, d3], got, [d1, d0, d3, d2], [1, 0, 3, 2]);
+        for (int i0 = 0; i0 < d0; i0++)
+            for (int i1 = 0; i1 < d1; i1++)
+                for (int i2 = 0; i2 < d2; i2++)
+                    for (int i3 = 0; i3 < d3; i3++)
+                        Assert.Equal(
+                            src[((i0 * d1 + i1) * d2 + i2) * d3 + i3],
+                            got[((i1 * d0 + i0) * d3 + i3) * d2 + i2]);
+    }
+
+    [Fact]
+    public void ChannelShift_OffsetBeyondWidth_Zeros()
+    {
+        // |off| >= w must produce a fully zeroed group, not a negative Slice
+        float[] src = Enumerable.Repeat(1f, 2 * 4 * 5).ToArray();   // c=2,h=4,w=5
+        float[] dst = Enumerable.Repeat(-1f, src.Length).ToArray();
+        var p = new ShiftP { Axis = 3, Offsets = [5], GroupEnds = [2] };
+        Ops.ChannelShift(src, [1, 2, 4, 5], dst, [1, 2, 4, 5], p);
+        Assert.All(dst, v => Assert.Equal(0f, v));
+    }
+
+    [Fact]
+    public void Conv_GroupedNonDepthwise_MatchesReference()
+    {
+        // group=2 with ic=4 (not depthwise) routes to the scalar path — check vs manual
+        var rng = new Random(11);
+        int ic = 4, oc = 4, ih = 5, iw = 6, g = 2;
+        float[] x = rng.Array(ic * ih * iw);
+        float[] w = rng.Array(oc * (ic / g) * 9);
+        float[] dst = new float[oc * ih * iw];
+        var p = new ConvP { Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3], Group = g };
+        Ops.Conv(x, [1, ic, ih, iw], w, [oc, ic / g, 3, 3], ReadOnlySpan<float>.Empty,
+            dst, [1, oc, ih, iw], p);
+
+        for (int o = 0; o < oc; o++)
+            for (int y = 0; y < ih; y++)
+                for (int xx = 0; xx < iw; xx++)
+                {
+                    float acc = 0;
+                    int gi = o / (oc / g) * (ic / g);
+                    for (int c = 0; c < ic / g; c++)
+                        for (int ky = 0; ky < 3; ky++)
+                            for (int kx = 0; kx < 3; kx++)
+                            {
+                                int sy = y + ky - 1, sx = xx + kx - 1;
+                                if ((uint)sy < (uint)ih && (uint)sx < (uint)iw)
+                                    acc += x[(gi + c) * ih * iw + sy * iw + sx] *
+                                           w[((o * (ic / g) + c) * 3 + ky) * 3 + kx];
+                            }
+                    Assert.Equal(acc, dst[o * ih * iw + y * iw + xx], 5);
+                }
     }
 
     [Fact]
