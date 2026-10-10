@@ -44,8 +44,71 @@ public static class Program
             int w = args.Length > 2 ? int.Parse(args[2]) : 1600;
             return VkProf(gcPath, drPath, h, w);
         }
-        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps] | --benchvk [h] [w] [reps] | --vkprof [h] [w]");
+        if (args.Length > 0 && args[0] == "--corpus")
+        {
+            string backend = args.Length > 1 ? args[1] : "auto";
+            return Corpus(gcPath, drPath, Path.Combine(dir, "realdae"), backend);
+        }
+        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps] | --benchvk [h] [w] [reps] | --vkprof [h] [w] | --corpus [cpu|vulkan|auto]");
         return 1;
+    }
+
+    // iterate the RealDAE corpus dir (manifest.json + *.webp): decode -> enhance -> per-image ms
+    private static int Corpus(string gcPath, string drPath, string corpusDir, string backend)
+    {
+        var be = backend.ToLowerInvariant() switch
+        {
+            "cpu" => GcdrBackend.Cpu,
+            "vulkan" or "vk" => GcdrBackend.Vulkan,
+            _ => GcdrBackend.Auto,
+        };
+        var manifest = System.Text.Json.JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(corpusDir, "manifest.json")));
+        var images = manifest.RootElement.GetProperty("images").EnumerateArray()
+            .Select(e => (name: e.GetProperty("name").GetString()!,
+                          w: e.GetProperty("w").GetInt32(),
+                          h: e.GetProperty("h").GetInt32()))
+            .OrderBy(e => (long)e.w * e.h).ToArray();
+
+        using var enh = GcdrEnhancer.FromFiles(gcPath, drPath, be);
+        double totalMs = 0, totalMp = 0;
+        foreach ((string name, int w, int h) in images)
+        {
+            byte[] bgr = DecodeBgr(Path.Combine(corpusDir, name));
+            byte[] dst = new byte[bgr.Length];
+            enh.Enhance(bgr, w, h, w * 3, dst, w * 3); // warm (compiles this size)
+            long t = Stopwatch.GetTimestamp();
+            enh.Enhance(bgr, w, h, w * 3, dst, w * 3);
+            double ms = (Stopwatch.GetTimestamp() - t) * 1000.0 / Stopwatch.Frequency;
+            double mp = w * h / 1e6;
+            totalMs += ms; totalMp += mp;
+            Console.WriteLine($"{name,-52} {w,5}x{h,-5} {mp,5:F2} MP {ms,9:F1} ms");
+        }
+        Console.WriteLine($"corpus[{backend}] {images.Length} images: {totalMs:F1} ms total, " +
+            $"{totalMp / (totalMs / 1000):F2} MP/s");
+        return 0;
+    }
+
+    private static byte[] DecodeBgr(string path)
+    {
+        using var bmp = SkiaSharp.SKBitmap.Decode(path);
+        int w = bmp.Width, h = bmp.Height;
+        var bgr = new byte[w * h * 3];
+        IntPtr px = bmp.GetPixels();
+        int rb = bmp.RowBytes;
+        unsafe
+        {
+            for (int y = 0; y < h; y++)
+            {
+                byte* s = (byte*)px + y * rb;
+                int d = y * w * 3;
+                for (int x = 0; x < w; x++, s += 4, d += 3)
+                {
+                    bgr[d] = s[0]; bgr[d + 1] = s[1]; bgr[d + 2] = s[2];
+                }
+            }
+        }
+        return bgr;
     }
 
     private static int Check(string dir, string gcPath, string drPath, string tag)

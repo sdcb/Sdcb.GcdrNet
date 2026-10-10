@@ -1,0 +1,255 @@
+{
+ "source": "RealDAE task_{color,shadow,bleed}_test, mixed; max edge 2600, webp q85; NN_gt.webp pairs when present (local-only data)",
+ "images": [
+  {
+   "name": "01_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "02_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "03_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "04_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "05_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "06_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "07_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "08_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "09_color.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "10_color.webp",
+   "w": 1945,
+   "h": 2600
+  },
+  {
+   "name": "11_color.webp",
+   "w": 1945,
+   "h": 2600
+  },
+  {
+   "name": "12_color.webp",
+   "w": 1945,
+   "h": 2600
+  },
+  {
+   "name": "13_color.webp",
+   "w": 1945,
+   "h": 2600
+  },
+  {
+   "name": "14_color.webp",
+   "w": 1945,
+   "h": 2600
+  },
+  {
+   "name": "15_color.webp",
+   "w": 1945,
+   "h": 2600
+  },
+  {
+   "name": "16_color.webp",
+   "w": 1945,
+   "h": 2600
+  },
+  {
+   "name": "17_color.webp",
+   "w": 1945,
+   "h": 2600
+  },
+  {
+   "name": "18_shadow.webp",
+   "w": 1944,
+   "h": 2592
+  },
+  {
+   "name": "19_shadow.webp",
+   "w": 734,
+   "h": 979
+  },
+  {
+   "name": "20_shadow.webp",
+   "w": 1365,
+   "h": 2421
+  },
+  {
+   "name": "21_shadow.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "22_bleed.webp",
+   "w": 1732,
+   "h": 2600
+  },
+  {
+   "name": "23_bleed.webp",
+   "w": 1663,
+   "h": 2600
+  },
+  {
+   "name": "24_bleed.webp",
+   "w": 1405,
+   "h": 2126
+  },
+  {
+   "name": "25_bleed.webp",
+   "w": 1736,
+   "h": 2588
+  },
+  {
+   "name": "26_bleed.webp",
+   "w": 1562,
+   "h": 2356
+  },
+  {
+   "name": "27_bleed.webp",
+   "w": 1701,
+   "h": 2324
+  },
+  {
+   "name": "28_bleed.webp",
+   "w": 1719,
+   "h": 2600
+  },
+  {
+   "name": "29_bleed.webp",
+   "w": 1751,
+   "h": 2600
+  },
+  {
+   "name": "30_bleed.webp",
+   "w": 1808,
+   "h": 2577
+  },
+  {
+   "name": "31_bleed.webp",
+   "w": 863,
+   "h": 744
+  },
+  {
+   "name": "32_shadow.webp",
+   "w": 1080,
+   "h": 694
+  },
+  {
+   "name": "33_bleed.webp",
+   "w": 1080,
+   "h": 639
+  },
+  {
+   "name": "34_shadow.webp",
+   "w": 970,
+   "h": 456
+  },
+  {
+   "name": "35_bleed.webp",
+   "w": 1078,
+   "h": 673
+  },
+  {
+   "name": "36_bleed.webp",
+   "w": 1072,
+   "h": 1080
+  },
+  {
+   "name": "37_shadow.webp",
+   "w": 1078,
+   "h": 804
+  },
+  {
+   "name": "38_bleed.webp",
+   "w": 1073,
+   "h": 886
+  },
+  {
+   "name": "39_bleed.webp",
+   "w": 1007,
+   "h": 437
+  },
+  {
+   "name": "40_shadow.webp",
+   "w": 1950,
+   "h": 2600
+  },
+  {
+   "name": "41_shadow.webp",
+   "w": 1647,
+   "h": 2600
+  },
+  {
+   "name": "42_shadow.webp",
+   "w": 1800,
+   "h": 2600
+  },
+  {
+   "name": "43_shadow.webp",
+   "w": 1836,
+   "h": 2347
+  },
+  {
+   "name": "44_bleed.webp",
+   "w": 2017,
+   "h": 2600
+  },
+  {
+   "name": "45_shadow.webp",
+   "w": 1536,
+   "h": 2048
+  },
+  {
+   "name": "46_shadow.webp",
+   "w": 1024,
+   "h": 768
+  },
+  {
+   "name": "47_shadow.webp",
+   "w": 2600,
+   "h": 1950
+  },
+  {
+   "name": "48_shadow.webp",
+   "w": 1722,
+   "h": 2600
+  },
+  {
+   "name": "49_shadow.webp",
+   "w": 1600,
+   "h": 1200
+  },
+  {
+   "name": "50_shadow.webp",
+   "w": 2560,
+   "h": 1920
+  }
+ ]
+}

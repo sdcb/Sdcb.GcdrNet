@@ -60,7 +60,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         VkInferenceSession.RecordOne(_dev, _cmd, _pPre,
             [(_bgrIn, 0UL, _bgrIn.Size), (_gc.Arena, _gc.InputOffset, _gc.InputBytes)],
             Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, (uint)srcStride),
-            (3u * h * w + 255) / 256, 1);
+            (w + 255) / 256, h, 3);
         _dev.CmdComputeBarrier(_cmd);
         _gc.RecordCompute(_cmd);
 

@@ -93,7 +93,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
 
     /// <summary>Record one dispatch (push-descriptor path only; caller emits barriers).</summary>
     internal static void RecordOne(VkDevice dev, IntPtr cmd, VkPipeline pipe,
-        (VkBuffer buf, ulong off, ulong size)[] binds, byte[] pc, uint gx, uint gy)
+        (VkBuffer buf, ulong off, ulong size)[] binds, byte[] pc, uint gx, uint gy, uint gz = 1)
     {
         Vk.vkCmdBindPipeline(cmd, VkConst.BindPointCompute, pipe.Pipeline);
         var writes = stackalloc Vk.VkWriteDescriptorSet[8];
@@ -112,7 +112,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
         if (pc.Length > 0)
             fixed (byte* p = pc)
                 Vk.vkCmdPushConstants(cmd, pipe.Layout, VkConst.StageComputeShader, 0, (uint)pc.Length, p);
-        Vk.vkCmdDispatch(cmd, gx, gy, 1);
+        Vk.vkCmdDispatch(cmd, gx, gy, gz);
     }
 
     /// <summary>Record all dispatches with barriers into an open command buffer.</summary>

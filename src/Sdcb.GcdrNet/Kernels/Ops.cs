@@ -563,13 +563,10 @@ internal static unsafe class Ops
         {
             ReadOnlySpan<float> xr = x.Slice(r * c, c);
             Span<float> dr = dst.Slice(r * c, c);
-            float mean = 0f;
-            for (int i = 0; i < c; i++) mean += xr[i];
-            mean /= c;
-            float var = 0f;
-            for (int i = 0; i < c; i++) { float d = xr[i] - mean; var += d * d; }
-            var /= c;
-            float inv = 1f / MathF.Sqrt(var + eps);
+            float s = 0f, s2 = 0f;
+            for (int i = 0; i < c; i++) { float v = xr[i]; s += v; s2 += v * v; }
+            float mean = s / c;
+            float inv = 1f / MathF.Sqrt(s2 / c - mean * mean + eps);
             for (int i = 0; i < c; i++) dr[i] = (xr[i] - mean) * inv * w[i] + b[i];
         }
     }
