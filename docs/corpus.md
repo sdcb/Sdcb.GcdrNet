@@ -28,7 +28,8 @@
 - **PSNR/MAE 对照 `NN_gt.webp` 是数据集真值**，衡量的是**模型能力上限**，
   不是实现忠实度（实现 oracle 是 ORT 生成的 golden fixtures，u8 ≤2）。个别
   图 ~11dB 是模型对该样本的能力边界，不是 bug。
-- **内存**：managed delta / working-set delta / `VkDevice` live+peak
+- **内存**：引擎初始化前后 + 每张图后采样 working set（逐图 `ws` 列；汇总
+  ΔWS = loaded→pass1 末张、peak = 全部采样最大值）/ managed delta / `VkDevice` live+peak
   （单点计数 `vkAllocateMemory`，直接反映池化 pipeline 驻留）。
 - **池统计**：`pools created / workers / evicted`——池按估算字节预算驱逐
   （~1KB/px/pipeline），50 个不同尺寸下驱逐是常态。
