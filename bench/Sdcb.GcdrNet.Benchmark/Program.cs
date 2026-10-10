@@ -381,11 +381,13 @@ public static class Program
         };
         var manifest = System.Text.Json.JsonDocument.Parse(
             File.ReadAllText(Path.Combine(corpusDir, "manifest.json")));
+        // manifest order (01..50): sizes interleave like real workloads — pool
+        // eviction/churn is exercised instead of a sorted best case.
         var images = manifest.RootElement.GetProperty("images").EnumerateArray()
             .Select(e => (name: e.GetProperty("name").GetString()!,
                           w: e.GetProperty("w").GetInt32(),
                           h: e.GetProperty("h").GetInt32()))
-            .OrderBy(e => (long)e.w * e.h).ToArray();
+            .ToArray();
 
         using var enh = GcdrEnhancer.FromFiles(gcPath, drPath, be);
         {   // global warmup: model load, JIT, first pipeline — untimed
