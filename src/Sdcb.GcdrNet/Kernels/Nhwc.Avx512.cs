@@ -247,4 +247,129 @@ internal static unsafe partial class Nhwc
             });
         }
     }
+
+    // ======================== memory-bound NHWC ops (c % 16 == 0) ========================
+
+    /// <summary><see cref="ResizePixel"/> with 16-lane vectors: same per-lane ops (and IEEE Max) → same bits.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ResizePixel512(float* a, float* b, float* e, float* f, F32x16 vX, F32x16 vY,
+        int c, bool relu, float* add, bool addRelu, float* o)
+    {
+        for (int ch = 0; ch < c; ch += 16)
+        {
+            var va = Vector512.Load(a + ch); var ve = Vector512.Load(e + ch);
+            var top = va + (Vector512.Load(b + ch) - va) * vX;
+            var bot = ve + (Vector512.Load(f + ch) - ve) * vX;
+            var v = top + (bot - top) * vY;
+            if (relu) v = Vector512.Max(v, F32x16.Zero);
+            if (add != null)
+            {
+                var sk = Vector512.Load(add + ch);
+                v += addRelu ? Vector512.Max(sk, F32x16.Zero) : sk;
+            }
+            v.Store(o + ch);
+        }
+    }
+
+    /// <summary>MaxPool, one output pixel per step: max over the valid taps in registers, one store
+    /// (the generic path copies the first tap and read-modify-writes the output per tap).</summary>
+    private static void MaxPool512(float* sp, int iw, int c, float* dp, int oh, int ow, int kh, int kw,
+        int[] rm, int[] cm, bool relu)
+    {
+        For(oh, (long)oh * ow * c * kh * kw, y =>
+        {
+            float** taps = stackalloc float*[kh * kw];
+            for (int x = 0; x < ow; x++)
+            {
+                int n = 0;
+                for (int ky = 0; ky < kh; ky++)
+                {
+                    int r = rm[y * kh + ky];
+                    if (r < 0) continue;
+                    for (int kx = 0; kx < kw; kx++)
+                    {
+                        int cc = cm[x * kw + kx];
+                        if (cc >= 0) taps[n++] = sp + ((long)r * iw + cc) * c;
+                    }
+                }
+                float* o = dp + ((long)y * ow + x) * c;
+                if (n == 0) { Fill(o, c, 0f); continue; }
+                for (int ch = 0; ch < c; ch += 16)
+                {
+                    var v = Vector512.Load(taps[0] + ch);
+                    for (int k = 1; k < n; k++) v = Vector512.Max(v, Vector512.Load(taps[k] + ch));
+                    if (relu) v = Vector512.Max(v, F32x16.Zero);
+                    v.Store(o + ch);
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// <see cref="UpHead"/> for the AVX-512 tier: 16-lane resize, and the c-long oc dot runs as four
+    /// interleaved per-pixel FMA chains (one chain per pixel was FMA-latency bound). Each pixel keeps
+    /// its bias-initialized, channel-ascending chain, so outputs match the AVX2 path bit for bit.
+    /// </summary>
+    private static void UpHead512(float* sp, int iw, int c, float* kpp, bool skipConv, DenseArgs ca, float* dp, int oh, int ow,
+        int[] y0, int[] y1, int[] x0, int[] x1, float[] wy, float[] wx, bool relu, bool skipRelu,
+        float* wp, float* bp, int oc, ActivationKind act)
+    {
+        bool v512 = c % 16 == 0;
+        For(oh, (long)oh * ow * c * (oc + 4), y =>
+        {
+            float* s = stackalloc float[4 * c + 8];
+            float* acc = stackalloc float[4 * 8];
+            float* r0 = sp + (long)y0[y] * iw * c, r1 = sp + (long)y1[y] * iw * c;
+            var vY = new System.Numerics.Vector<float>(wy[y]);
+            var vY16 = Vector512.Create(wy[y]);
+            float wY = wy[y];
+            float* orow = dp + (long)y * ow * oc;
+            float* krow = kpp + (long)y * ow * c;
+            float[]? band = skipConv ? BandBuf((long)ow * c) : null;
+            fixed (float* sb = band)
+            {
+                if (skipConv)
+                {
+                    SkipRow(ca, y, sb);   // the skip row, recomputed by the same conv kernel
+                    krow = sb;
+                }
+                for (int x = 0; x < ow; x += 4)
+                {
+                    int n = Math.Min(4, ow - x);
+                    for (int i = 0; i < n; i++)
+                    {
+                        int xx = x + i;
+                        float* a = r0 + (long)x0[xx] * c, b = r0 + (long)x1[xx] * c, e = r1 + (long)x0[xx] * c, f = r1 + (long)x1[xx] * c;
+                        if (v512) ResizePixel512(a, b, e, f, Vector512.Create(wx[xx]), vY16, c, relu, krow + (long)xx * c, skipRelu, s + i * c);
+                        else ResizePixel(a, b, e, f, wx[xx], wY, new System.Numerics.Vector<float>(wx[xx]), vY, c, relu, krow + (long)xx * c, skipRelu, s + i * c);
+                    }
+                    UpHeadDot4(s, c, wp, bp, acc, n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        float* o = orow + (long)(x + i) * oc;
+                        for (int l = 0; l < oc; l++) o[l] = acc[i * 8 + l];
+                    }
+                }
+                if (act != ActivationKind.None) ActRow(orow, ow * oc, act, true);
+            }
+        });
+    }
+
+    /// <summary>acc[i*8 + l] = bias[l] + Σ_ch s_i[ch]·w[ch][l] for 4 pixels (s_i = s + i*c), chains interleaved.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void UpHeadDot4(float* s, int c, float* wp, float* bp, float* acc, int n)
+    {
+        float* s0 = s, s1 = n > 1 ? s + c : s, s2 = n > 2 ? s + 2 * c : s, s3 = n > 3 ? s + 3 * c : s;
+        F32x8 a0 = Avx.LoadVector256(bp), a1 = a0, a2 = a0, a3 = a0;
+        float* w = wp;
+        for (int ch = 0; ch < c; ch++, w += 8)
+        {
+            F32x8 wv = Avx.LoadVector256(w);
+            a0 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(s0 + ch), wv, a0);
+            a1 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(s1 + ch), wv, a1);
+            a2 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(s2 + ch), wv, a2);
+            a3 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(s3 + ch), wv, a3);
+        }
+        Avx.Store(acc, a0); Avx.Store(acc + 8, a1); Avx.Store(acc + 16, a2); Avx.Store(acc + 24, a3);
+    }
 }

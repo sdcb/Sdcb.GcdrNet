@@ -528,6 +528,7 @@ internal static unsafe partial class Nhwc
         fixed (float* sp0 = src, dp0 = dst)
         {
             float* sp = sp0, dp = dp0;
+            if (UseAvx512 && c % 16 == 0) { MaxPool512(sp, iw, c, dp, oh, ow, kh, kw, rm, cm, relu); return; }
             For(oh, (long)oh * ow * c * kh * kw, y =>
             {
                 for (int x = 0; x < ow; x++)
@@ -614,7 +615,7 @@ internal static unsafe partial class Nhwc
         float[] wy = new float[oh], wx = new float[ow];
         ResizeAxis(oh, ih, sy, y0, y1, wy);
         ResizeAxis(ow, iw, sx, x0, x1, wx);
-        bool relu = act == ActivationKind.Relu, hasAdd = !add.IsEmpty;
+        bool relu = act == ActivationKind.Relu, hasAdd = !add.IsEmpty, v512 = UseAvx512 && c % 16 == 0;
         fixed (float* sp0 = src, dp0 = dst, ap0 = add)
         {
             float* sp = sp0, dp = dp0, ap = ap0;
@@ -623,6 +624,17 @@ internal static unsafe partial class Nhwc
                 float* r0 = sp + (long)y0[y] * iw * c, r1 = sp + (long)y1[y] * iw * c;
                 var vY = new Vector<float>(wy[y]);
                 float wY = wy[y];
+                if (v512)
+                {
+                    var vY16 = Vector512.Create(wY);
+                    for (int x = 0; x < ow; x++)
+                    {
+                        long ob = ((long)y * ow + x) * c;
+                        ResizePixel512(r0 + (long)x0[x] * c, r0 + (long)x1[x] * c, r1 + (long)x0[x] * c, r1 + (long)x1[x] * c,
+                            Vector512.Create(wx[x]), vY16, c, relu, hasAdd ? ap + ob : null, addRelu, dp + ob);
+                    }
+                    return;
+                }
                 for (int x = 0; x < ow; x++)
                 {
                     long ob = ((long)y * ow + x) * c;
@@ -685,6 +697,11 @@ internal static unsafe partial class Nhwc
             float* sp = sp0, dp = dp0, kpp = kp0, wp = wp0, bp = bp0;
             var ca = sc is null ? default
                 : new DenseArgs(kp0, cw, cb, pv, rmp, cmp, skipW, skipC, ow, c, sc.Kernel[0], sc.Kernel[1], skp!.Blocks, sc.Act, avx);
+            if (UseAvx512)
+            {
+                UpHead512(sp, iw, c, kpp, sc is not null, ca, dp, oh, ow, y0, y1, x0, x1, wy, wx, relu, skipRelu, wp, bp, oc, act);
+                return;
+            }
             For(oh, (long)oh * ow * c * (oc + 4), y =>
             {
                 float* s = stackalloc float[c + 8];
@@ -699,7 +716,7 @@ internal static unsafe partial class Nhwc
                     float* krow = kpp + (long)y * ow * c;
                     if (sc is not null)
                     {
-                        for (int blk = 0; blk < ca.Nb; blk++) DenseRow(ca, y, blk, sb, null);
+                        SkipRow(ca, y, sb);
                         krow = sb;
                     }
                     for (int x = 0; x < ow; x++)
@@ -731,6 +748,12 @@ internal static unsafe partial class Nhwc
                 }
             });
         }
+    }
+
+    /// <summary>Recomputes one output row (all oc blocks) of an UpHead skip conv into <paramref name="sb"/>.</summary>
+    private static void SkipRow(in DenseArgs ca, int y, float* sb)
+    {
+        for (int blk = 0; blk < ca.Nb; blk++) DenseRow(ca, y, blk, sb, null);
     }
 
     private static void ActRow(float* p, int n, ActivationKind act, bool avx)
