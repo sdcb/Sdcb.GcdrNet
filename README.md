@@ -33,10 +33,10 @@ The model is a two-stage pipeline:
 
 | Path | Time | vs PyTorch baseline |
 |---|---|---|
-| Vulkan e2e (incl. upload/download + pre/post) | **~30.8 ms** | PyTorch pure inference 30.5 ms; with pre/post 57.2 ms |
-| Vulkan corpus (49 RealDAE, seq order) | **~148 ms/img, 25.2 MP/s** | methodology + per-image numbers: [docs/corpus.md](docs/corpus.md) |
-| CPU corpus (same set) | ~1820 ms/img, 2.1 MP/s | — |
-| CPU AVX2 (16 threads) e2e | ~758 ms | — |
+| Vulkan e2e (incl. upload/download + pre/post) | **~9.6 ms** | PyTorch pure inference 30.5 ms; with pre/post 57.2 ms |
+| Vulkan corpus (49 RealDAE, seq order) | **~38 ms/img** | methodology: [docs/corpus.md](docs/corpus.md), current numbers: [docs/perf.md](docs/perf.md) |
+| CPU AVX2 corpus (same set) | ~767 ms/img | — |
+| CPU AVX2 (16 threads) gc+dr inference | ~365 ms | — |
 
 ### Quick start
 
@@ -117,10 +117,10 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 
 | 路径 | 耗时 | 对比 PyTorch |
 |---|---|---|
-| Vulkan 端到端（含上下行+前后处理） | **~30.8 ms** | PyTorch 纯推理 30.5 ms / 含前后处理 57.2 ms |
-| Vulkan corpus（49 张 RealDAE，序号序） | **~148 ms/张，25.2 MP/s** | 口径与逐图数据见 [docs/corpus.md](docs/corpus.md) |
-| CPU corpus（同集） | ~1820 ms/张，2.1 MP/s | — |
-| CPU AVX2（16 线程）端到端 | ~758 ms | — |
+| Vulkan 端到端（含上下行+前后处理） | **~9.6 ms** | PyTorch 纯推理 30.5 ms / 含前后处理 57.2 ms |
+| Vulkan corpus（49 张 RealDAE，序号序） | **~38 ms/张** | 口径见 [docs/corpus.md](docs/corpus.md)，最新数据见 [docs/perf.md](docs/perf.md) |
+| CPU AVX2 corpus（同集） | ~767 ms/张 | — |
+| CPU AVX2（16 线程）gc+dr 推理 | ~365 ms | — |
 
 ### 快速上手
 
