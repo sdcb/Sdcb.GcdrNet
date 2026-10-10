@@ -23,7 +23,9 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     private readonly OnnxModel _gcModel, _drModel;
     private readonly IntPtr _cmdPool, _cmd, _fence;
     private IntPtr _descPool;              // !PushDescriptors: rebuilt on each record
-    private VkBuffer? _gcArena, _drArena, _bgrIn, _bgrOut;
+    // one arena for both stages: dr at 0, gc stacked past the dr input (GcdrEnhancer.StackArenas)
+    private VkBuffer? _arena, _bgrIn, _bgrOut;
+    private ulong _gcBase;                 // bytes
     private byte* _bgrInMap, _bgrOutMap;
     private VkGraphModel? _gcG, _drG;      // graphs of the bound padded size (refs held)
     private int _h, _w;                    // padded dims
@@ -95,17 +97,18 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         _ih = ih; _iw = iw; _pt = pt; _pl = pl;
 
         ulong es = (ulong)Es;
-        ulong needGc = (ulong)GcPlan.ArenaFloats * es + 64, needDr = (ulong)DrPlan.ArenaFloats * es + 64;
-        // arenas only grow while within ArenaBudget; an over-budget pair (one huge image)
+        // gc base aligned to 256 B (any minStorageBufferOffsetAlignment)
+        var (gcOff, total) = GcdrEnhancer.StackArenas(GcPlan, DrPlan, (long)(256 / es));
+        _gcBase = (ulong)gcOff * es;
+        ulong need = (ulong)total * es + 64;
+        // the arena only grows while within ArenaBudget; an over-budget one (huge image)
         // is dropped to exact size as soon as a size that fits the budget comes along
-        bool shrink = _gcArena is not null && _drArena is not null
-            && _gcArena.Size + _drArena.Size > ArenaBudget && needGc + needDr <= ArenaBudget;
+        bool shrink = _arena is not null && _arena.Size > ArenaBudget && need <= ArenaBudget;
         // headroom (within budget): 1/8 on the first allocation so neighbouring sizes fit,
         // 1/4 on regrowth — a fresh multi-GB arena costs ~50-70 ms to allocate and first-touch
-        ulong div = _gcArena is null ? 8UL : 4UL;
-        ulong head = (needGc + needDr) / div * (div + 1) <= ArenaBudget ? div : 0UL;
-        Arena(ref _gcArena, needGc, shrink, head);
-        Arena(ref _drArena, needDr, shrink, head);
+        ulong div = _arena is null ? 8UL : 4UL;
+        ulong head = need / div * (div + 1) <= ArenaBudget ? div : 0UL;
+        Arena(ref _arena, need, shrink, head);
         ulong bgrBytes = (ulong)ih * (ulong)iw * 3 + 4;
         Staging(ref _bgrIn, ref _bgrInMap, bgrBytes, preferHost: false);
         Staging(ref _bgrOut, ref _bgrOutMap, bgrBytes, preferHost: true);
@@ -113,13 +116,12 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         _recorded = true;
     }
 
-    /// <summary>Per-worker device-arena budget (gc + dr). Within it arenas are grow-only
+    /// <summary>Per-worker device-arena budget (gc + dr). Within it the arena is grow-only
     /// (12.5% headroom on the first allocation, 25% on regrowth) so mixed sizes don't reallocate.</summary>
     internal const ulong ArenaBudget = 3UL << 30;
 
-    /// <summary>Device bytes held by this worker (arenas + BGR staging).</summary>
-    internal long DeviceBytes => (long)((_gcArena?.Size ?? 0) + (_drArena?.Size ?? 0)
-        + (_bgrIn?.Size ?? 0) + (_bgrOut?.Size ?? 0));
+    /// <summary>Device bytes held by this worker (arena + BGR staging).</summary>
+    internal long DeviceBytes => (long)((_arena?.Size ?? 0) + (_bgrIn?.Size ?? 0) + (_bgrOut?.Size ?? 0));
 
     /// <param name="headDiv">0 = exact size, else allocate need * (1 + 1/headDiv).</param>
     private void Arena(ref VkBuffer? buf, ulong need, bool shrink, ulong headDiv)
@@ -170,8 +172,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
 
         if (Environment.GetEnvironmentVariable("GCDR_ZERO_ARENA") == "1")
         {
-            Vk.vkCmdFillBuffer(_cmd, _gcArena!.Buffer, 0, _gcArena.Size, 0);
-            Vk.vkCmdFillBuffer(_cmd, _drArena!.Buffer, 0, _drArena.Size, 0);
+            Vk.vkCmdFillBuffer(_cmd, _arena!.Buffer, 0, _arena.Size, 0);
             Vk.VkMemoryBarrier fb = new()
             {
                 SType = VkConst.StMemoryBarrier,
@@ -183,36 +184,36 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
 
         // bgr2nhwc -> gc arena input
         Dispatch(_pPre,
-            [(_bgrIn!, 0UL, _bgrIn!.Size), (_gcArena!, InOff(gcPlan), InBytes(gcPlan))],
+            [(_bgrIn!, 0UL, _bgrIn!.Size), (_arena!, _gcBase + InOff(gcPlan), InBytes(gcPlan))],
             Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, srcStride),
             (w + 255) / 256, h, 1);
         _dev.CmdComputeBarrier(_cmd);
-        RecordGraph(gcG, _gcArena!);
+        RecordGraph(gcG, _arena!, _gcBase);
 
         // div6: gc input + gc output -> dr arena input
         uint hw = h * w;
         ulong es = (ulong)Es;
         _dev.CmdComputeBarrier(_cmd);
         Dispatch(_pDiv6,
-            [(_gcArena!, InOff(gcPlan), 3UL * hw * es),
-             (_gcArena!, OutOff(gcPlan), 3UL * hw * es),
-             (_drArena!, InOff(drPlan), 6UL * hw * es)],
+            [(_arena!, _gcBase + InOff(gcPlan), 3UL * hw * es),
+             (_arena!, _gcBase + OutOff(gcPlan), 3UL * hw * es),
+             (_arena!, InOff(drPlan), 6UL * hw * es)],
             Pc(hw), (hw + 255) / 256, 1, 1);
         _dev.CmdComputeBarrier(_cmd);
-        RecordGraph(drG, _drArena!);
+        RecordGraph(drG, _arena!, 0);
 
         // nhwc2bgr -> bgrOut
         _dev.CmdComputeBarrier(_cmd);
         uint nwords = ((uint)_ih * (uint)_iw * 3u + 3u) / 4u;
         Dispatch(_pPost,
-            [(_drArena!, OutOff(drPlan), OutBytes(drPlan)), (_bgrOut!, 0UL, _bgrOut!.Size)],
+            [(_arena!, OutOff(drPlan), OutBytes(drPlan)), (_bgrOut!, 0UL, _bgrOut!.Size)],
             Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, nwords),   // PC layout must match nhwc2bgr.comp
             (nwords + 255) / 256, 1, 1);
         Vk.Check(Vk.vkEndCommandBuffer(_cmd), "vkEndCommandBuffer");
     }
 
     /// <summary>All graph dispatches with barriers between them (none before the first).</summary>
-    private void RecordGraph(VkGraphModel g, VkBuffer arena)
+    private void RecordGraph(VkGraphModel g, VkBuffer arena, ulong arenaBase)
     {
         var binds = new (VkBuffer buf, ulong off, ulong size)[8];
         for (int i = 0; i < g.Dispatches.Length; i++)
@@ -231,7 +232,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
                     VkSlot.Direct => vb.Buf!,
                     _ => throw new InvalidOperationException($"pipeline graph dispatch binds {vb.Slot}"),
                 };
-                binds[b] = (buf, vb.Offset, vb.Size);
+                binds[b] = (buf, vb.Slot == VkSlot.Arena ? arenaBase + vb.Offset : vb.Offset, vb.Size);
             }
             Dispatch(d.Pipe, binds.AsSpan(0, d.Binds.Length), d.Pc, d.Gx, d.Gy, d.Gz);
         }
@@ -306,10 +307,11 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     internal sealed class DebugStage(VkGcdrPipeline p, bool gc)
     {
         private VkGraphModel G => (gc ? p._gcG : p._drG) ?? throw new InvalidOperationException("worker not bound");
-        private VkBuffer Arena => (gc ? p._gcArena : p._drArena)!;
+        private VkBuffer Arena => p._arena!;
+        private ulong Base => gc ? p._gcBase : 0;
         public ExecPlan DebugPlan => G.Plan;
-        /// <summary>Download the plan's arena prefix (ArenaFloats elements) into dst.</summary>
-        public void DebugArena(Span<float> dst) => p.Download(Arena, 0, dst.Slice(0, G.Plan.ArenaFloats));
+        /// <summary>Download the plan's arena window (ArenaFloats elements) into dst.</summary>
+        public void DebugArena(Span<float> dst) => p.Download(Arena, Base, dst.Slice(0, G.Plan.ArenaFloats));
         public (VkBuffer consts, VkBuffer arena) DebugBuffers => (G.Consts, Arena);
     }
 
@@ -331,9 +333,11 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     internal void DebugIntermediates(Span<float> gcIn, Span<float> gcOut, Span<float> drIn)
     {
         int hw = _h * _w;
-        Download(_gcArena!, InOff(GcPlan), gcIn.Slice(0, 3 * hw));
-        Download(_gcArena!, OutOff(GcPlan), gcOut.Slice(0, 3 * hw));
-        Download(_drArena!, InOff(DrPlan), drIn.Slice(0, 6 * hw));
+        // gc's window is overwritten by dr: only valid while dr has not clobbered it
+        // (dr input + whatever dr left untouched); kept for bisecting
+        Download(_arena!, _gcBase + InOff(GcPlan), gcIn.Slice(0, 3 * hw));
+        Download(_arena!, _gcBase + OutOff(GcPlan), gcOut.Slice(0, 3 * hw));
+        Download(_arena!, InOff(DrPlan), drIn.Slice(0, 6 * hw));
     }
 
     public void Dispose()
@@ -344,8 +348,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         _dev.DestroyFence(_fence);
         if (_bgrIn is not null) { if (_bgrInMap != null) _bgrIn.Unmap(); _bgrIn.Free(); _bgrIn = null; _bgrInMap = null; }
         if (_bgrOut is not null) { if (_bgrOutMap != null) _bgrOut.Unmap(); _bgrOut.Free(); _bgrOut = null; _bgrOutMap = null; }
-        _gcArena?.Free(); _gcArena = null;
-        _drArena?.Free(); _drArena = null;
+        _arena?.Free(); _arena = null;
         _gcG?.Release(); _gcG = null;
         _drG?.Release(); _drG = null;
         _recorded = false;

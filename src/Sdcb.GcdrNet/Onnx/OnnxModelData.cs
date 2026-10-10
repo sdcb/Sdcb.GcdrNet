@@ -86,8 +86,25 @@ internal sealed class OnnxTensorData
         return n;
     }
 
-    /// <summary>Decodes this tensor to a float array (float/float16/int sources).</summary>
+    private float[]? _floats;
+
+    /// <summary>
+    /// This tensor as floats (float/double/int sources), decoded once and shared: every
+    /// per-size plan of a model references the same read-only array. Raw float bytes are
+    /// dropped after decoding so the weights live in memory only once.
+    /// </summary>
     public float[] AsFloats()
+    {
+        lock (this)
+        {
+            if (_floats is { } cached) return cached;
+            _floats = DecodeFloats();
+            if (DataType == TypeFloat) RawData = null;
+            return _floats;
+        }
+    }
+
+    private float[] DecodeFloats()
     {
         int count = checked((int)ElementCount());
         if (RawData is byte[] raw)
@@ -133,7 +150,10 @@ internal sealed class OnnxTensorData
     /// <summary>Decodes this tensor to an int64 array.</summary>
     public long[] AsInt64s()
     {
-        if (RawData is byte[] raw)
+        byte[]? rawData; float[]? fl;
+        lock (this) { rawData = RawData; fl = _floats; }
+        if (DataType == TypeFloat && fl is not null) return fl.Select(x => (long)x).ToArray();
+        if (rawData is byte[] raw)
         {
             switch (DataType)
             {

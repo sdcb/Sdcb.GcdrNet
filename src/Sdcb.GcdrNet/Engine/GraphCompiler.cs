@@ -792,6 +792,53 @@ internal static class GraphCompiler
                 active.Add(b);
             }
             arenaFloats = bump;
+
+            // greedy by size (largest first, lowest-waste gap among lifetime-overlapping
+            // placements): usually much tighter than def-order free lists; keep the better one
+            {
+                // the input (live for the whole run) goes first, at offset 0: pipelines can
+                // then stack another plan's arena right after it
+                var bySize = order.OrderByDescending(b => b == inputBuf).ThenByDescending(b => bufSize[b]).ThenBy(b => def[b]).ToList();
+                var placed = new List<int>(bySize.Count);
+                int[] off2 = new int[bufCount];
+                Array.Fill(off2, -1);
+                int top = 0;
+                var conflicts = new List<(int off, int end)>();
+                foreach (int b in bySize)
+                {
+                    int need = AlignUp(bufSize[b]);
+                    conflicts.Clear();
+                    foreach (int o in placed)
+                        if (!(use[o] < def[b] || use[b] < def[o]))
+                            conflicts.Add((off2[o], off2[o] + AlignUp(bufSize[o])));
+                    conflicts.Sort();
+                    int best = -1, bestWaste = int.MaxValue, cur = 0;
+                    foreach (var (o, e) in conflicts)
+                    {
+                        if (o - cur >= need && o - cur - need < bestWaste) { best = cur; bestWaste = o - cur - need; }
+                        cur = Math.Max(cur, e);
+                    }
+                    off2[b] = best >= 0 ? best : cur;
+                    top = Math.Max(top, off2[b] + need);
+                    placed.Add(b);
+                }
+                if (top <= bump)
+                {
+                    offsets = off2;
+                    arenaFloats = top;
+                }
+            }
+            if (Environment.GetEnvironmentVariable("GCDRNET_DUMP") == "3")
+            {
+                long peak = 0; int at = -1;
+                for (int ni = -1; ni <= nodes.Count; ni++)
+                {
+                    long s = 0;
+                    for (int b = 0; b < bufCount; b++) if (def[b] != int.MaxValue && def[b] <= ni && use[b] >= ni) s += AlignUp(bufSize[b]);
+                    if (s > peak) { peak = s; at = ni; }
+                }
+                Console.Error.WriteLine($"[arena] {arenaFloats * 4.0 / 1e6:F1} MB (freelist {bump * 4.0 / 1e6:F1}), live-peak {peak * 4.0 / 1e6:F1} MB at #{at}, input {bufSize[inputBuf] * 4.0 / 1e6:F1} MB off {offsets[inputBuf]}");
+            }
         }
 
         private static readonly HashSet<string> IntOps = new(StringComparer.Ordinal)

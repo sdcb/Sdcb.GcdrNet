@@ -155,9 +155,10 @@ public sealed class GcdrEnhancer : IDisposable
         CpuWorker worker = cpuPool.Rent();
         try
         {
-            var (gcArena, drArena) = worker.Arenas((long)gcPlan.ArenaFloats * sizeof(float), (long)drPlan.ArenaFloats * sizeof(float));
-            using var gc = new InferenceSession(gcPlan, gcArena);
-            using var dr = new InferenceSession(drPlan, drArena);
+            var (gcOff, total) = StackArenas(gcPlan, drPlan);
+            nint arena = worker.Arena(total * sizeof(float));
+            using var gc = new InferenceSession(gcPlan, arena + (nint)(gcOff * sizeof(float)));
+            using var dr = new InferenceSession(drPlan, arena);
 
             // stage 0: fill GC input — BGR u8 → float /255, top/left replicate pad
             Span<float> x = gc.Input;
@@ -191,6 +192,20 @@ public sealed class GcdrEnhancer : IDisposable
         finally { cpuPool.Return(worker); }
     }
 
+    /// <summary>
+    /// One arena for both stages (gc runs to completion before dr starts): the gc arena is
+    /// stacked right past the dr input window, so gc's input/output survive the
+    /// stage-2 glue that writes the dr input, and dr then reuses everything above.
+    /// Returns the gc arena offset and the total size, in floats.
+    /// </summary>
+    internal static (long gcOff, long total) StackArenas(ExecPlan gc, ExecPlan dr, long align = 16)
+    {
+        CValue din = dr.Values[dr.InputValue];
+        long o = dr.BufOffset[din.Buf], end = (o + din.ElementCount + align - 1) / align * align;
+        long gcOff = o >= gc.ArenaFloats ? 0 : end;
+        return (gcOff, Math.Max(dr.ArenaFloats, gcOff + gc.ArenaFloats));
+    }
+
     private static bool VulkanOk()
     {
         try { _ = Sdcb.GcdrNet.Backends.Vulkan.VkBackend.Default.Dev.DeviceName; return true; }
@@ -213,58 +228,48 @@ public sealed class GcdrEnhancer : IDisposable
     }
 
     /// <summary>
-    /// Size-agnostic CPU worker: native gc/dr arenas, borrowed by per-call sessions.
-    /// Within <see cref="CpuArenaBudget"/> they only grow (25% headroom on regrowth),
-    /// so mixed sizes neither reallocate nor re-fault pages; an over-budget pair (one
-    /// huge image) drops to exact size once a size that fits comes along.
+    /// Size-agnostic CPU worker: one native arena holding both stages (see
+    /// <see cref="StackArenas"/>), borrowed by per-call sessions. Within
+    /// <see cref="CpuArenaBudget"/> it only grows (25% headroom on regrowth), so mixed sizes
+    /// neither reallocate nor re-fault pages; an over-budget arena (one huge image) drops
+    /// to exact size once a size that fits comes along.
     /// </summary>
     private sealed unsafe class CpuWorker : IDisposable
     {
-        private nint _gc, _dr;
-        private long _gcBytes, _drBytes;
+        private nint _p;
+        private long _bytes;
 
-        public long Bytes => _gcBytes + _drBytes;
+        public long Bytes => _bytes;
 
-        public (nint gc, nint dr) Arenas(long needGc, long needDr)
+        public nint Arena(long need)
         {
-            needGc = Math.Max(needGc, 64); needDr = Math.Max(needDr, 64);
-            bool shrink = _gc != 0 && _dr != 0 && _gcBytes + _drBytes > CpuArenaBudget && needGc + needDr <= CpuArenaBudget;
-            bool headroom = _gc != 0 && (needGc + needDr) / 4 * 5 <= CpuArenaBudget;
-            Ensure(ref _gc, ref _gcBytes, needGc, shrink, headroom);
-            Ensure(ref _dr, ref _drBytes, needDr, shrink, headroom);
-            return (_gc, _dr);
-        }
-
-        private static void Ensure(ref nint p, ref long bytes, long need, bool shrink, bool headroom)
-        {
-            if (p != 0 && bytes >= need && !shrink) return;
-            Release(ref p, ref bytes);
-            long cap = headroom && !shrink ? need / 4 * 5 : need;
-            p = (nint)NativeMemory.AllocZeroed((nuint)cap);
-            bytes = cap;
+            need = Math.Max(need, 64);
+            bool shrink = _p != 0 && _bytes > CpuArenaBudget && need <= CpuArenaBudget;
+            if (_p != 0 && _bytes >= need && !shrink) return _p;
+            bool headroom = _p != 0 && !shrink && need / 4 * 5 <= CpuArenaBudget;
+            Release();
+            long cap = headroom ? need / 4 * 5 : need;
+            _p = (nint)NativeMemory.AllocZeroed((nuint)cap);
+            _bytes = cap;
             GC.AddMemoryPressure(cap);
+            return _p;
         }
 
-        private static void Release(ref nint p, ref long bytes)
+        private void Release()
         {
-            if (p == 0) return;
-            NativeMemory.Free((void*)p);
-            GC.RemoveMemoryPressure(bytes);
-            p = 0; bytes = 0;
+            if (_p == 0) return;
+            NativeMemory.Free((void*)_p);
+            GC.RemoveMemoryPressure(_bytes);
+            _p = 0; _bytes = 0;
         }
 
         public void Dispose()
         {
-            Release(ref _gc, ref _gcBytes);
-            Release(ref _dr, ref _drBytes);
+            Release();
             GC.SuppressFinalize(this);
         }
 
-        ~CpuWorker()
-        {
-            Release(ref _gc, ref _gcBytes);
-            Release(ref _dr, ref _drBytes);
-        }
+        ~CpuWorker() => Release();
     }
 
     /// <summary>Bounded rent/return pool of stateful workers (at most <c>max</c> idle and,
