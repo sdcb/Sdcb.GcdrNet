@@ -12,9 +12,9 @@ $run = { param($name, $env)
 }
 
 & $run 'default (AVX2/AVX-512)' @{}
-& $run 'vector (GCDRNET_ISA=vector)' @{ GCDRNET_ISA = 'vector' }
-& $run 'scalar (GCDRNET_ISA=scalar)' @{ GCDRNET_ISA = 'scalar' }
-& $run 'no-AVX (DOTNET_EnableAVX=0)' @{ DOTNET_EnableAVX = '0' }
+& $run 'vector-128 (DOTNET_EnableAVX2=0)' @{ DOTNET_EnableAVX2 = '0' }
+& $run 'sse-no-fma (DOTNET_EnableAVX=0)' @{ DOTNET_EnableAVX = '0' }
+& $run 'scalar (DOTNET_EnableHWIntrinsic=0)' @{ DOTNET_EnableHWIntrinsic = '0' }
 & $run 'no-AVX512 (DOTNET_EnableAVX512=0)' @{ DOTNET_EnableAVX512 = '0' }
 
 Write-Host 'All ISA tiers passed.' -ForegroundColor Green

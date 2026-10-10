@@ -74,8 +74,10 @@ dotnet test tests/Sdcb.GcdrNet.Tests -c Release
 ```
 
 Golden outputs come from onnxruntime runs of the simplified models (max diff ≤ 2e-3;
-Vulkan node-by-node vs CPU within ~1e-4). CPU kernel changes should be re-checked under
-`GCDRNET_ISA=vector` (portable `Vector<float>` tier), `DOTNET_EnableAVX=0`,
+Vulkan node-by-node vs CPU within ~1e-4). Kernel dispatch follows the runtime's
+`IsSupported` flags, so ISA tiers are exercised via the standard runtime knobs —
+`test-all.ps1` runs `DOTNET_EnableAVX2=0` (128-bit `Vector<float>`),
+`DOTNET_EnableAVX=0` (SSE, no FMA), `DOTNET_EnableHWIntrinsic=0` (scalar),
 and `DOTNET_EnableAVX512=0`.
 
 ### Notes
@@ -136,5 +138,7 @@ byte[] dst = enh.Enhance(bgrBytes, width: 1600, height: 1152);
 dotnet test tests/Sdcb.GcdrNet.Tests -c Release
 ```
 
-golden 由 onnxruntime 对简化模型跑出（阈值 ≤2e-3）；改 CPU 内核请在
-`GCDRNET_ISA=vector`、`DOTNET_EnableAVX=0`、`DOTNET_EnableAVX512=0` 下复测。
+golden 由 onnxruntime 对简化模型跑出（阈值 ≤2e-3）；内核分发直接跟随 runtime 的
+`IsSupported` 标志，改 CPU 内核请用 `test-all.ps1` 跑 ISA 矩阵：
+`DOTNET_EnableAVX2=0`（128 位 Vector）、`DOTNET_EnableAVX=0`（SSE 无 FMA）、
+`DOTNET_EnableHWIntrinsic=0`（纯标量）、`DOTNET_EnableAVX512=0`。
