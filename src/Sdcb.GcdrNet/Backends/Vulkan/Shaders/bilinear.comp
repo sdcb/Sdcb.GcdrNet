@@ -1,10 +1,12 @@
 #version 450
-// NCHW bilinear resize, half-pixel centers, optional relu.
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// NHWC bilinear resize, half-pixel centers, optional relu.
 // src_coord = (dst + 0.5) / scale - 0.5
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
     uint c, ih, iw, oh, ow, relu;
@@ -15,21 +17,21 @@ void main()
 {
     uint id = gl_GlobalInvocationID.x;
     if (id >= p.c * p.oh * p.ow) return;
-    uint ox = id % p.ow, oy = (id / p.ow) % p.oh, ch = id / (p.oh * p.ow);
+    uint ch = id % p.c, px = id / p.c;
+    uint ox = px % p.ow, oy = px / p.ow;
 
     float fy = (float(oy) + 0.5) / p.shy - 0.5;
     float fx = (float(ox) + 0.5) / p.shx - 0.5;
     int fy0 = int(floor(fy)), fx0 = int(floor(fx));
     float dy = fy - float(fy0), dx = fx - float(fx0);
-    int y0 = clamp(fy0, 0, int(p.ih) - 1), x0 = clamp(fx0, 0, int(p.iw) - 1);
-    int y1 = clamp(fy0 + 1, 0, int(p.ih) - 1), x1 = clamp(fx0 + 1, 0, int(p.iw) - 1);
+    uint y0 = uint(clamp(fy0, 0, int(p.ih) - 1)), x0 = uint(clamp(fx0, 0, int(p.iw) - 1));
+    uint y1 = uint(clamp(fy0 + 1, 0, int(p.ih) - 1)), x1 = uint(clamp(fx0 + 1, 0, int(p.iw) - 1));
 
-    uint b0 = ch * p.ih * p.iw;
-    float v00 = x[b0 + uint(y0) * p.iw + uint(x0)];
-    float v01 = x[b0 + uint(y0) * p.iw + uint(x1)];
-    float v10 = x[b0 + uint(y1) * p.iw + uint(x0)];
-    float v11 = x[b0 + uint(y1) * p.iw + uint(x1)];
+    float v00 = float(x[(y0 * p.iw + x0) * p.c + ch]);
+    float v01 = float(x[(y0 * p.iw + x1) * p.c + ch]);
+    float v10 = float(x[(y1 * p.iw + x0) * p.c + ch]);
+    float v11 = float(x[(y1 * p.iw + x1) * p.c + ch]);
     float v = mix(mix(v00, v01, dx), mix(v10, v11, dx), dy);
     if (p.relu != 0u) v = max(v, 0.0);
-    o[id] = v;
+    o[id] = ET(v);
 }

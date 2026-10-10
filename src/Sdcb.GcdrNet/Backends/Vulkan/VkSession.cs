@@ -23,6 +23,8 @@ public sealed unsafe class VkInferenceSession : IDisposable
     private readonly IntPtr[] _descSets;  // per-dispatch sets when !PushDescriptors
     private readonly ulong _inOff, _outOff;
     private readonly int _inFloats, _outFloats;
+    private readonly int _es;             // bytes per stored element (2 = fp16 storage)
+    internal bool F16 => _es == 2;
 
     internal VkInferenceSession(VkDevice dev, ExecPlan plan, VkGraphModel graph)
     {
@@ -30,14 +32,15 @@ public sealed unsafe class VkInferenceSession : IDisposable
         _plan = plan;
         _graph = graph;
         _graph.Acquire();
+        _es = graph.Es;
 
-        Arena = dev.NewStorageBuffer((ulong)plan.ArenaFloats * 4 + 64, hostVisible: false);
+        Arena = dev.NewStorageBuffer((ulong)plan.ArenaFloats * (ulong)_es + 64, hostVisible: false);
         _inFloats = checked((int)plan.Values[plan.InputValue].ElementCount);
         _outFloats = checked((int)plan.Values[plan.OutputValue].ElementCount);
-        _inOff = (ulong)plan.BufOffset[plan.Values[plan.InputValue].Buf] * 4;
-        _outOff = (ulong)plan.BufOffset[plan.Values[plan.OutputValue].Buf] * 4;
-        _stageIn = dev.NewStorageBuffer((ulong)_inFloats * 4, hostVisible: true, preferHost: true);
-        _stageOut = dev.NewStorageBuffer((ulong)_outFloats * 4, hostVisible: true, preferHost: true);
+        _inOff = (ulong)plan.BufOffset[plan.Values[plan.InputValue].Buf] * (ulong)_es;
+        _outOff = (ulong)plan.BufOffset[plan.Values[plan.OutputValue].Buf] * (ulong)_es;
+        _stageIn = dev.NewStorageBuffer(InputBytes, hostVisible: true, preferHost: true);
+        _stageOut = dev.NewStorageBuffer(OutputBytes, hostVisible: true, preferHost: true);
         _stageInMap = (float*)_stageIn.Map();
         _stageOutMap = (float*)_stageOut.Map();
         _inHost = new float[_inFloats];
@@ -89,8 +92,37 @@ public sealed unsafe class VkInferenceSession : IDisposable
 
     internal ulong InputOffset => _inOff;
     internal ulong OutputOffset => _outOff;
-    internal ulong InputBytes => (ulong)_inFloats * 4;
-    internal ulong OutputBytes => (ulong)_outFloats * 4;
+    internal ulong InputBytes => (ulong)_inFloats * (ulong)_es;
+    internal ulong OutputBytes => (ulong)_outFloats * (ulong)_es;
+    internal int ElemBytes => _es;
+
+    /// <summary>Host float -> staged storage elements (fp16 narrowing when F16).</summary>
+    internal static void ToStorage(ReadOnlySpan<float> src, void* dst, bool f16)
+    {
+        if (!f16) { src.CopyTo(new Span<float>(dst, src.Length)); return; }
+        var d = new Span<Half>(dst, src.Length);
+        for (int i = 0; i < src.Length; i++) d[i] = (Half)src[i];
+    }
+
+    /// <summary>Stored elements -> host float (fp16 widening when F16).</summary>
+    internal static void FromStorage(void* src, Span<float> dst, bool f16)
+    {
+        if (!f16) { new ReadOnlySpan<float>(src, dst.Length).CopyTo(dst); return; }
+        var sp = new ReadOnlySpan<Half>(src, dst.Length);
+        for (int i = 0; i < dst.Length; i++) dst[i] = (float)sp[i];
+    }
+
+    /// <summary>Downloads dst.Length stored elements at byte offset <paramref name="off"/>.</summary>
+    internal void DownloadElems(VkBuffer buf, ulong off, Span<float> dst)
+    {
+        ulong bytes = (ulong)dst.Length * (ulong)_es;
+        byte[] tmp = new byte[bytes];
+        fixed (byte* t = tmp)
+        {
+            _dev.Download(buf, t, bytes, off);
+            FromStorage(t, dst, F16);
+        }
+    }
 
     /// <summary>Record one dispatch (push-descriptor path only; caller emits barriers).</summary>
     internal static void RecordOne(VkDevice dev, IntPtr cmd, VkPipeline pipe,
@@ -303,7 +335,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
     /// <summary>Debug: download the whole arena (ArenaFloats floats) into dst.</summary>
     internal void DebugArena(Span<float> dst)
     {
-        fixed (float* p = dst) _dev.Download(Arena, p, (ulong)_plan.ArenaFloats * 4, 0);
+        DownloadElems(Arena, 0, dst.Slice(0, _plan.ArenaFloats));
     }
 
     /// <summary>Debug: graph consts buffer + the session's arena buffer.</summary>
@@ -313,15 +345,13 @@ public sealed unsafe class VkInferenceSession : IDisposable
     internal void DebugDownload(int valueId, float[] dst)
     {
         CValue v = _plan.Values[valueId];
-        ulong off = (ulong)_plan.BufOffset[v.Buf] * 4;
-        fixed (float* p = dst)
-            _dev.Download(Arena, p, (ulong)v.ElementCount * 4, off);
+        DownloadElems(Arena, (ulong)_plan.BufOffset[v.Buf] * (ulong)_es, dst.AsSpan(0, checked((int)v.ElementCount)));
     }
 
     /// <summary>Debug/test: copy host input into the arena's input region.</summary>
     internal void DebugUploadInput()
     {
-        _inHost.CopyTo(new Span<float>(_stageInMap, _inFloats));
+        ToStorage(_inHost, _stageInMap, F16);
         _stageIn.Flush(0, InputBytes);
         IntPtr cmd = _dev.NewCommandBuffer();
         IntPtr fence = _dev.NewFence();
@@ -339,12 +369,12 @@ public sealed unsafe class VkInferenceSession : IDisposable
     /// <summary>Copy host input into staging and run the recorded pipeline.</summary>
     public void Run()
     {
-        _inHost.CopyTo(new Span<float>(_stageInMap, _inFloats));
+        ToStorage(_inHost, _stageInMap, F16);
         _stageIn.Flush(0, InputBytes);
         _dev.Submit(_cmd, _fence);
         _dev.WaitFence(_fence);
         _stageOut.Invalidate(0, OutputBytes);
-        new ReadOnlySpan<float>(_stageOutMap, _outFloats).CopyTo(_outHost);
+        FromStorage(_stageOutMap, _outHost, F16);
     }
 
     public void Dispose()

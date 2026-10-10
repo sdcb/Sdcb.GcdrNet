@@ -26,7 +26,8 @@ public class VulkanTests
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
-        Assert.True(max < 5e-4f, $"gcnet-vk[{tag}] max diff {max} rmse {rmse}");
+        float tol = VkBackend.Default.F16 ? 2e-2f : 5e-4f;
+        Assert.True(max < tol, $"gcnet-vk[{tag}] max diff {max} rmse {rmse} (tol {tol})");
     }
 
     [SkippableTheory]
@@ -45,7 +46,8 @@ public class VulkanTests
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
-        Assert.True(max < 5e-4f, $"drnet-vk[{tag}] max diff {max} rmse {rmse}");
+        float tol = VkBackend.Default.F16 ? 2e-2f : 5e-4f;
+        Assert.True(max < tol, $"drnet-vk[{tag}] max diff {max} rmse {rmse} (tol {tol})");
     }
 
     [SkippableTheory]
@@ -70,7 +72,8 @@ public class VulkanTests
             if (d > 0) diffs++;
             if (d > maxd) maxd = d;
         }
-        Assert.True(maxd <= 2, $"pipeline-vk[{tag}] max u8 diff {maxd}, changed px {diffs}/{dst.Length}");
+        int u8tol = VkBackend.Default.F16 ? 8 : 2;
+        Assert.True(maxd <= u8tol, $"pipeline-vk[{tag}] max u8 diff {maxd} (tol {u8tol}), changed px {diffs}/{dst.Length}");
     }
 
     [SkippableTheory]
@@ -96,7 +99,8 @@ public class VulkanTests
         for (int y = 0; y < oh; y++)
             for (int x = 0; x < ow * 3; x++)
                 maxd = Math.Max(maxd, Math.Abs(dst[y * ds + x] - expectU8[y * ow * 3 + x]));
-        Assert.True(maxd <= 2, $"pipeline-vk-strided[{tag}] max u8 diff {maxd}");
+        int u8tol = VkBackend.Default.F16 ? 8 : 2;
+        Assert.True(maxd <= u8tol, $"pipeline-vk-strided[{tag}] max u8 diff {maxd} (tol {u8tol})");
     }
 
     private static bool VkAvailable()

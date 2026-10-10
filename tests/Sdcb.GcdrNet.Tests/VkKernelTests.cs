@@ -17,7 +17,8 @@ public unsafe class VkKernelTests
         int c = 4, ih = 3, iw = 4, oh = 6, ow = 8;
         float[] src = Enumerable.Range(0, c * ih * iw).Select(_ => (float)rng.NextDouble() * 4 - 2).ToArray();
         float[] dstCpu = new float[c * oh * ow];
-        Ops.ResizeBilinear(src, [1, c, ih, iw], dstCpu, [1, c, oh, ow], [1, 1, 2, 2]);
+        // shaders address NHWC storage: src is [ih][iw][c]
+        Nhwc.ResizeBilinear(src, ih, iw, c, dstCpu, oh, ow, 2f, 2f, ActivationKind.None);
 
         VkBuffer xb = dev.NewStorageBuffer((ulong)src.Length * 4, true);
         VkBuffer ob = dev.NewStorageBuffer((ulong)dstCpu.Length * 4, true, preferHost: true);

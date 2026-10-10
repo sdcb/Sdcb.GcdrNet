@@ -1,9 +1,11 @@
 #version 450
-// NCHW maxpool + optional relu.
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// NHWC maxpool + optional relu (channel-fastest flat index).
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
     uint c, ih, iw, oh, ow;
@@ -15,7 +17,8 @@ void main()
 {
     uint id = gl_GlobalInvocationID.x;
     if (id >= p.c * p.oh * p.ow) return;
-    uint ox = id % p.ow, oy = (id / p.ow) % p.oh, ch = id / (p.oh * p.ow);
+    uint ch = id % p.c, px = id / p.c;
+    uint ox = px % p.ow, oy = px / p.ow;
     float m = -3.4e38;
     for (uint ky = 0u; ky < p.kh; ky++)
     {
@@ -25,10 +28,10 @@ void main()
         {
             int sx = int(ox * p.sw + kx) - int(p.pl);
             if (uint(sx) >= p.iw) continue;
-            m = max(m, x[(ch * p.ih + uint(sy)) * p.iw + uint(sx)]);
+            m = max(m, float(x[(uint(sy) * p.iw + uint(sx)) * p.c + ch]));
         }
     }
     if (m == -3.4e38) m = 0.0;
     if (p.relu != 0u && m < 0.0) m = 0.0;
-    o[id] = m;
+    o[id] = ET(m);
 }

@@ -34,6 +34,8 @@ public class VkDebugTests
 
         var log = new StreamWriter(Path.Combine(Path.GetTempPath(), $"vkdbg_{which}_{tag}.txt"));
         int bad = 0;
+        // fp16 storage: per-node error measured up to ~4e-2 on deep convs (relative ~1e-3 of activations)
+        float thr = VkBackend.Default.F16 ? 6e-2f : 1e-3f;
         for (int i = 0; i < plan.Nodes.Length; i++)
         {
             ExecNode n = plan.Nodes[i];
@@ -51,8 +53,8 @@ public class VkDebugTests
                 float d = Math.Abs(got[j] - want[j]);
                 if (d > maxd) { maxd = d; at = j; }
             }
-            string status = maxd > 1e-3 ? "  <-- BAD" : "";
-            if (maxd > 1e-3)
+            string status = maxd > thr ? "  <-- BAD" : "";
+            if (maxd > thr)
             {
                 bad++;
                 if (bad <= 2)
@@ -61,7 +63,7 @@ public class VkDebugTests
                     int[] sh = v.Shape;
                     int cw = sh[^1], chh = sh.Length >= 2 ? sh[^2] : 1;
                     for (int j = 0; j < c; j++)
-                        if (Math.Abs(got[j] - want[j]) > 1e-3)
+                        if (Math.Abs(got[j] - want[j]) > thr)
                         {
                             int y = chh > 1 && cw > 0 ? (j / cw) % chh : j / cw;
                             int x = cw > 0 ? j % cw : 0;
@@ -70,7 +72,7 @@ public class VkDebugTests
                         }
                     int badCnt = 0;
                     for (int j = 0; j < c; j++)
-                        if (Math.Abs(got[j] - want[j]) > 1e-3) badCnt++;
+                        if (Math.Abs(got[j] - want[j]) > thr) badCnt++;
                     log.WriteLine($"      badElems={badCnt}/{c}");
                     for (int j = Math.Max(0, at - 2); j < Math.Min(c, at + 3); j++)
                         log.WriteLine($"      [{j}] gpu={got[j],12:g6} cpu={want[j],12:g6}");

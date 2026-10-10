@@ -3,9 +3,10 @@ using Sdcb.GcdrNet.Engine;
 namespace Sdcb.GcdrNet.Backends.Vulkan;
 
 /// <summary>
-/// Fused GPU pipeline for one padded size: BGR u8 upload → bgr2nchw shader →
-/// GC-Net → div6 (division correction + 6ch build) → DR-Net → nchw2bgr →
-/// u8 readback. One command buffer, one submit per frame.
+/// Fused GPU pipeline for one padded size: BGR u8 upload → bgr2nhwc shader →
+/// GC-Net → div6 (division correction, interleaved 6ch NHWC) → DR-Net →
+/// nhwc2bgr → u8 readback. Both plans keep physical (NHWC) I/O, so neither net
+/// contains a Transpose. One command buffer, one submit per frame.
 /// </summary>
 internal sealed unsafe class VkGcdrPipeline : IDisposable
 {
@@ -36,9 +37,11 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         _bgrOutMap = (byte*)_bgrOut.Map();
         _fence = dev.NewFence();
 
-        _pPre = dev.GetPipeline("bgr2nchw", 2, 7 * 4);
-        _pDiv6 = dev.GetPipeline("div6", 3, 4);
-        _pPost = dev.GetPipeline("nchw2bgr", 2, 7 * 4);
+        if (_gc.F16 != _dr.F16) throw new InvalidOperationException("gc/dr storage precision mismatch");
+        string sfx = _gc.F16 ? "_h" : "";
+        _pPre = dev.GetPipeline("bgr2nhwc" + sfx, 2, 7 * 4);
+        _pDiv6 = dev.GetPipeline("div6" + sfx, 3, 4);
+        _pPost = dev.GetPipeline("nhwc2bgr" + sfx, 2, 7 * 4);
         _cmd = dev.NewCommandBuffer();
         Record((uint)(_iw * 3));   // _bgrIn is always tightly packed (we de-stride on upload)
     }
@@ -69,31 +72,32 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
                 1, &fb, 0, null, 0, null);
         }
 
-        // bgr2nchw -> gc arena input
+        // bgr2nhwc -> gc arena input
         VkInferenceSession.RecordOne(_dev, _cmd, _pPre,
             [(_bgrIn, 0UL, _bgrIn.Size), (_gc.Arena, _gc.InputOffset, _gc.InputBytes)],
             Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, (uint)srcStride),
-            (w + 255) / 256, h, 3);
+            (w + 255) / 256, h, 1);
         _dev.CmdComputeBarrier(_cmd);
         _gc.RecordCompute(_cmd);
 
         // div6: gc input + gc output -> dr arena input
         uint hw = h * w;
+        ulong es = (ulong)_gc.ElemBytes;
         _dev.CmdComputeBarrier(_cmd);
         VkInferenceSession.RecordOne(_dev, _cmd, _pDiv6,
-            [(_gc.Arena, _gc.InputOffset, 3UL * hw * 4),
-             (_gc.Arena, _gc.OutputOffset, 3UL * hw * 4),
-             (_dr.Arena, _dr.InputOffset, 6UL * hw * 4)],
-            Pc(hw), (3u * hw + 255) / 256, 1);
+            [(_gc.Arena, _gc.InputOffset, 3UL * hw * es),
+             (_gc.Arena, _gc.OutputOffset, 3UL * hw * es),
+             (_dr.Arena, _dr.InputOffset, 6UL * hw * es)],
+            Pc(hw), (hw + 255) / 256, 1);
         _dev.CmdComputeBarrier(_cmd);
         _dr.RecordCompute(_cmd);
 
-        // nchw2bgr -> bgrOut
+        // nhwc2bgr -> bgrOut
         _dev.CmdComputeBarrier(_cmd);
         uint nwords = ((uint)_ih * (uint)_iw * 3u + 3u) / 4u;
         VkInferenceSession.RecordOne(_dev, _cmd, _pPost,
             [(_dr.Arena, _dr.OutputOffset, _dr.OutputBytes), (_bgrOut, 0UL, _bgrOut.Size)],
-            Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, nwords),   // PC layout must match nchw2bgr.comp
+            Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, nwords),   // PC layout must match nhwc2bgr.comp
             (nwords + 255) / 256, 1);
         Vk.Check(Vk.vkEndCommandBuffer(_cmd), "vkEndCommandBuffer");
     }
@@ -123,13 +127,13 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     internal VkInferenceSession DebugGc => _gc;
     internal VkInferenceSession DebugDr => _dr;
 
-    /// <summary>Debug: download intermediate tensors (gc nchw input, gc shadow out, dr 6ch input — all padded).</summary>
+    /// <summary>Debug: download intermediate tensors (gc input, gc shadow out, dr 6ch input — padded, NHWC).</summary>
     internal void DebugIntermediates(Span<float> gcIn, Span<float> gcOut, Span<float> drIn)
     {
-        uint hw = (uint)(_h * _w);
-        fixed (float* p = gcIn) _dev.Download(_gc.Arena, p, 3UL * hw * 4, _gc.InputOffset);
-        fixed (float* p = gcOut) _dev.Download(_gc.Arena, p, 3UL * hw * 4, _gc.OutputOffset);
-        fixed (float* p = drIn) _dev.Download(_dr.Arena, p, 6UL * hw * 4, _dr.InputOffset);
+        int hw = _h * _w;
+        _gc.DownloadElems(_gc.Arena, _gc.InputOffset, gcIn.Slice(0, 3 * hw));
+        _gc.DownloadElems(_gc.Arena, _gc.OutputOffset, gcOut.Slice(0, 3 * hw));
+        _dr.DownloadElems(_dr.Arena, _dr.InputOffset, drIn.Slice(0, 6 * hw));
     }
 
     public void Dispose()

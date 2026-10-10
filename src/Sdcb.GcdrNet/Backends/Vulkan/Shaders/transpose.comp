@@ -1,9 +1,11 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
 // Generic rank<=4 permute: dst flat idx -> src idx via permuted in-strides.
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer X { float x[]; };
-layout(set = 0, binding = 1) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
+layout(set = 0, binding = 1) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC {
     uint n;

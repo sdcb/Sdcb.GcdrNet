@@ -1,13 +1,15 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
 // LayerNorm over last dim: one workgroup (256 threads) per row.
 // o[r,i] = (x[r,i] - mean) * rsqrt(var + eps) * w[i] + b[i]
 // Single reduction pass: sum and sum-of-squares accumulate together in vec2 lanes.
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0) readonly buffer X { float x[]; };
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };
 layout(set = 0, binding = 1) readonly buffer W { float w[]; };
 layout(set = 0, binding = 2) readonly buffer B { float b[]; };
-layout(set = 0, binding = 3) writeonly buffer O { float o[]; };
+layout(set = 0, binding = 3) writeonly buffer O { ET o[]; };
 
 layout(push_constant) uniform PC { uint len; float eps; } p;
 
@@ -22,7 +24,7 @@ void main()
     float s = 0.0, s2 = 0.0;
     for (uint i = tid; i < p.len; i += 256u)
     {
-        float v = x[base + i];
+        float v = float(x[base + i]);
         s += v; s2 += v * v;
     }
     red[tid] = vec2(s, s2);
@@ -35,5 +37,5 @@ void main()
     float mean = red[0].x / float(p.len);
     float inv = inversesqrt(red[0].y / float(p.len) - mean * mean + p.eps);
     for (uint i = tid; i < p.len; i += 256u)
-        o[base + i] = (x[base + i] - mean) * inv * w[i] + b[i];
+        o[base + i] = ET((float(x[base + i]) - mean) * inv * w[i] + b[i]);
 }
