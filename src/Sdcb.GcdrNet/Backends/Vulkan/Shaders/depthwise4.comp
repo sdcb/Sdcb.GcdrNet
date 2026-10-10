@@ -1,0 +1,60 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+// depthwise.comp with 4 channels per invocation (c % 4 == 0), same per-element math.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X  { ET4 x[]; };
+layout(set = 0, binding = 1) readonly buffer W  { ET4 w[]; };
+layout(set = 0, binding = 2) readonly buffer B  { vec4 b[]; };
+layout(set = 0, binding = 3) writeonly buffer O { ET4 o[]; };
+
+layout(push_constant) uniform PC {
+    uint c, ih, iw, oh, ow;
+    uint kh, kw, sh, sw, pt, pl;
+    uint flags;         // bit0 hasBias, bit1 reflect, bit2 relu, bit4 gelu
+    float padVal;
+} p;
+
+int mirror(int i, int d) { if (d <= 1) return 0; while (i < 0 || i >= d) i = i < 0 ? -i : 2 * d - 2 - i; return i; }
+
+float ferf(float v)
+{
+    float s = v < 0.0 ? -1.0 : 1.0;
+    float ax = abs(v);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+    return (1.0 - poly * exp(-ax * ax)) * s;
+}
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    uint c4 = p.c >> 2;
+    if (id >= c4 * p.oh * p.ow) return;
+    uint ch = id % c4, px = id / c4;
+    uint ox = px % p.ow, oy = px / p.ow;
+    bool refl = (p.flags & 2u) != 0u;
+    vec4 acc = ((p.flags & 1u) != 0u) ? b[ch] : vec4(0.0);
+    for (uint ky = 0u; ky < p.kh; ky++)
+    {
+        int sy = int(oy * p.sh + ky) - int(p.pt);
+        for (uint kx = 0u; kx < p.kw; kx++)
+        {
+            int sx = int(ox * p.sw + kx) - int(p.pl);
+            vec4 wv = vec4(w[(ky * p.kw + kx) * c4 + ch]);
+            int yy = sy, xx = sx;
+            if (uint(sy) >= p.ih || uint(sx) >= p.iw)
+            {
+                if (!refl) { acc += wv * p.padVal; continue; }
+                if (uint(sy) >= p.ih) yy = mirror(sy, int(p.ih));
+                if (uint(sx) >= p.iw) xx = mirror(sx, int(p.iw));
+            }
+            acc += wv * vec4(x[(uint(yy) * p.iw + uint(xx)) * c4 + ch]);
+        }
+    }
+    if ((p.flags & 4u) != 0u) acc = max(acc, vec4(0.0));
+    if ((p.flags & 16u) != 0u)
+        for (int l = 0; l < 4; l++) acc[l] = 0.5 * acc[l] * (1.0 + ferf(acc[l] * 0.7071067811865475));
+    o[id] = ET4(acc);
+}

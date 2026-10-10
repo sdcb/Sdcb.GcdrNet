@@ -390,11 +390,12 @@ internal sealed class VkGraphModel : IDisposable
                 {
                     if (p.Group != ic || oc != ic) throw new NotSupportedException("grouped non-depthwise conv");
                     if (p.AddValue >= 0) throw new NotSupportedException("depthwise conv + residual");
-                    yield return ND("depthwise",
+                    bool v4 = _dev.Vec4Eltwise && ic % 4 == 0;
+                    yield return ND(v4 ? "depthwise4" : "depthwise",
                         [Bind(n.In[0]), Bind(n.In[1], CK.DwW), B(p.BiasValue, CK.F32), Bind(n.Out[0])],
                         PcOfF(U((int)ic, (int)ih, (int)iw, (int)oh, (int)ow, p.Kernel[0], p.Kernel[1],
                             p.Strides[0], p.Strides[1], p.Pads[0], p.Pads[1], (int)(flags & ~8u)), p.PadValue),
-                        G(ic * oh * ow), name: "depthwise");
+                        G(ic * oh * ow / (v4 ? 4u : 1u)), name: "depthwise");
                     break;
                 }
                 if (UseCoopConv(_dev, F16, _plan, n, p))
@@ -432,11 +433,12 @@ internal sealed class VkGraphModel : IDisposable
                 var p = (PoolP)n.P!;
                 RequireNhwc(n.In[0]); RequireNhwc(n.Out[0]);
                 int[] si = shapeIn(0), so = shapeOut();
-                yield return ND("maxpool", [Bind(n.In[0]), Bind(n.Out[0])],
+                bool v4 = _dev.Vec4Eltwise && si[3] % 4 == 0;
+                yield return ND(v4 ? "maxpool4" : "maxpool", [Bind(n.In[0]), Bind(n.Out[0])],
                     PcOf((uint)si[3], (uint)si[1], (uint)si[2], (uint)so[1], (uint)so[2],
                         (uint)p.Kernel[0], (uint)p.Kernel[1], (uint)p.Strides[0], (uint)p.Strides[1],
                         (uint)p.Pads[0], (uint)p.Pads[1], p.FuseRelu ? 1u : 0u),
-                    G((uint)so[1] * (uint)so[2] * (uint)so[3]));
+                    G((uint)so[1] * (uint)so[2] * (uint)so[3] / (v4 ? 4u : 1u)), name: "maxpool");
                 break;
             }
 
@@ -489,10 +491,11 @@ internal sealed class VkGraphModel : IDisposable
                 if (hasAdd) RequireNhwc(n.In[1]);
                 int[] si = shapeIn(0), so = shapeOut();
                 uint flags = (p.FuseRelu ? 1u : 0u) | (hasAdd ? 2u : 0u) | (p.AddRelu ? 4u : 0u);
-                yield return ND("bilinear", [Bind(n.In[0]), hasAdd ? Bind(n.In[1]) : B(-1), Bind(n.Out[0])],
+                bool v4 = _dev.Vec4Eltwise && si[3] % 4 == 0;
+                yield return ND(v4 ? "bilinear4" : "bilinear", [Bind(n.In[0]), hasAdd ? Bind(n.In[1]) : B(-1), Bind(n.Out[0])],
                     PcOfF([(uint)si[3], (uint)si[1], (uint)si[2], (uint)so[1], (uint)so[2], flags],
                         p.Scales[2], p.Scales[3]),
-                    G((uint)so[1] * (uint)so[2] * (uint)so[3]));
+                    G((uint)so[1] * (uint)so[2] * (uint)so[3] / (v4 ? 4u : 1u)), name: "bilinear");
                 break;
             }
 
@@ -621,8 +624,9 @@ internal sealed class VkGraphModel : IDisposable
                 var pc = new List<uint> { (uint)si[3], (uint)si[1], (uint)si[2], (uint)p.Axis };
                 for (int i = 0; i < 5; i++) pc.Add((uint)(i < ge.Length ? ge[i] : si[3]));
                 for (int i = 0; i < 5; i++) pc.Add((uint)(i < of.Length ? of[i] : 0));
-                yield return ND("shift", [Bind(n.In[0]), Bind(n.Out[0])],
-                    PcOf(pc.ToArray()), G((uint)nOut()));
+                bool v4 = _dev.Vec4Eltwise && si[3] % 4 == 0 && ge.All(e => e % 4 == 0);
+                yield return ND(v4 ? "shift4" : "shift", [Bind(n.In[0]), Bind(n.Out[0])],
+                    PcOf(pc.ToArray()), G((uint)nOut() / (v4 ? 4u : 1u)), name: "shift");
                 break;
             }
 
