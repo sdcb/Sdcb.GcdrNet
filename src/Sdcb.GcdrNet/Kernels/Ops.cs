@@ -51,7 +51,7 @@ internal static unsafe class Ops
         }
 
         bool symmetricPad = pt == pb && pl == pr;
-        if (UseAvx2)
+        if (Avx2.IsSupported && Fma.IsSupported)
         {
             if (group > 1 && group == ic)
             {
@@ -345,7 +345,7 @@ internal static unsafe class Ops
         int oh = outShape[2], ow = outShape[3];
         int kh = p.Kernel[0], kw = p.Kernel[1], sh = p.Strides[0], sw = p.Strides[1];
         int pt = p.Pads[0], pl = p.Pads[1];
-        if (UseAvx2 &&
+        if (Avx2.IsSupported && Fma.IsSupported &&
             kh == 2 && kw == 2 && sh == 2 && sw == 2 && pt == 0 && pl == 0)
         {
             Avx2Kernels.MaxPool2x2(src, c, ih, iw, dst, oh, ow, p.FuseRelu);
@@ -378,15 +378,13 @@ internal static unsafe class Ops
     }
 
     // ======================== elementwise ========================
-    internal static bool UseAvx2 => Avx2.IsSupported && Fma.IsSupported;
-
     public static void Elementwise(ReadOnlySpan<float> a, int[] aShape,
         ReadOnlySpan<float> b, int[] bShape, Span<float> dst, int[] outShape, EwOp op,
         ActivationKind act = ActivationKind.None)
     {
         int n = outShape.Aggregate(1, (x, y) => x * y);
         int oi = (int)op;
-        bool avx = UseAvx2 && n >= 8192;
+        bool avx = Avx2.IsSupported && Fma.IsSupported && n >= 8192;
         // fast path: same shape, contiguous
         if (aShape.SequenceEqual(outShape) && bShape.SequenceEqual(outShape))
         {
@@ -517,7 +515,7 @@ internal static unsafe class Ops
     public static void Relu(ReadOnlySpan<float> src, Span<float> dst)
     {
         int n = src.Length;
-        if (UseAvx2 && n >= 8192) { Avx2Kernels.Unary(src, dst, n, 0); return; }
+        if (Avx2.IsSupported && Fma.IsSupported && n >= 8192) { Avx2Kernels.Unary(src, dst, n, 0); return; }
         int i = 0, VL = Vector<float>.Count;
         for (; i + VL <= n; i += VL)
             Simd.VectorStore(dst, i, Vector.Max(Simd.VectorLoad(src, i), Vector<float>.Zero));
@@ -526,19 +524,19 @@ internal static unsafe class Ops
 
     public static void Sigmoid(ReadOnlySpan<float> src, Span<float> dst)
     {
-        if (UseAvx2 && src.Length >= 8192) { Avx2Kernels.Unary(src, dst, src.Length, 1); return; }
+        if (Avx2.IsSupported && Fma.IsSupported && src.Length >= 8192) { Avx2Kernels.Unary(src, dst, src.Length, 1); return; }
         SimdMath.Sigmoid(src, dst);
     }
 
     public static void Erf(ReadOnlySpan<float> src, Span<float> dst)
     {
-        if (UseAvx2 && src.Length >= 8192) { Avx2Kernels.Unary(src, dst, src.Length, 3); return; }
+        if (Avx2.IsSupported && Fma.IsSupported && src.Length >= 8192) { Avx2Kernels.Unary(src, dst, src.Length, 3); return; }
         SimdMath.Erf(src, dst);
     }
 
     public static void Gelu(ReadOnlySpan<float> src, Span<float> dst)
     {
-        if (UseAvx2 && src.Length >= 8192) { Avx2Kernels.Unary(src, dst, src.Length, 2); return; }
+        if (Avx2.IsSupported && Fma.IsSupported && src.Length >= 8192) { Avx2Kernels.Unary(src, dst, src.Length, 2); return; }
         SimdMath.Gelu(src, dst);
     }
 
@@ -549,7 +547,7 @@ internal static unsafe class Ops
     {
         int c = shape[^1];
         int rows = (int)(x.Length / c);
-        if (UseAvx2)
+        if (Avx2.IsSupported && Fma.IsSupported)
         {
             Avx2Kernels.LayerNorm(x, rows, c, w, b, dst, eps);
             return;
@@ -578,7 +576,7 @@ internal static unsafe class Ops
         for (int i = 0; i < aShape.Length - 1; i++) m *= aShape[i];
         int k = aShape[^1];
         int n = outShape[^1];
-        if (!p.TransB && UseAvx2)
+        if (!p.TransB && Avx2.IsSupported && Fma.IsSupported)
         {
             Avx2Kernels.GemmKN(a, m, k, b, n, bias, dst);
             return;
@@ -701,7 +699,7 @@ internal static unsafe class Ops
             x1[x] = Math.Clamp((int)fl + 1, 0, iw - 1);
             wx[x] = fx - fl;
         }
-        if (UseAvx2 && oh * ow >= 8192)
+        if (Avx2.IsSupported && Fma.IsSupported && oh * ow >= 8192)
         {
             Avx2Kernels.Bilinear(src, c, ih, iw, dst, oh, ow, y0, y1, wy, x0, x1, wx, act);
             return;
@@ -752,7 +750,7 @@ internal static unsafe class Ops
             else if (p.Mode == PadMode.Reflect) mapX[x] = Reflect(sx, iw);
             else mapX[x] = -1;
         }
-        if (UseAvx2 && oh * ow >= 4096)
+        if (Avx2.IsSupported && Fma.IsSupported && oh * ow >= 4096)
         {
             Avx2Kernels.Pad4(src, n * c, ih, iw, dst, oh, ow, mapY, mapX, p.Value);
             return;
@@ -798,7 +796,7 @@ internal static unsafe class Ops
             int a = inShape[rank - 2], b = inShape[rank - 1];
             int outer = 1;
             for (int i = 0; i < rank - 2; i++) outer *= inShape[i];
-            if (UseAvx2 && a * b >= 8192)
+            if (Avx2.IsSupported && Fma.IsSupported && a * b >= 8192)
             {
                 Avx2Kernels.Transpose2D(src, a, b, dst, copies: outer);
                 return;
@@ -811,7 +809,7 @@ internal static unsafe class Ops
         {
             // [1,h,w,c] -> [1,c,h,w] == 2D transpose of [hw,c]->[c,hw]
             int hw = inShape[1] * inShape[2], cc = inShape[3];
-            if (UseAvx2 && hw * cc >= 8192)
+            if (Avx2.IsSupported && Fma.IsSupported && hw * cc >= 8192)
             {
                 Avx2Kernels.Transpose2D(src, hw, cc, dst);
                 return;
@@ -823,7 +821,7 @@ internal static unsafe class Ops
         {
             // [1,c,h,w] -> [1,h,w,c] == 2D transpose of [c,hw]->[hw,c]
             int cc = inShape[1], hw = inShape[2] * inShape[3];
-            if (UseAvx2 && hw * cc >= 8192)
+            if (Avx2.IsSupported && Fma.IsSupported && hw * cc >= 8192)
             {
                 Avx2Kernels.Transpose2D(src, cc, hw, dst);
                 return;
@@ -934,7 +932,7 @@ internal static unsafe class Ops
         int[] outShape, ShiftP p)
     {
         int c = inShape[1], h = inShape[2], w = inShape[3];
-        if (UseAvx2 && c * h * w >= 8192)
+        if (Avx2.IsSupported && Fma.IsSupported && c * h * w >= 8192)
         {
             Avx2Kernels.ChannelShift(src, c, h, w, dst, p.Axis, p.Offsets, p.GroupEnds);
             return;
