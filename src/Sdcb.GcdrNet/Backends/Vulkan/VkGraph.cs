@@ -33,6 +33,7 @@ internal sealed class VkGraphModel : IDisposable
 {
     private readonly VkDevice _dev;
     private readonly ExecPlan _plan;
+    private int _refs = 1;  // the graph cache holds the first reference
     internal readonly VkBuffer Consts;       // all const float tensors, packed
     private readonly Dictionary<int, ulong> _constOff = new();
     internal readonly VkBuffer Dummy;        // 16B zero buffer for unused bindings
@@ -453,9 +454,15 @@ internal sealed class VkGraphModel : IDisposable
         return p4;
     }
 
-    public void Dispose()
+    /// <summary>Sessions hold a reference so cache eviction can't free live const/dummy buffers.</summary>
+    public void Acquire()
     {
-        Consts.Free();
-        Dummy.Free();
+        if (Interlocked.Increment(ref _refs) <= 1)
+            throw new ObjectDisposedException(nameof(VkGraphModel), "const buffers already freed");
     }
+    public void Release()
+    {
+        if (Interlocked.Decrement(ref _refs) == 0) { Consts.Free(); Dummy.Free(); }
+    }
+    public void Dispose() => Release();
 }

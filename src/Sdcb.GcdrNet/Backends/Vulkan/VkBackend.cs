@@ -26,7 +26,9 @@ internal sealed unsafe class VkBackend : IDisposable
     public VkInferenceSession NewSession(OnnxModel m, int[] shape)
     {
         VkGraphModel g = GraphFor(m, shape);
-        return new VkInferenceSession(Dev, GraphCompiler.Compile(m, shape), g);
+        g.Acquire();   // caller ref: later GraphFor evictions can't free it under us
+        try { return new VkInferenceSession(Dev, GraphCompiler.Compile(m, shape), g); }
+        finally { g.Release(); }
     }
 
     /// <summary>Compiled GPU graph for a model+shape (cached, bounded).</summary>
@@ -41,7 +43,7 @@ internal sealed unsafe class VkBackend : IDisposable
         {
             var victim = _graphs.Keys.FirstOrDefault(k => !k.Equals(key));
             if (victim.Equals(default)) break;
-            if (_graphs.TryRemove(victim, out var old)) old.Dispose();
+            if (_graphs.TryRemove(victim, out var old)) old.Release();
         }
         return g;
     }
@@ -53,7 +55,13 @@ internal sealed unsafe class VkBackend : IDisposable
         int h = ih + ((-ih) & 31), w = iw + ((-iw) & 31);
         ExecPlan gcPlan = GraphCompiler.Compile(gc, [1, 3, h, w]);
         ExecPlan drPlan = GraphCompiler.Compile(dr, [1, 6, h, w]);
-        return new VkGcdrPipeline(Dev, gcPlan, drPlan, GraphFor(gc, [1, 3, h, w]), GraphFor(dr, [1, 6, h, w]), ih, iw);
+        // hold caller refs: GraphFor(dr)'s eviction loop may pick the gc graph we
+        // just got and Release its cache ref — without ours the session ctor would
+        // resurrect a graph whose consts were already freed.
+        VkGraphModel gg = GraphFor(gc, [1, 3, h, w]); gg.Acquire();
+        VkGraphModel gd = GraphFor(dr, [1, 6, h, w]); gd.Acquire();
+        try { return new VkGcdrPipeline(Dev, gcPlan, drPlan, gg, gd, ih, iw); }
+        finally { gg.Release(); gd.Release(); }
     }
 
     public void Dispose() => Dev.Dispose();

@@ -56,6 +56,19 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         var begin = new Vk.VkCommandBufferBeginInfo { SType = VkConst.StCommandBufferBeginInfo };
         Vk.Check(Vk.vkBeginCommandBuffer(_cmd, &begin), "vkBeginCommandBuffer");
 
+        if (Environment.GetEnvironmentVariable("GCDR_ZERO_ARENA") == "1")
+        {
+            Vk.vkCmdFillBuffer(_cmd, _gc.Arena.Buffer, 0, _gc.Arena.Size, 0);
+            Vk.vkCmdFillBuffer(_cmd, _dr.Arena.Buffer, 0, _dr.Arena.Size, 0);
+            Vk.VkMemoryBarrier fb = new()
+            {
+                SType = VkConst.StMemoryBarrier,
+                SrcAccessMask = VkConst.AccessTransferWrite, DstAccessMask = VkConst.AccessShaderRead | VkConst.AccessShaderWrite,
+            };
+            Vk.vkCmdPipelineBarrier(_cmd, VkConst.PipelineStageTransfer, VkConst.PipelineStageComputeShader, 0,
+                1, &fb, 0, null, 0, null);
+        }
+
         // bgr2nchw -> gc arena input
         VkInferenceSession.RecordOne(_dev, _cmd, _pPre,
             [(_bgrIn, 0UL, _bgrIn.Size), (_gc.Arena, _gc.InputOffset, _gc.InputBytes)],
@@ -107,6 +120,18 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
                 new ReadOnlySpan<byte>(_bgrOutMap + y * _iw * 3, _iw * 3)
                     .CopyTo(bgrDst.Slice(y * dstStride));
     }
+    internal VkInferenceSession DebugGc => _gc;
+    internal VkInferenceSession DebugDr => _dr;
+
+    /// <summary>Debug: download intermediate tensors (gc nchw input, gc shadow out, dr 6ch input — all padded).</summary>
+    internal void DebugIntermediates(Span<float> gcIn, Span<float> gcOut, Span<float> drIn)
+    {
+        uint hw = (uint)(_h * _w);
+        fixed (float* p = gcIn) _dev.Download(_gc.Arena, p, 3UL * hw * 4, _gc.InputOffset);
+        fixed (float* p = gcOut) _dev.Download(_gc.Arena, p, 3UL * hw * 4, _gc.OutputOffset);
+        fixed (float* p = drIn) _dev.Download(_dr.Arena, p, 6UL * hw * 4, _dr.InputOffset);
+    }
+
     public void Dispose()
     {
         // Enhance() is synchronous (already waits the fence); callers must not race Dispose

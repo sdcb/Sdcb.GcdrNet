@@ -22,6 +22,19 @@ internal unsafe sealed class VkDevice : IDisposable
     public double TimestampPeriodNs = 1;
     private IntPtr _commandPool;
     private IntPtr _descPool;
+
+    // live vkAllocateMemory bytes across the process (diagnostic — buffers are pooled)
+    private static long _liveBytes, _peakBytes;
+    public static long LiveDeviceBytes => Interlocked.Read(ref _liveBytes);
+    public static long PeakDeviceBytes => Interlocked.Read(ref _peakBytes);
+    public static void ResetPeakDeviceBytes() => Interlocked.Exchange(ref _peakBytes, _liveBytes);
+    private static void TrackAlloc(long bytes)
+    {
+        long now = Interlocked.Add(ref _liveBytes, bytes), p;
+        while ((p = Interlocked.Read(ref _peakBytes)) < now)
+            Interlocked.CompareExchange(ref _peakBytes, now, p);
+    }
+    internal static void TrackFree(long bytes) => Interlocked.Add(ref _liveBytes, -bytes);
     /// <summary>Guards the device-level command pool / descriptor pool (uploads).</summary>
     public readonly object Sync = new();
     /// <summary>vkQueueSubmit on the single compute queue is externally synchronized.</summary>
@@ -276,6 +289,8 @@ internal unsafe sealed class VkDevice : IDisposable
             AllocationSize = req.Size, MemoryTypeIndex = memType,
         };
         Vk.Check(Vk.vkAllocateMemory(Device, &mai, null, out b.Memory), "vkAllocateMemory");
+        b.AllocSize = req.Size;
+        TrackAlloc((long)req.Size);
         Vk.Check(Vk.vkBindBufferMemory(Device, b.Buffer, b.Memory, 0), "vkBindBufferMemory");
         b.Flags = MemProps.TypeAt((int)memType).PropertyFlags;
         return b;
@@ -553,7 +568,7 @@ internal sealed class VkPipeline
 internal unsafe sealed class VkBuffer
 {
     public IntPtr Dev, Buffer, Memory;
-    public ulong Size;
+    public ulong Size, AllocSize;
     public uint Flags;
 
     public bool HostCoherent => (Flags & VkConst.MemHostCoherent) != 0;
@@ -582,6 +597,11 @@ internal unsafe sealed class VkBuffer
     public void Free()
     {
         if (Buffer != IntPtr.Zero) { Vk.vkDestroyBuffer(Dev, Buffer, null); Buffer = IntPtr.Zero; }
-        if (Memory != IntPtr.Zero) { Vk.vkFreeMemory(Dev, Memory, null); Memory = IntPtr.Zero; }
+        if (Memory != IntPtr.Zero)
+        {
+            Vk.vkFreeMemory(Dev, Memory, null); Memory = IntPtr.Zero;
+            VkDevice.TrackFree((long)AllocSize);
+            AllocSize = 0;
+        }
     }
 }
