@@ -17,6 +17,9 @@ internal sealed unsafe class VkBackend : IDisposable
     private static readonly Lazy<VkBackend> s_default = new(() => new VkBackend());
     internal static VkBackend Default => s_default.Value;
 
+    /// <summary>Plan options for every GPU-side compile (shaders address the layout these produce).</summary>
+    internal static CompileOptions PlanOptions => new(Nhwc: false);
+
     internal VkBackend()
     {
         Dev = VkDevice.Create();
@@ -27,7 +30,7 @@ internal sealed unsafe class VkBackend : IDisposable
     {
         VkGraphModel g = GraphFor(m, shape);
         g.Acquire();   // caller ref: later GraphFor evictions can't free it under us
-        try { return new VkInferenceSession(Dev, GraphCompiler.Compile(m, shape), g); }
+        try { return new VkInferenceSession(Dev, GraphCompiler.Compile(m, shape, PlanOptions), g); }
         finally { g.Release(); }
     }
 
@@ -36,7 +39,7 @@ internal sealed unsafe class VkBackend : IDisposable
     {
         var key = (m, shape[1], shape[2], shape[3]);
         if (_graphs.TryGetValue(key, out var g)) return g;
-        g = new VkGraphModel(Dev, GraphCompiler.Compile(m, [1, shape[1], shape[2], shape[3]]));
+        g = new VkGraphModel(Dev, GraphCompiler.Compile(m, [1, shape[1], shape[2], shape[3]], PlanOptions));
         if (!_graphs.TryAdd(key, g)) { g.Dispose(); return _graphs[key]; }
         // bound the cache: evict an arbitrary other graph beyond the cap
         while (_graphs.Count > 32)
@@ -53,8 +56,8 @@ internal sealed unsafe class VkBackend : IDisposable
     internal VkGcdrPipeline NewPipe(OnnxModel gc, OnnxModel dr, int ih, int iw)
     {
         int h = ih + ((-ih) & 31), w = iw + ((-iw) & 31);
-        ExecPlan gcPlan = GraphCompiler.Compile(gc, [1, 3, h, w]);
-        ExecPlan drPlan = GraphCompiler.Compile(dr, [1, 6, h, w]);
+        ExecPlan gcPlan = GraphCompiler.Compile(gc, [1, 3, h, w], PlanOptions);
+        ExecPlan drPlan = GraphCompiler.Compile(dr, [1, 6, h, w], PlanOptions);
         // hold caller refs: GraphFor(dr)'s eviction loop may pick the gc graph we
         // just got and Release its cache ref — without ours the session ctor would
         // resurrect a graph whose consts were already freed.

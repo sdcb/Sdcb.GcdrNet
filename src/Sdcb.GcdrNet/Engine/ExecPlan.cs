@@ -14,7 +14,7 @@ internal enum ExecOp
     Gemm,            // [.., M, K] x [K, N] + bias[N]
     ResizeBilinear,  // NCHW, half_pixel, per-axis scales
     Pad,             // constant / reflect on trailing dims
-    Transpose,       // arbitrary permute
+    Transpose,       // arbitrary permute (physical perm in layout-planned plans)
     Slice,           // strided subrange copy
     Concat,          // axis join
     ChannelShift,    // fused shift-MLP: per channel group, shift along H or W (zero-fill)
@@ -68,6 +68,7 @@ internal sealed class GemmP
     public bool TransB;             // B stored [N,K] when true (onnx transB=1)
     public int BiasValue = -1;
     public ActivationKind Act;
+    public object? KernelPlan;      // backend-private packed B, filled at session build
 }
 
 internal sealed class ResizeP
@@ -103,7 +104,7 @@ internal sealed class ConcatP
 
 internal sealed class ShiftP
 {
-    public int Axis;                 // spatial axis index (2 = H, 3 = W)
+    public int Axis;                 // logical spatial axis index (2 = H, 3 = W)
     public required int[] GroupEnds; // cumulative channel-group end indices (len 5)
     public required int[] Offsets;   // per-group shift (len 5)
 }
@@ -117,10 +118,16 @@ internal sealed class CValue
     public float[]? Floats;      // compile-time float content (weights or small consts)
     public int Buf = -1;         // activation buffer id; >= 0 → runtime tensor
     public string Name = "";
+    /// <summary>Physical dim order: physical dim i holds logical dim Layout[i]. null = identity.</summary>
+    public int[]? Layout;
+    /// <summary>Zero-copy view source (reshape/squeeze/unsqueeze/identity); -1 none.</summary>
+    public int AliasOf = -1;
     public bool IsInt => Ints != null;
     public bool IsConst => Ints != null || Floats != null;
     public bool IsActivation => Buf >= 0;
     public long ElementCount => Shape.Aggregate(1L, (a, b) => a * b);
+    /// <summary>Shape in storage order — what kernels address by.</summary>
+    public int[] PhysShape => Layout is null ? Shape : Engine.Layout.Phys(Shape, Layout);
 }
 
 /// <summary>A buffer reference into either the activation arena or a const array.</summary>
@@ -154,4 +161,16 @@ internal sealed class ExecPlan
     public required int ArenaFloats;
     public required int InputValue;
     public required int OutputValue;
+    /// <summary>Rank-4 activations stored channels-last (layout pass ran).</summary>
+    public bool Nhwc;
+    /// <summary>Input/output stay in plan layout (no boundary relayout); else logical NCHW.</summary>
+    public bool PhysicalIo;
+}
+
+/// <summary>Plan compilation options.</summary>
+internal sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false)
+{
+    /// <summary>GCDRNET_NHWC=0 forces the legacy all-NCHW plan (A/B oracle).</summary>
+    public static bool DefaultNhwc { get; } = Environment.GetEnvironmentVariable("GCDRNET_NHWC") != "0";
+    public static CompileOptions Default => new(DefaultNhwc);
 }

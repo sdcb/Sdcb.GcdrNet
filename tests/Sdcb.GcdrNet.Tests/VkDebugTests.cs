@@ -24,7 +24,7 @@ public class VkDebugTests
         float[] input = Golden.F32(tag, inputName);
         int[] shape = Golden.ShapeOf(tag, inputName);
 
-        ExecPlan plan = GraphCompiler.Compile(m, shape);
+        ExecPlan plan = GraphCompiler.Compile(m, shape, VkBackend.PlanOptions);
         using var cpu = new InferenceSession(plan);
         using var gpu = VkBackend.Default.NewSession(m, shape);
 

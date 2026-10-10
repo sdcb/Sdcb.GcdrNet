@@ -650,6 +650,16 @@ public static class Program
             foreach (var kv in s1.Profile().OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-16} {kv.Value.TotalMilliseconds,8:F1} ms");
             Console.WriteLine("--- dr profile ---");
             foreach (var kv in s2.Profile().OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-16} {kv.Value.TotalMilliseconds,8:F1} ms");
+            if (Environment.GetEnvironmentVariable("GCDRNET_PROF_NODES") == "1")
+                foreach (var (tag, ss) in new[] { ("gc", s1), ("dr", s2) })
+                {
+                    Console.WriteLine($"--- {tag} top nodes (ms/run) ---");
+                    foreach (var (i, n, t) in ss.NodeProfile().OrderByDescending(x => x.t).Take(14))
+                    {
+                        string extra = n.P is ConvP cp ? $" k{cp.Kernel[0]} s{cp.Strides[0]} g{cp.Group}" : "";
+                        Console.WriteLine($"  #{i,-3} {n.Op,-14}{extra,-12} {string.Join('x', ss.ShapeOf(n.In[0]))}->{string.Join('x', ss.ShapeOf(n.Out[0]))}  {t.TotalMilliseconds / (reps + 1),7:F2}");
+                    }
+                }
         }
         return 0;
     }

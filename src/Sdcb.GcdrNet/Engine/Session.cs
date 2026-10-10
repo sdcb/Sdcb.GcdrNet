@@ -26,6 +26,23 @@ public sealed class InferenceSession : IDisposable
         _inputValue = plan.InputValue;
         _outputValue = plan.OutputValue;
         _nodeTicks = new long[plan.Nodes.Length];
+        if (plan.Nhwc)
+            foreach (ExecNode n in plan.Nodes)
+                if (n.P is GemmP gp && gp.KernelPlan is null && plan.Values[n.In[1]].Floats is { } bw)
+                {
+                    int[] bs = plan.Values[n.In[1]].Shape;
+                    int kk = gp.TransB ? bs[1] : bs[0], nn = gp.TransB ? bs[0] : bs[1];
+                    ReadOnlySpan<float> gb = gp.BiasValue >= 0 ? plan.Values[gp.BiasValue].Floats : default;
+                    Interlocked.CompareExchange(ref gp.KernelPlan, Nhwc.PackGemm(bw, kk, nn, gp.TransB, gb), null);
+                }
+                else if (n.P is ConvP cp && cp.KernelPlan is null)
+                {
+                    // CPU-private packed weights; plans are shared, packing is idempotent
+                    CValue w = plan.Values[n.In[1]];
+                    ReadOnlySpan<float> b = cp.BiasValue >= 0 ? plan.Values[cp.BiasValue].Floats : default;
+                    Interlocked.CompareExchange(ref cp.KernelPlan,
+                        Nhwc.Pack(w.Floats!, w.Shape, b, cp.Group, plan.Values[n.In[0]].Shape[1]), null);
+                }
     }
 
     /// <summary>Input tensor shape (e.g. [1,3,H,W]).</summary>
@@ -87,8 +104,14 @@ public sealed class InferenceSession : IDisposable
         return d;
     }
 
+    /// <summary>Per-node profile (node index, op, name, ticks→time), populated when GCDRNET_PROF=1.</summary>
+    internal IEnumerable<(int i, ExecNode n, TimeSpan t)> NodeProfile() =>
+        _plan.Nodes.Select((n, i) => (i, n, TimeSpan.FromSeconds((double)_nodeTicks[i] / System.Diagnostics.Stopwatch.Frequency)));
+
     /// <summary>Debug/test: run a single node by index. Arena must be pre-initialized.</summary>
     internal void ExecNode(int i) => Exec(_plan.Nodes[i]);
+
+    internal int[] ShapeOf(int valueId) => _plan.Values[valueId].Shape;
 
     /// <summary>Debug/test: read an activation value's arena region.</summary>
     internal ReadOnlySpan<float> ValueSpan(int valueId) => GetSpan(valueId);
@@ -96,6 +119,7 @@ public sealed class InferenceSession : IDisposable
     private void Exec(ExecNode n)
     {
         CValue[] values = _plan.Values;
+        if (_plan.Nhwc && ExecNhwc(n)) return;
         switch (n.Op)
         {
             case ExecOp.Conv:
@@ -111,16 +135,16 @@ public sealed class InferenceSession : IDisposable
             case ExecOp.MaxPool:
             {
                 var p = (PoolP)n.P!;
-                Ops.MaxPool(GetIn(n.In[0]), values[n.In[0]].Shape,
-                    GetSpan(n.Out[0]), values[n.Out[0]].Shape, p);
+                Ops.MaxPool(GetIn(n.In[0]), values[n.In[0]].PhysShape,
+                    GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p);
                 break;
             }
             case ExecOp.Elementwise:
             {
                 var p = (EwP)n.P!;
-                Ops.Elementwise(GetIn(n.In[0]), values[n.In[0]].Shape,
-                    GetIn(n.In[1]), values[n.In[1]].Shape,
-                    GetSpan(n.Out[0]), values[n.Out[0]].Shape, p.Op, p.Act);
+                Ops.Elementwise(GetIn(n.In[0]), values[n.In[0]].PhysShape,
+                    GetIn(n.In[1]), values[n.In[1]].PhysShape,
+                    GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p.Op, p.Act);
                 break;
             }
             case ExecOp.Relu: Ops.Relu(GetIn(n.In[0]), GetSpan(n.Out[0])); break;
@@ -130,7 +154,7 @@ public sealed class InferenceSession : IDisposable
             case ExecOp.LayerNorm:
             {
                 var p = (LnP)n.P!;
-                Ops.LayerNorm(GetIn(n.In[0]), values[n.In[0]].Shape,
+                Ops.LayerNorm(GetIn(n.In[0]), values[n.In[0]].PhysShape,
                     GetIn(n.In[1]), GetIn(n.In[2]), GetSpan(n.Out[0]), p.Eps);
                 break;
             }
@@ -138,38 +162,38 @@ public sealed class InferenceSession : IDisposable
             {
                 var p = (GemmP)n.P!;
                 ReadOnlySpan<float> bias = p.BiasValue >= 0 ? GetIn(p.BiasValue) : ReadOnlySpan<float>.Empty;
-                Ops.Gemm(GetIn(n.In[0]), values[n.In[0]].Shape,
-                    GetIn(n.In[1]), values[n.In[1]].Shape, bias,
-                    GetSpan(n.Out[0]), values[n.Out[0]].Shape, p);
+                Ops.Gemm(GetIn(n.In[0]), values[n.In[0]].PhysShape,
+                    GetIn(n.In[1]), values[n.In[1]].PhysShape, bias,
+                    GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p);
                 break;
             }
             case ExecOp.ResizeBilinear:
             {
                 var p = (ResizeP)n.P!;
-                Ops.ResizeBilinear(GetIn(n.In[0]), values[n.In[0]].Shape,
-                    GetSpan(n.Out[0]), values[n.Out[0]].Shape, p.Scales,
+                Ops.ResizeBilinear(GetIn(n.In[0]), values[n.In[0]].PhysShape,
+                    GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p.Scales,
                     p.FuseRelu ? ActivationKind.Relu : ActivationKind.None);
                 break;
             }
             case ExecOp.Pad:
             {
                 var p = (PadP)n.P!;
-                Ops.Pad(GetIn(n.In[0]), values[n.In[0]].Shape,
-                    GetSpan(n.Out[0]), values[n.Out[0]].Shape, p);
+                Ops.Pad(GetIn(n.In[0]), values[n.In[0]].PhysShape,
+                    GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p);
                 break;
             }
             case ExecOp.Transpose:
             {
                 var p = (TransposeP)n.P!;
-                Ops.Transpose(GetIn(n.In[0]), values[n.In[0]].Shape,
-                    GetSpan(n.Out[0]), values[n.Out[0]].Shape, p.Perm);
+                Ops.Transpose(GetIn(n.In[0]), values[n.In[0]].PhysShape,
+                    GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p.Perm);
                 break;
             }
             case ExecOp.Slice:
             {
                 var p = (SliceP)n.P!;
-                Ops.Slice(GetIn(n.In[0]), values[n.In[0]].Shape,
-                    GetSpan(n.Out[0]), values[n.Out[0]].Shape, p);
+                Ops.Slice(GetIn(n.In[0]), values[n.In[0]].PhysShape,
+                    GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p);
                 break;
             }
             case ExecOp.Concat:
@@ -183,16 +207,16 @@ public sealed class InferenceSession : IDisposable
                     ins[k] = cv.Buf >= 0
                         ? new FBuf(_arena, _offsets[cv.Buf], checked((int)cv.ElementCount))
                         : new FBuf(cv.Floats!, 0, checked((int)cv.ElementCount));
-                    shapes[k] = cv.Shape;
+                    shapes[k] = cv.PhysShape;
                 }
-                Ops.Concat(ins, shapes, GetSpan(n.Out[0]), values[n.Out[0]].Shape, p.Axis);
+                Ops.Concat(ins, shapes, GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p.Axis);
                 break;
             }
             case ExecOp.ChannelShift:
             {
                 var p = (ShiftP)n.P!;
-                Ops.ChannelShift(GetIn(n.In[0]), values[n.In[0]].Shape,
-                    GetSpan(n.Out[0]), values[n.Out[0]].Shape, p);
+                Ops.ChannelShift(GetIn(n.In[0]), values[n.In[0]].PhysShape,
+                    GetSpan(n.Out[0]), values[n.Out[0]].PhysShape, p);
                 break;
             }
             case ExecOp.Copy:
@@ -200,6 +224,60 @@ public sealed class InferenceSession : IDisposable
                 break;
             default:
                 throw new NotSupportedException($"ExecOp {n.Op}");
+        }
+    }
+
+    /// <summary>Channels-last kernels for the layout-sensitive ops; false = generic (storage-shape) path.</summary>
+    private bool ExecNhwc(ExecNode n)
+    {
+        CValue[] values = _plan.Values;
+        switch (n.Op)
+        {
+            case ExecOp.Conv:
+            {
+                var p = (ConvP)n.P!;
+                int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape;
+                ReadOnlySpan<float> add = p.AddValue >= 0 ? GetIn(p.AddValue) : ReadOnlySpan<float>.Empty;
+                Nhwc.Conv(GetIn(n.In[0]), i[1], i[2], i[3], GetSpan(n.Out[0]), o[1], o[2], o[3],
+                    p, (NhwcConvPlan)p.KernelPlan!, add);
+                return true;
+            }
+            case ExecOp.MaxPool:
+            {
+                int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape;
+                Nhwc.MaxPool(GetIn(n.In[0]), i[1], i[2], i[3], GetSpan(n.Out[0]), o[1], o[2], (PoolP)n.P!);
+                return true;
+            }
+            case ExecOp.ResizeBilinear:
+            {
+                var p = (ResizeP)n.P!;
+                int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape;
+                Nhwc.ResizeBilinear(GetIn(n.In[0]), i[1], i[2], i[3], GetSpan(n.Out[0]), o[1], o[2],
+                    p.Scales[2], p.Scales[3], p.FuseRelu ? ActivationKind.Relu : ActivationKind.None);
+                return true;
+            }
+            case ExecOp.Pad:
+            {
+                int[] i = values[n.In[0]].PhysShape, o = values[n.Out[0]].PhysShape;
+                Nhwc.Pad(GetIn(n.In[0]), i[1], i[2], i[3], GetSpan(n.Out[0]), o[1], o[2], (PadP)n.P!);
+                return true;
+            }
+            case ExecOp.Gemm when ((GemmP)n.P!).KernelPlan is NhwcConvPlan gk:
+            {
+                var p = (GemmP)n.P!;
+                int[] a = values[n.In[0]].PhysShape;
+                int k = a[^1], m = (int)(values[n.In[0]].ElementCount / k);
+                Nhwc.Gemm(GetIn(n.In[0]), m, k, GetSpan(n.Out[0]), values[n.Out[0]].Shape[^1], gk, p.Act);
+                return true;
+            }
+            case ExecOp.ChannelShift:
+            {
+                int[] i = values[n.In[0]].PhysShape;
+                Nhwc.ChannelShift(GetIn(n.In[0]), i[1], i[2], i[3], GetSpan(n.Out[0]), (ShiftP)n.P!);
+                return true;
+            }
+            default:
+                return false;
         }
     }
 
