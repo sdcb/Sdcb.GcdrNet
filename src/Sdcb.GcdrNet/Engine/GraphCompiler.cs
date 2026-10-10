@@ -122,6 +122,9 @@ internal static class GraphCompiler
             }
             if (opt.Nhwc)
                 LayoutPlanner.Run(nodes, values, bufSize, inputValue, ref outputValue, opt.PhysicalIo);
+            if (opt.Nhwc && opt.CpuFusions && CompileOptions.MemFusions
+                && Environment.GetEnvironmentVariable("GCDRNET_NOFUSE") != "1")
+                FuseCpuMemory(nodes, values, outputValue);
 
             PlanArena(nodes, values, bufSize, inputValue, outputValue,
                 out int[] offsets, out int arenaFloats);
@@ -134,7 +137,8 @@ internal static class GraphCompiler
                     string extra = m.P switch
                     {
                         TransposeP t => $" perm=[{string.Join(',', t.Perm)}]",
-                        ConvP c => $" k={c.Kernel[0]}x{c.Kernel[1]} s={c.Strides[0]} g={c.Group} add={Vs(c.AddValue)} act={c.Act}",
+                        ConvP c => $" k={c.Kernel[0]}x{c.Kernel[1]} s={c.Strides[0]} g={c.Group} add={Vs(c.AddValue)} act={c.Act}{(c.Pool is { } pl ? $" +maxpool{(pl.FuseRelu ? "+relu" : "")}" : "")}",
+                        UpHeadP u => $" rrelu={u.ResizeRelu} srelu={u.SkipRelu} act={u.Act}" + (u.SkipConv is { } sc ? $" skip=conv{sc.Kernel[0]}x{sc.Kernel[1]}(In[1]) sact={sc.Act}" : ""),
                         GemmP g => $" act={g.Act}",
                         ConcatP c => $" axis={c.Axis}",
                         ShiftP s => $" axis={s.Axis}",
@@ -349,6 +353,74 @@ internal static class GraphCompiler
                 }
                 nodes.RemoveAt(u);
                 if (u < i) i--;
+            }
+        }
+
+        /// <summary>
+        /// CPU NHWC memory fusions (after layout planning) that keep full-resolution
+        /// tensors from ever being stored:
+        /// <list type="bullet">
+        /// <item>UpHead skip recompute: when the skip is a cheap direct conv of a smaller
+        ///   input (stem conv: 3/6 → 16/32 channels), UpHead reads the conv's input and
+        ///   recomputes the skip rows, so the skip need not stay live across the network.</item>
+        /// <item>Conv → MaxPool(2x2/2): the conv output's only reader is the pool, so the
+        ///   conv emits pooled rows directly (<see cref="ConvP.Pool"/>).</item>
+        /// </list>
+        /// </summary>
+        private static void FuseCpuMemory(List<ExecNode> nodes, List<CValue> values, int outputValue)
+        {
+            int Producer(int v) => nodes.FindIndex(m => m.Out.Length == 1 && m.Out[0] == v);
+            int Uses(int v)
+            {
+                int b = values[v].Buf;
+                if (b < 0 || v == outputValue || values[outputValue].Buf == b) return int.MaxValue;
+                int n = 0;
+                foreach (ExecNode m in nodes)
+                {
+                    foreach (int iv in m.In) if (values[iv].Buf == b) n++;
+                    int a1 = m.P switch { ConvP c => c.AddValue, _ => -1 };
+                    int a2 = m.P switch { ConvP c => c.BiasValue, GemmP g => g.BiasValue, _ => -1 };
+                    if (a1 >= 0 && values[a1].Buf == b) n++;
+                    if (a2 >= 0 && values[a2].Buf == b) n++;
+                }
+                return n;
+            }
+            bool Nhwc4(int v) => values[v].Shape.Length == 4 && values[v].Layout is [0, 2, 3, 1];
+
+            // 1) UpHead skip recompute
+            foreach (ExecNode u in nodes)
+            {
+                if (u.P is not UpHeadP up || up.SkipConv is not null) continue;
+                int s = u.In[1], ci = Producer(s);
+                if (ci < 0 || nodes[ci].P is not ConvP cp || cp.Group != 1 || cp.AddValue >= 0 || cp.Pool is not null
+                    || cp.Strides.Any(x => x != 1) || cp.Dilations.Any(x => x != 1)) continue;
+                int xin = nodes[ci].In[0];
+                CValue w = values[nodes[ci].In[1]];
+                if (w.Floats is null || w.Shape.Length != 4 || !Nhwc4(s) || !Nhwc4(xin)) continue;
+                int ic = values[xin].Shape[1], c = values[s].Shape[1];
+                // cheap to recompute, much smaller to keep; the conv itself stays scheduled
+                // for its other reader(s) (and keeps the shared ConvP packed)
+                if (ic * 2 > c || Kernels.Nhwc.WinogradEligible(cp, w.Shape, ic) || Uses(s) < 2) continue;
+                if (cp.BiasValue >= 0 && values[cp.BiasValue].Floats is null) continue;
+                u.In[1] = xin;
+                up.SkipConv = cp;
+            }
+
+            // 2) Conv -> MaxPool(2x2, stride 2, no pad, exact halving)
+            for (int pi = 0; pi < nodes.Count; pi++)
+            {
+                ExecNode m = nodes[pi];
+                if (m.Op != ExecOp.MaxPool || m.P is not PoolP pp || pp.Kernel is not [2, 2] || pp.Strides is not [2, 2]
+                    || pp.Pads.Any(x => x != 0) || m.In.Length != 1) continue;
+                int v = m.In[0], ci = Producer(v);
+                if (ci < 0 || ci > pi || nodes[ci].P is not ConvP cp || cp.Group != 1 || cp.AddValue >= 0 || cp.Pool is not null
+                    || Uses(v) != 1 || !Nhwc4(v) || !Nhwc4(m.Out[0])) continue;
+                int[] cs = values[v].Shape, ps = values[m.Out[0]].Shape;
+                if (cs[2] != ps[2] * 2 || cs[3] != ps[3] * 2) continue;
+                cp.Pool = pp;
+                nodes[ci].Out = [m.Out[0]];
+                nodes.RemoveAt(pi);
+                pi--;
             }
         }
 
@@ -838,6 +910,9 @@ internal static class GraphCompiler
                     if (s > peak) { peak = s; at = ni; }
                 }
                 Console.Error.WriteLine($"[arena] {arenaFloats * 4.0 / 1e6:F1} MB (freelist {bump * 4.0 / 1e6:F1}), live-peak {peak * 4.0 / 1e6:F1} MB at #{at}, input {bufSize[inputBuf] * 4.0 / 1e6:F1} MB off {offsets[inputBuf]}");
+                for (int b = 0; b < bufCount; b++)
+                    if (def[b] != int.MaxValue && def[b] <= at && use[b] >= at)
+                        Console.Error.WriteLine($"    b{b,-4} {bufSize[b] * 4.0 / 1e6,8:F1} MB  #{def[b]}..#{use[b]}  {(def[b] >= 0 && def[b] < nodes.Count ? nodes[def[b]].Op : "input")}");
             }
         }
 

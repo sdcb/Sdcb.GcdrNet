@@ -181,34 +181,54 @@ internal static unsafe partial class Nhwc
         fixed (float* sp0 = src, dp0 = dst, ap0 = add, wp0 = kp.W, bp0 = kp.Bias, pv0 = padVec)
         fixed (int* rm0 = rm, cm0 = cm)
         {
-            float* sp = sp0, dp = dp0, ap = ap0, wp = wp0, bp = bp0, pv = pv0;
-            int* rmp = rm0, cmp = cm0;
+            var a = new DenseArgs(sp0, wp0, bp0, pv0, rm0, cm0, iw, ic, ow, oc, kh, kw, nb, act, avx);
+            float* dp = dp0, ap = ap0;
             For(oh * nb, (long)oh * ow * oc * taps * ic / 64, t =>
             {
                 int y = t / nb, blk = t % nb;
-                float** ptrs = stackalloc float*[Tile * taps];
-                float* wb = wp + (long)blk * taps * ic * Ob;
-                float* bb = bp + blk * Ob;
-                int lanes = Math.Min(Ob, oc - blk * Ob);
-                for (int x0 = 0; x0 < ow; x0 += Tile)
-                {
-                    int rows = Math.Min(Tile, ow - x0);
-                    for (int tap = 0; tap < taps; tap++)
-                    {
-                        int r = rmp[y * kh + tap / kw];
-                        for (int i = 0; i < Tile; i++)
-                        {
-                            int c = cmp[(x0 + Math.Min(i, rows - 1)) * kw + tap % kw];
-                            ptrs[tap * Tile + i] = r < 0 || c < 0 ? pv : sp + ((long)r * iw + c) * ic;
-                        }
-                    }
-                    long o = ((long)y * ow + x0) * oc + blk * Ob;
-                    float* outp = dp + o;
-                    float* addp = hasAdd ? ap + o : null;
-                    if (avx) TileAvx(ptrs, rows, taps, ic, wb, bb, outp, addp, oc, lanes, act);
-                    else TileVec(ptrs, rows, taps, ic, wb, bb, outp, addp, oc, lanes, act);
-                }
+                long o = (long)y * ow * oc;
+                DenseRow(a, y, blk, dp + o, hasAdd ? ap + o : null);
             });
+        }
+    }
+
+    /// <summary>Per-call direct-conv constants (pointers into pinned/fixed storage).</summary>
+    private readonly unsafe struct DenseArgs(float* src, float* w, float* bias, float* padVec, int* rm, int* cm,
+        int iw, int ic, int ow, int oc, int kh, int kw, int nb, ActivationKind act, bool avx)
+    {
+        public readonly float* Src = src, W = w, Bias = bias, PadVec = padVec;
+        public readonly int* Rm = rm, Cm = cm;
+        public readonly int Iw = iw, Ic = ic, Ow = ow, Oc = oc, Kh = kh, Kw = kw, Nb = nb;
+        public readonly ActivationKind Act = act;
+        public readonly bool Avx = avx;
+    }
+
+    /// <summary>Output row <paramref name="y"/>, oc block <paramref name="blk"/> of a direct conv
+    /// into <paramref name="orow"/> (the row's first pixel; addend row likewise).</summary>
+    private static void DenseRow(in DenseArgs a, int y, int blk, float* orow, float* arow)
+    {
+        int taps = a.Kh * a.Kw, ic = a.Ic, ow = a.Ow, oc = a.Oc, kw = a.Kw;
+        float** ptrs = stackalloc float*[Tile * taps];
+        float* wb = a.W + (long)blk * taps * ic * Ob;
+        float* bb = a.Bias + blk * Ob;
+        int lanes = Math.Min(Ob, oc - blk * Ob);
+        for (int x0 = 0; x0 < ow; x0 += Tile)
+        {
+            int rows = Math.Min(Tile, ow - x0);
+            for (int tap = 0; tap < taps; tap++)
+            {
+                int r = a.Rm[y * a.Kh + tap / kw];
+                for (int i = 0; i < Tile; i++)
+                {
+                    int c = a.Cm[(x0 + Math.Min(i, rows - 1)) * kw + tap % kw];
+                    ptrs[tap * Tile + i] = r < 0 || c < 0 ? a.PadVec : a.Src + ((long)r * a.Iw + c) * ic;
+                }
+            }
+            long o = (long)x0 * oc + blk * Ob;
+            float* outp = orow + o;
+            float* addp = arow != null ? arow + o : null;
+            if (a.Avx) TileAvx(ptrs, rows, taps, ic, wb, bb, outp, addp, oc, lanes, a.Act);
+            else TileVec(ptrs, rows, taps, ic, wb, bb, outp, addp, oc, lanes, a.Act);
         }
     }
 
@@ -365,6 +385,83 @@ internal static unsafe partial class Nhwc
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Fill(float* d, int n, float v) => new Span<float>(d, n).Fill(v);
 
+    // ======================== conv + 2x2 max pool ========================
+    [ThreadStatic] private static float[]? t_band;
+
+    private static float[] BandBuf(long floats) =>
+        t_band is { } b && b.Length >= floats ? b : (t_band = new float[checked((int)floats)]);
+
+    /// <summary>
+    /// Dense / Winograd conv with a fused 2x2 stride-2 max pool (<see cref="ConvP.Pool"/>):
+    /// each task produces a band of conv rows (2 direct, 4 = one Winograd tile row) in a
+    /// thread-local buffer and pools it straight into <paramref name="dst"/> ([ph, pw, oc]),
+    /// so the full-resolution conv output is never stored. Per-element math is the same as
+    /// the separate Conv → MaxPool nodes.
+    /// </summary>
+    public static void ConvPool(ReadOnlySpan<float> src, int ih, int iw, int ic,
+        Span<float> dst, int ph, int pw, int oc, ConvP p, NhwcConvPlan kp)
+    {
+        int oh = ph * 2, ow = pw * 2;
+        if (kp.Depthwise || p.AddValue >= 0 || dst.Length != (long)ph * pw * oc)
+            throw new NotSupportedException("ConvPool shape/kind mismatch.");
+        bool relu = p.Pool!.FuseRelu, wino = kp.WinoU is not null;
+        int band = wino ? 4 : 2, tasks = (oh + band - 1) / band;
+        float[] padVec = new float[ic + Ob];
+        Array.Fill(padVec, p.PadValue);
+        int kh = p.Kernel[0], kw = p.Kernel[1];
+        int[] rm = Map(oh, kh, p.Strides[0], p.Pads[0], ih, p.PadMode);
+        int[] cm = Map(ow, kw, p.Strides[1], p.Pads[1], iw, p.PadMode);
+        fixed (float* sp = src, dp0 = dst, wp = kp.W, up = kp.WinoU, bp = kp.Bias, pv = padVec)
+        fixed (int* rmp = rm, cmp = cm)
+        {
+            var da = new DenseArgs(sp, wp, bp, pv, rmp, cmp, iw, ic, ow, oc, kh, kw, kp.Blocks, p.Act, UseAvx);
+            var wa = wino ? new WinoArgs(sp, up, bp, pv, ih, iw, ic, oh, ow, oc, kp.Blocks, p) : default;
+            float* dp = dp0;
+            For(tasks, (long)oh * ow * oc * kh * kw * ic / 64, t =>
+            {
+                int y0 = t * band, rows = Math.Min(band, oh - y0);
+                float[] buf = BandBuf((long)band * ow * oc);
+                fixed (float* sb = buf)
+                {
+                    if (wino)
+                        for (int t0 = y0 / 4 * wa.Tw, te = t0 + wa.Tw; t0 < te; t0 += wa.T)
+                            WinoTiles(wa, t0, Math.Min(wa.T, te - t0), sb, null, y0);
+                    else
+                        for (int r = 0; r < rows; r++)
+                            for (int blk = 0; blk < da.Nb; blk++)
+                                DenseRow(da, y0 + r, blk, sb + (long)r * ow * oc, null);
+                    PoolBand(sb, rows / 2, ow, oc, dp + (long)(y0 / 2) * pw * oc, pw, relu);
+                }
+            });
+        }
+    }
+
+    /// <summary>2x2/2 max over conv row pairs of a band; same op order as <see cref="MaxPool"/>.</summary>
+    private static void PoolBand(float* sb, int prows, int ow, int c, float* drow, int pw, bool relu)
+    {
+        int VL = Vector<float>.Count;
+        for (int r = 0; r < prows; r++)
+        {
+            float* top = sb + (long)(2 * r) * ow * c, bot = top + (long)ow * c;
+            float* orow = drow + (long)r * pw * c;
+            for (int x = 0; x < pw; x++)
+            {
+                float* o = orow + (long)x * c;
+                float* s0 = top + (long)(2 * x) * c, s1 = s0 + c, s2 = bot + (long)(2 * x) * c, s3 = s2 + c;
+                int ch = 0;
+                for (; ch + VL <= c; ch += VL)
+                {
+                    var v = Vector.Max(Simd.VectorLoad(s0 + ch), Simd.VectorLoad(s1 + ch));
+                    v = Vector.Max(v, Simd.VectorLoad(s2 + ch));
+                    Simd.VectorStore(o + ch, Vector.Max(v, Simd.VectorLoad(s3 + ch)));
+                }
+                for (; ch < c; ch++) o[ch] = MathF.Max(MathF.Max(MathF.Max(s0[ch], s1[ch]), s2[ch]), s3[ch]);
+                if (relu)
+                    for (ch = 0; ch < c; ch++) o[ch] = MathF.Max(o[ch], 0f);
+            }
+        }
+    }
+
     // ======================== maxpool ========================
     public static void MaxPool(ReadOnlySpan<float> src, int ih, int iw, int c,
         Span<float> dst, int oh, int ow, PoolP p)
@@ -500,9 +597,16 @@ internal static unsafe partial class Nhwc
     /// math follows the unfused nodes (bias-initialized, channel-ascending accumulation).
     /// </summary>
     public static void UpHead(ReadOnlySpan<float> src, int ih, int iw, int c, ReadOnlySpan<float> skip,
-        Span<float> dst, int oh, int ow, float sy, float sx, UpHeadP p, UpHeadPlan kp)
+        Span<float> dst, int oh, int ow, float sy, float sx, UpHeadP p, UpHeadPlan kp,
+        int skipH = 0, int skipW = 0, int skipC = 0)
     {
-        if (kp.C != c || skip.Length != (long)oh * ow * c || dst.Length != (long)oh * ow * kp.Oc)
+        // SkipConv: `skip` is the conv's input [skipH, skipW, skipC]; each task recomputes
+        // its skip row (same direct-conv kernel → same values) instead of reading a stored one
+        ConvP? sc = p.SkipConv;
+        var skp = sc?.KernelPlan as NhwcConvPlan;
+        if (kp.C != c || dst.Length != (long)oh * ow * kp.Oc
+            || (sc is null ? skip.Length != (long)oh * ow * c
+                : skp is null || skp.Depthwise || skp.WinoU is not null || sc.AddValue >= 0 || skip.Length != (long)skipH * skipW * skipC))
             throw new NotSupportedException("UpHead shape mismatch.");
         int[] y0 = new int[oh], y1 = new int[oh], x0 = new int[ow], x1 = new int[ow];
         float[] wy = new float[oh], wx = new float[ow];
@@ -511,9 +615,22 @@ internal static unsafe partial class Nhwc
         bool relu = p.ResizeRelu, skipRelu = p.SkipRelu, avx = UseAvx;
         int oc = kp.Oc;
         ActivationKind act = p.Act;
+        int[] rm = [], cm = [];
+        float[] padVec = [];
+        if (sc is not null)
+        {
+            rm = Map(oh, sc.Kernel[0], sc.Strides[0], sc.Pads[0], skipH, sc.PadMode);
+            cm = Map(ow, sc.Kernel[1], sc.Strides[1], sc.Pads[1], skipW, sc.PadMode);
+            padVec = new float[skipC + Ob];
+            Array.Fill(padVec, sc.PadValue);
+        }
         fixed (float* sp0 = src, dp0 = dst, kp0 = skip, wp0 = kp.W, bp0 = kp.Bias)
+        fixed (float* cw = skp?.W, cb = skp?.Bias, pv = padVec)
+        fixed (int* rmp = rm, cmp = cm)
         {
             float* sp = sp0, dp = dp0, kpp = kp0, wp = wp0, bp = bp0;
+            var ca = sc is null ? default
+                : new DenseArgs(kp0, cw, cb, pv, rmp, cmp, skipW, skipC, ow, c, sc.Kernel[0], sc.Kernel[1], skp!.Blocks, sc.Act, avx);
             For(oh, (long)oh * ow * c * (oc + 4), y =>
             {
                 float* s = stackalloc float[c + 8];
@@ -522,32 +639,42 @@ internal static unsafe partial class Nhwc
                 var vY = new Vector<float>(wy[y]);
                 float wY = wy[y];
                 float* orow = dp + (long)y * ow * oc;
-                for (int x = 0; x < ow; x++)
+                float[]? band = sc is null ? null : BandBuf((long)ow * c);
+                fixed (float* sb = band)
                 {
-                    ResizePixel(r0 + (long)x0[x] * c, r0 + (long)x1[x] * c, r1 + (long)x0[x] * c, r1 + (long)x1[x] * c,
-                        wx[x], wY, new Vector<float>(wx[x]), vY, c, relu, kpp + ((long)y * ow + x) * c, skipRelu, s);
-                    float* o = orow + (long)x * oc;
-                    if (avx)
+                    float* krow = kpp + (long)y * ow * c;
+                    if (sc is not null)
                     {
-                        F32x8 a = Avx.LoadVector256(bp);
-                        float* w = wp;
-                        for (int ch = 0; ch < c; ch++, w += 8)
-                            a = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(s + ch), Avx.LoadVector256(w), a);
-                        Avx.Store(acc, a);
+                        for (int blk = 0; blk < ca.Nb; blk++) DenseRow(ca, y, blk, sb, null);
+                        krow = sb;
                     }
-                    else
+                    for (int x = 0; x < ow; x++)
                     {
-                        for (int l = 0; l < 8; l++) acc[l] = bp[l];
-                        float* w = wp;
-                        for (int ch = 0; ch < c; ch++, w += 8)
+                        ResizePixel(r0 + (long)x0[x] * c, r0 + (long)x1[x] * c, r1 + (long)x0[x] * c, r1 + (long)x1[x] * c,
+                            wx[x], wY, new Vector<float>(wx[x]), vY, c, relu, krow + (long)x * c, skipRelu, s);
+                        float* o = orow + (long)x * oc;
+                        if (avx)
                         {
-                            float v = s[ch];
-                            for (int l = 0; l < oc; l++) acc[l] += v * w[l];
+                            F32x8 a = Avx.LoadVector256(bp);
+                            float* w = wp;
+                            for (int ch = 0; ch < c; ch++, w += 8)
+                                a = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(s + ch), Avx.LoadVector256(w), a);
+                            Avx.Store(acc, a);
                         }
+                        else
+                        {
+                            for (int l = 0; l < 8; l++) acc[l] = bp[l];
+                            float* w = wp;
+                            for (int ch = 0; ch < c; ch++, w += 8)
+                            {
+                                float v = s[ch];
+                                for (int l = 0; l < oc; l++) acc[l] += v * w[l];
+                            }
+                        }
+                        for (int l = 0; l < oc; l++) o[l] = acc[l];
                     }
-                    for (int l = 0; l < oc; l++) o[l] = acc[l];
+                    if (act != ActivationKind.None) ActRow(orow, ow * oc, act, avx);
                 }
-                if (act != ActivationKind.None) ActRow(orow, ow * oc, act, avx);
             });
         }
     }
