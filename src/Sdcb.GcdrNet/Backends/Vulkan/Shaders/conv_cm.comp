@@ -19,6 +19,12 @@
 // [N][kDim] tap-major repack (kDim = kH*kW*cin rounded up to 8, zero-filled).
 // SCALARK: any cin (the RGB/6-channel stems) — each k element of a quad is
 // gathered individually, k >= kReal reads as zero.
+// LITE (wave64-capable parts / 32 KB shared memory, after SimdPaddleOCR's sg32l): single-
+// buffered staging, and the epilogue stage aliases the staging memory (one uvec4 array; the
+// coopmat load/store element type may differ from the matrix type), so a 512-thread / 16-
+// subgroup tile fits in 20 KB; scalar epilogue; workgroups rastered in groups of RASTER
+// N-columns so the tiles in flight share A strips in L2. Same k order and epilogue math as
+// the default build.
 // flags: bit0 bias, bit1 residual, bit2 reflect pad, bits[4:6] act (0 none, 1 relu, 2 gelu)
 
 #ifndef TSM
@@ -37,6 +43,7 @@
 #define NTHR 256
 #endif
 #define SGSZ 32u
+#define RASTER 4u
 
 layout(local_size_x = NTHR) in;
 
@@ -57,6 +64,10 @@ layout(set = 0, binding = 1) readonly buffer W8 { uvec4 w8[]; };
 layout(set = 0, binding = 2) readonly buffer Bias { float bias[]; };
 layout(set = 0, binding = 3) readonly buffer Res8 { uvec4 res8[]; };
 layout(set = 0, binding = 4) writeonly buffer O8 { uvec4 o8[]; };
+#ifdef LITE
+layout(set = 0, binding = 3) readonly buffer Res1 { float16_t res1[]; };
+layout(set = 0, binding = 4) writeonly buffer O1 { float16_t o1[]; };
+#endif
 
 layout(push_constant) uniform PC {
     uint mDim; uint nDim; uint kDim; uint flags;
@@ -64,9 +75,16 @@ layout(push_constant) uniform PC {
     uint sH; uint sW; uint pT; uint pL; uint kReal;
 } p;
 
+#ifdef LITE
+const uint LDS4 = LDS / 2u;                // row stride in 16 B units
+const uint SM_AB = (BM + BN) * LDS4;       // A rows, then B rows (single buffer)
+const uint SM_ST = NTHR / SGSZ * 64u;      // one 16x16 fp32 tile per subgroup (epilogue)
+shared uvec4 smem[SM_AB > SM_ST ? SM_AB : SM_ST];
+#else
 shared f16vec4 sA[2u * BM * LDS];
 shared f16vec4 sB[2u * BN * LDS];
 shared float stage[NTHR / SGSZ * 16 * 16];
+#endif
 
 float ferf(float v)
 {
@@ -99,12 +117,27 @@ void loadSlice(out uvec4 ra[LA], out uvec4 rb[LB], out uint va, out uint vb,
     va = 0u; vb = 0u;
     uint k8 = qc * 8u;
 #ifdef SCALARK
+#ifdef LITE
+    // the k -> (tap, ci) split does not depend on the row: once per element, not per row
+    uint edy[8], edx[8], eci[8];
+    [[unroll]] for (uint e = 0u; e < 8u; e++) {
+        uint k = k8 + e;
+        uint tap = k / p.cin;
+        eci[e] = k - tap * p.cin;
+        edy[e] = tap / p.kW;
+        edx[e] = tap - edy[e] * p.kW;
+    }
+#endif
     [[unroll]] for (uint i = 0u; i < LA; i++) {
         float16_t h[8];
         [[unroll]] for (uint e = 0u; e < 8u; e++) {
             uint k = k8 + e;
+#ifdef LITE
+            uint ci = eci[e], dy = edy[e], dx = edx[e];
+#else
             uint tap = k / p.cin, ci = k - tap * p.cin;
             uint dy = tap / p.kW, dx = tap - dy * p.kW;
+#endif
             int iy = rowY[i] + int(dy), ix = rowX[i] + int(dx);
             bool inb = iy >= 0 && iy < int(p.inH) && ix >= 0 && ix < int(p.inW);
             if (reflect && rowOk[i] && !inb) { iy = mirror(iy, int(p.inH)); ix = mirror(ix, int(p.inW)); inb = true; }
@@ -141,6 +174,12 @@ void loadSlice(out uvec4 ra[LA], out uvec4 rb[LB], out uint va, out uint vb,
 
 void storeSlice(uvec4 ra[LA], uvec4 rb[LB], uint va, uint vb, uint buf, uint r0, uint kq)
 {
+#ifdef LITE
+    [[unroll]] for (uint i = 0u; i < LA; i++)
+        smem[(r0 + i * RSTEP) * LDS4 + kq] = (va & (1u << i)) != 0u ? ra[i] : uvec4(0u);
+    [[unroll]] for (uint i = 0u; i < LB; i++)
+        smem[(BM + r0 + i * RSTEP) * LDS4 + kq] = (vb & (1u << i)) != 0u ? rb[i] : uvec4(0u);
+#else
     [[unroll]] for (uint i = 0u; i < LA; i++) {
         uint o = buf * BM * LDS + (r0 + i * RSTEP) * LDS + kq * 2u;
         bool ok = (va & (1u << i)) != 0u;
@@ -153,6 +192,7 @@ void storeSlice(uvec4 ra[LA], uvec4 rb[LB], uint va, uint vb, uint buf, uint r0,
         sB[o] = ok ? f16vec4(unpackFloat2x16(rb[i].x), unpackFloat2x16(rb[i].y)) : f16vec4(0.0hf);
         sB[o + 1u] = ok ? f16vec4(unpackFloat2x16(rb[i].z), unpackFloat2x16(rb[i].w)) : f16vec4(0.0hf);
     }
+#endif
 }
 
 void main()
@@ -161,8 +201,19 @@ void main()
     uint sg = gl_SubgroupID;
     uint lane = gl_SubgroupInvocationID;
     uint sgx = sg & (SGX - 1u), sgy = sg / SGX;
+#ifdef LITE
+    // walk RASTER N-columns at a time, M fastest within the group
+    uint gmt = gl_NumWorkGroups.x;
+    uint lin = gl_WorkGroupID.y * gmt + gl_WorkGroupID.x;
+    uint grp = lin / (RASTER * gmt);
+    uint gw = min(gl_NumWorkGroups.y - grp * RASTER, RASTER);
+    uint gr = lin - grp * RASTER * gmt;
+    uint m0 = gr / gw * BM;
+    uint n0 = (grp * RASTER + gr % gw) * BN;
+#else
     uint m0 = gl_WorkGroupID.x * BM;
     uint n0 = gl_WorkGroupID.y * BN;
+#endif
 
     uint act = (p.flags >> 4) & 7u;
     bool hasBias = (p.flags & 1u) != 0u;
@@ -193,6 +244,25 @@ void main()
 
     coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> ma[TSM];
     coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> mb[TSN];
+#ifdef LITE
+    uint ab = sgy * STRM * LDS4, bb = (BM + sgx * STRN) * LDS4;
+    for (uint kt = 0u; kt < nk; kt++) {
+        bool more = kt + 1u < nk;
+        if (more) loadSlice(ra, rb, va, vb, kt + 1u, n0, r0, kq, reflect);
+        [[unroll]] for (uint kk = 0u; kk < BKV / 2u; kk += 2u) {
+            [[unroll]] for (uint i = 0u; i < TSM; i++)
+                coopMatLoad(ma[i], smem, ab + i * 16u * LDS4 + kk, LDS4, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint j = 0u; j < TSN; j++)
+                coopMatLoad(mb[j], smem, bb + j * 16u * LDS4 + kk, LDS4, gl_CooperativeMatrixLayoutColumnMajor);
+            [[unroll]] for (uint i = 0u; i < TSM; i++)
+                [[unroll]] for (uint j = 0u; j < TSN; j++)
+                    acc[i][j] = coopMatMulAdd(ma[i], mb[j], acc[i][j]);
+        }
+        barrier();                     // one buffer: every read done before the refill
+        if (more) storeSlice(ra, rb, va, vb, 0u, r0, kq);
+        barrier();
+    }
+#else
     uint aw = sgy * STRM * LDS, bw = sgx * STRN * LDS;
     for (uint kt = 0u; kt < nk; kt++) {
         uint cur = kt & 1u;
@@ -211,7 +281,32 @@ void main()
         if (more) storeSlice(ra, rb, va, vb, cur ^ 1u, r0, kq);
         barrier();
     }
+#endif
 
+#ifdef LITE
+    // lane owns elements lane + 32l of each 16x16 tile: scalar fp16 stores, half-row coalesced
+    [[unroll]] for (uint i = 0u; i < TSM; i++) {
+        [[unroll]] for (uint j = 0u; j < TSN; j++) {
+            coopMatStore(acc[i][j], smem, sg * 64u, 4u, gl_CooperativeMatrixLayoutRowMajor);
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+            uint fr = m0 + sgy * STRM + i * 16u, cn = n0 + sgx * STRN + j * 16u;
+            for (uint l = 0u; l < 8u; l++) {
+                uint e = l * 32u + lane;
+                uint gmr = fr + (e >> 4), gn = cn + (e & 15u);
+                if (gmr < p.mDim && gn < p.nDim) {
+                    float v = uintBitsToFloat(smem[sg * 64u + (e >> 2)][e & 3u]);
+                    if (hasBias) v += bias[gn];
+                    uint oe = gmr * p.nDim + gn;
+                    if (hasRes) v += float(res1[oe]);
+                    o1[oe] = float16_t(actf(v, act));
+                }
+            }
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+        }
+    }
+#else
     // epilogue through a per-subgroup row-major stage: each lane owns 8
     // consecutive columns of one row, so bias / residual / outputs move as 16 B
     uint mm = lane >> 1, nb = (lane & 1u) * 8u;
@@ -245,4 +340,5 @@ void main()
             subgroupBarrier();
         }
     }
+#endif
 }

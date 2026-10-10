@@ -1,0 +1,13 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+
+// Device probe for pipelines created with requiredSubgroupSize = 32: every invocation
+// reports subgroup size | count << 8 | id << 16 | lane << 24 (VkDevice.ProbeSubgroup32).
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0) writeonly buffer O { uint o[]; };
+
+void main()
+{
+    o[gl_LocalInvocationID.x] = gl_SubgroupSize | (gl_NumSubgroups << 8)
+        | (gl_SubgroupID << 16) | (gl_SubgroupInvocationID << 24);
+}

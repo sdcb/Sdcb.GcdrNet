@@ -13,7 +13,7 @@ if not exist "%GLSLC%" (
 set "DIR=%~dp0..\Shaders"
 set "O=-O --target-env=vulkan1.1"
 for %%f in ("%DIR%\*.comp") do (
-    if not "%%~nxf"=="conv_tile.comp" if not "%%~nxf"=="conv_cm.comp" (
+    if not "%%~nxf"=="conv_tile.comp" if not "%%~nxf"=="conv_cm.comp" if not "%%~nxf"=="sgprobe.comp" (
         echo glslc %%~nxf
         "%GLSLC%" %O% "%%f" -o "%%~dpnf.spv" || exit /b 1
         "%GLSLC%" %O% -DF16 "%%f" -o "%%~dpnf_h.spv" || exit /b 1
@@ -29,6 +29,14 @@ set "CM=%DIR%\conv_cm.comp"
 "%GLSLC%" %O% -DSGX=1u -DSGY=4u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_n32_h.spv" || exit /b 1
 rem any-cin stems (k elements gathered one by one)
 "%GLSLC%" %O% -DSCALARK -DSGX=1u -DSGY=4u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_n32s_h.spv" || exit /b 1
+rem LITE: the same four for wave64-capable / 32 KB shared-memory parts (subgroup pinned to 32);
+rem more, narrower (64x16) subgroup strips per tile measured fastest on the Radeon 880M
+"%GLSLC%" %O% -DLITE -DSGX=8u -DSGY=2u -DTSM=4u -DTSN=1u -DNTHR=512 "%CM%" -o "%DIR%\conv_cm_l_h.spv" || exit /b 1
+"%GLSLC%" %O% -DLITE -DSGX=4u -DSGY=2u -DTSM=4u -DTSN=1u -DNTHR=256 "%CM%" -o "%DIR%\conv_cm_l_n64_h.spv" || exit /b 1
+"%GLSLC%" %O% -DLITE -DSGX=2u -DSGY=2u -DTSM=4u -DTSN=1u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_l_n32_h.spv" || exit /b 1
+"%GLSLC%" %O% -DLITE -DSCALARK -DSGX=1u -DSGY=4u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_l_n32s_h.spv" || exit /b 1
+rem subgroup-size probe for pinned (requiredSubgroupSize = 32) pipelines
+"%GLSLC%" %O% "%DIR%\sgprobe.comp" -o "%DIR%\sgprobe.spv" || exit /b 1
 exit /b 0
 
 :conv

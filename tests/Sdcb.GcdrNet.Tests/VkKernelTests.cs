@@ -64,18 +64,24 @@ public unsafe class VkKernelTests
         AssertClose(got, cpu, 1e-4f, "uphead");
     }
 
+    // lite: false = the device's variant (LITE on wave64 / 32 KB parts), true = force the LITE build
     [SkippableTheory]
-    [InlineData(6, 32, 1, false, "conv_cm_n32s")]    // dr stem (scalar k gather)
-    [InlineData(3, 16, 1, true, "conv_cm_n32s")]     // gc stem, reflect
-    [InlineData(32, 64, 1, true, "conv_cm_n64")]
-    [InlineData(64, 128, 2, false, "conv_cm")]       // stride 2
-    [InlineData(16, 32, 1, false, "conv_cm_n32")]
-    public void ConvCm_MatchesCpu(int ic, int oc, int stride, bool reflect, string shader)
+    [InlineData(6, 32, 1, false, "conv_cm_n32s", false, false, 1)]    // dr stem (scalar k gather)
+    [InlineData(3, 16, 1, true, "conv_cm_n32s", false, false, 1)]     // gc stem, reflect
+    [InlineData(32, 64, 1, true, "conv_cm_n64", false, false, 1)]
+    [InlineData(64, 128, 2, false, "conv_cm", false, false, 1)]       // stride 2
+    [InlineData(16, 32, 1, false, "conv_cm_n32", false, false, 1)]
+    [InlineData(6, 32, 1, false, "conv_cm_n32s", true, false, 1)]
+    [InlineData(32, 64, 1, true, "conv_cm_n64", true, true, 2)]       // residual, gelu
+    [InlineData(64, 128, 2, false, "conv_cm", true, true, 0)]
+    [InlineData(16, 160, 1, false, "conv_cm_n32", true, false, 1)]    // 5 N tiles: partial raster group
+    [InlineData(32, 256, 1, false, "conv_cm", false, true, 1)]
+    public void ConvCm_MatchesCpu(int ic, int oc, int stride, bool reflect, string shader, bool lite, bool residual, int act)
     {
         Skip.IfNot(VkOk() && VkBackend.Default.Dev.CoopMat16, "no coopmat device");
         var dev = VkBackend.Default.Dev;
         var rng = new Random(ic * 7 + oc);
-        int ih = 13, iw = 21, oh = (ih + 2 - 3) / stride + 1, ow = (iw + 2 - 3) / stride + 1;
+        int ih = 29, iw = 37, oh = (ih + 2 - 3) / stride + 1, ow = (iw + 2 - 3) / stride + 1;
         // fp16-representable inputs so CPU and GPU see identical operands
         float[] x = Rand(rng, ih * iw * ic).Select(v => (float)(Half)v).ToArray();
         float[] w = Rand(rng, oc * ic * 9).Select(v => (float)(Half)(v * 0.25f)).ToArray();
@@ -83,27 +89,29 @@ public unsafe class VkKernelTests
         var p = new ConvP
         {
             Pads = [1, 1, 1, 1], Strides = [stride, stride], Dilations = [1, 1], Kernel = [3, 3],
-            PadMode = reflect ? PadMode.Reflect : PadMode.Constant, Act = ActivationKind.Relu,
+            PadMode = reflect ? PadMode.Reflect : PadMode.Constant,
+            Act = act == 1 ? ActivationKind.Relu : act == 2 ? ActivationKind.Gelu : ActivationKind.None,
         };
+        float[] res = residual ? Rand(rng, oh * ow * oc).Select(v => (float)(Half)v).ToArray() : [];
         float[] cpu = new float[oh * ow * oc];
         NhwcConvPlan kp = Nhwc.Pack(w, [oc, ic, 3, 3], b, 1, ic);
-        Nhwc.Conv(x, ih, iw, ic, cpu, oh, ow, oc, p, kp, default);
+        Nhwc.Conv(x, ih, iw, ic, cpu, oh, ow, oc, p, kp, res);
 
         int kr = 9 * ic, kd = (kr + 7) & ~7;
         float[] wt = new float[oc * kd];
         for (int o = 0; o < oc; o++)
             for (int c = 0; c < ic; c++)
                 for (int t = 0; t < 9; t++) wt[o * kd + t * ic + c] = w[(o * ic + c) * 9 + t];
-        uint flags = 1u | (reflect ? 4u : 0u) | (1u << 4);
+        uint flags = 1u | (residual ? 2u : 0u) | (reflect ? 4u : 0u) | ((uint)act << 4);
         uint m = (uint)(oh * ow);
         byte[] pc = new byte[56];
         Buffer.BlockCopy(new uint[] { m, (uint)oc, (uint)kd, flags, (uint)ow, (uint)iw, (uint)ih, (uint)ic, 3u,
             (uint)stride, (uint)stride, 1u, 1u, (uint)kr }, 0, pc, 0, 56);
         uint bn = shader == "conv_cm" ? 128u : shader == "conv_cm_n64" ? 64u : 32u;
-        var bufs = new List<VkBuffer> { Half16(dev, x), Half16(dev, wt), F32(dev, b), Half16(dev, new float[8]) };
+        var bufs = new List<VkBuffer> { Half16(dev, x), Half16(dev, wt), F32(dev, b), Half16(dev, residual ? res : new float[8]) };
         VkBuffer ob = dev.NewStorageBuffer((ulong)cpu.Length * 2 + 16, true, preferHost: true);
         bufs.Add(ob);
-        VkPipeline pipe = dev.GetPipeline(shader + "_h", 5, 56);
+        VkPipeline pipe = dev.GetCoopPipeline(shader, 5, 56, lite ? true : null);
         IntPtr cmd = dev.NewCommandBuffer();
         IntPtr fence = dev.NewFence();
         var begin = new Vk.VkCommandBufferBeginInfo { SType = VkConst.StCommandBufferBeginInfo };
