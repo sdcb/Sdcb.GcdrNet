@@ -17,21 +17,23 @@ void main()
 {
     uint w4 = gl_GlobalInvocationID.x;
     if (w4 >= p.nwords) return;
+    uint byteIdx = w4 * 4u;
+    uint byteTotal = p.ih * p.iw * 3u;
+    // incremental (px -> c, dx, dy) tracking: 2 divisions per thread, not per byte
+    uint px = byteIdx / 3u, c = byteIdx - px * 3u;
+    uint dy = px / p.iw, dx = px - dy * p.iw;
     uint packed = 0u;
     for (uint j = 0u; j < 4u; j++)
     {
-        uint byteIdx = w4 * 4u + j;
-        uint byteTotal = p.ih * p.iw * 3u;
         uint val = 0u;
         if (byteIdx < byteTotal)
         {
-            uint px = byteIdx / 3u, c = byteIdx - px * 3u;
-            uint dy = px / p.iw, dx = px % p.iw;
-            uint sy = dy + p.pt, sx = dx + p.pl;
-            float f = x[(c * p.h + sy) * p.w + sx] * 255.0 + 0.5;
+            float f = x[(c * p.h + dy + p.pt) * p.w + dx + p.pl] * 255.0 + 0.5;
             val = uint(clamp(f, 0.0, 255.0));
         }
         packed |= val << (j * 8u);
+        byteIdx++;
+        if (++c == 3u) { c = 0u; if (++dx == p.iw) { dx = 0u; dy++; } }
     }
     o[w4] = packed;
 }

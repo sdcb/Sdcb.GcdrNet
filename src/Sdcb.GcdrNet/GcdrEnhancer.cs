@@ -26,8 +26,13 @@ public sealed class GcdrEnhancer : IDisposable
     private readonly OnnxModel _gcModel, _drModel;
     private readonly GcdrBackend _backend;
 
-    // per-size pools, bounded to MaxSizes distinct sizes and MaxPerSize idle instances
+    // per-size pools: bounded by MaxSizes distinct sizes, MaxPerSize idle instances
+    // per size, and a memory budget — arena floats scale ~1KB/px across both
+    // sessions, so a handful of multi-MP pipelines would otherwise exhaust the
+    // device (12GB) or the host before the count cap ever matters
     private const int MaxSizes = 8, MaxPerSize = 4;
+    private const long VkPoolBudget = 3L << 30;   // ~3 GB device memory across vk pools
+    private const long CpuPoolBudget = 4L << 30;  // ~4 GB host memory per cpu pool dict
     private readonly ConcurrentDictionary<long, SizePool<InferenceSession>> _gcPool = new();
     private readonly ConcurrentDictionary<long, SizePool<InferenceSession>> _drPool = new();
     private readonly ConcurrentDictionary<long, SizePool<Backends.Vulkan.VkGcdrPipeline>> _vkPool = new();
@@ -59,7 +64,7 @@ public sealed class GcdrEnhancer : IDisposable
         p = new SizePool<InferenceSession>(MaxPerSize,
             () => new InferenceSession(GraphCompiler.Compile(model, [1, c, h, w])));
         if (!pools.TryAdd(key, p)) { p.Dispose(); return pools[key]; }
-        EvictIfNeeded(pools, key);
+        EvictIfNeeded(pools, key, SizeCap(h, w, CpuPoolBudget));
         return p;
     }
 
@@ -70,15 +75,19 @@ public sealed class GcdrEnhancer : IDisposable
         p = new SizePool<Backends.Vulkan.VkGcdrPipeline>(MaxPerSize,
             () => Backends.Vulkan.VkBackend.Default.NewPipe(_gcModel, _drModel, ih, iw));
         if (!_vkPool.TryAdd(key, p)) { p.Dispose(); return _vkPool[key]; }
-        EvictIfNeeded(_vkPool, key);
+        EvictIfNeeded(_vkPool, key, SizeCap(ih, iw, VkPoolBudget));
         return p;
     }
 
-    /// <summary>Bounded size cache: evict an arbitrary other entry beyond MaxSizes.</summary>
-    private static void EvictIfNeeded<T>(ConcurrentDictionary<long, SizePool<T>> pools, long keep)
+    /// <summary>Max distinct pool entries for this size: 1KB/px/pipeline estimate.</summary>
+    private static int SizeCap(int h, int w, long budget) =>
+        (int)Math.Clamp(budget / ((long)h * w * 1024 + 1), 1, MaxSizes);
+
+    /// <summary>Bounded size cache: evict an arbitrary other entry beyond maxEntries.</summary>
+    private static void EvictIfNeeded<T>(ConcurrentDictionary<long, SizePool<T>> pools, long keep, int maxEntries)
         where T : IDisposable
     {
-        while (pools.Count > MaxSizes)
+        while (pools.Count > maxEntries)
         {
             long victim = -1;
             foreach (var k in pools.Keys) if (k != keep) { victim = k; break; }
@@ -173,6 +182,7 @@ public sealed class GcdrEnhancer : IDisposable
         private readonly Func<T> _factory;
         private readonly int _max;
         private int _idleCount;
+        private volatile bool _disposed;
 
         public SizePool(int max, Func<T> factory) { _max = max; _factory = factory; }
 
@@ -184,6 +194,8 @@ public sealed class GcdrEnhancer : IDisposable
 
         public void Return(T t)
         {
+            // pool may already be evicted/disposed — don't park into a dead pool
+            if (_disposed) { t.Dispose(); return; }
             if (Interlocked.Increment(ref _idleCount) <= _max) { _idle.Enqueue(t); return; }
             Interlocked.Decrement(ref _idleCount);
             t.Dispose();
@@ -191,6 +203,7 @@ public sealed class GcdrEnhancer : IDisposable
 
         public void Dispose()
         {
+            _disposed = true;
             while (_idle.TryDequeue(out T? t)) t.Dispose();
             _idleCount = 0;
         }

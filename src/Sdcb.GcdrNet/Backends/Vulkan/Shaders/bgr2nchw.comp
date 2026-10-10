@@ -1,6 +1,7 @@
 #version 450
 // BGR u8 HWC -> NCHW float /255 with top/left replicate padding.
 // out[c,y,x] = bgr[clamp(y-pt,0,h-1), clamp(x-pl,0,w-1), c] / 255
+// 3D grid: x=ox, y=oy, z=channel — no div/mod index math.
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0) readonly buffer BGR { uint bgr[]; };  // packed u8
@@ -17,10 +18,11 @@ float fetchByte(uint byteIdx) { return float((bgr[byteIdx >> 2] >> ((byteIdx & 3
 
 void main()
 {
-    uint i = gl_GlobalInvocationID.x;
-    if (i >= 3u * p.oh * p.ow) return;
-    uint ox = i % p.ow, oy = (i / p.ow) % p.oh, c = i / (p.oh * p.ow);
+    uint ox = gl_GlobalInvocationID.x;
+    if (ox >= p.ow) return;
+    uint oy = gl_GlobalInvocationID.y;
+    uint c = gl_GlobalInvocationID.z;
     uint sy = uint(clamp(int(oy) - int(p.pt), 0, int(p.ih) - 1));
     uint sx = uint(clamp(int(ox) - int(p.pl), 0, int(p.iw) - 1));
-    o[i] = fetchByte(sy * p.stride + sx * 3u + c) / 255.0;
+    o[(c * p.oh + oy) * p.ow + ox] = fetchByte(sy * p.stride + sx * 3u + c) / 255.0;
 }

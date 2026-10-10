@@ -8,8 +8,8 @@ namespace Sdcb.GcdrNet.Tests;
 /// <summary>Plan-level fusion assertions, NOFUSE cross-check, CPU pipeline paths.</summary>
 public class EngineTests
 {
-    private static string GcPath => Path.Combine(Golden.ModelDir, "gcdrnet_gcnet_sim.onnx");
-    private static string DrPath => Path.Combine(Golden.ModelDir, "gcdrnet_drnet_sim.onnx");
+    internal static string GcPath => Path.Combine(Golden.ModelDir, "gcdrnet_gcnet_sim.onnx");
+    internal static string DrPath => Path.Combine(Golden.ModelDir, "gcdrnet_drnet_sim.onnx");
 
     [Fact]
     public void Fusion_ChannelShift_And_ResidualAdd()

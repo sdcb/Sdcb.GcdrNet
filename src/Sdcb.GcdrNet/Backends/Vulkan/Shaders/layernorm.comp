@@ -1,6 +1,7 @@
 #version 450
 // LayerNorm over last dim: one workgroup (256 threads) per row.
 // o[r,i] = (x[r,i] - mean) * rsqrt(var + eps) * w[i] + b[i]
+// Single reduction pass: sum and sum-of-squares accumulate together in vec2 lanes.
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0) readonly buffer X { float x[]; };
@@ -10,7 +11,7 @@ layout(set = 0, binding = 3) writeonly buffer O { float o[]; };
 
 layout(push_constant) uniform PC { uint len; float eps; } p;
 
-shared float red[256];
+shared vec2 red[256];
 
 void main()
 {
@@ -24,23 +25,15 @@ void main()
         float v = x[base + i];
         s += v; s2 += v * v;
     }
-    red[tid] = s;
+    red[tid] = vec2(s, s2);
     barrier();
     for (uint st = 128u; st > 0u; st >>= 1)
     {
         if (tid < st) red[tid] += red[tid + st];
         barrier();
     }
-    float mean = red[0] / float(p.len);
-    barrier();
-    red[tid] = s2;
-    barrier();
-    for (uint st = 128u; st > 0u; st >>= 1)
-    {
-        if (tid < st) red[tid] += red[tid + st];
-        barrier();
-    }
-    float inv = inversesqrt(red[0] / float(p.len) - mean * mean + p.eps);
+    float mean = red[0].x / float(p.len);
+    float inv = inversesqrt(red[0].y / float(p.len) - mean * mean + p.eps);
     for (uint i = tid; i < p.len; i += 256u)
         o[base + i] = (x[base + i] - mean) * inv * w[i] + b[i];
 }
