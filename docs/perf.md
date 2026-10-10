@@ -122,11 +122,11 @@ CPU 一张 1952×2624（5.1 MP）的 arena：
    复用上面的全部空间。合计从 gc + dr 变成 max(dr, dr 输入 + gc)。CPU 和 Vulkan worker 都是一块。
 3. **权重只存一份**（`d989e67`）：`OnnxTensorData.AsFloats()` 解码一次并丢掉原始字节，所有尺寸的
    plan 引用同一组数组（之前每个缓存的 plan 各拷一份，Vulkan 侧 32 个 graph 就是 ~380 MB）。
-4. **conv + maxpool 融合**（CPU `6b77a95`）：编码器三层 `conv → maxpool(2×2/2)` 的卷积输出只被
+4. **conv + maxpool 融合**（CPU `6b195bd`）：编码器三层 `conv → maxpool(2×2/2)` 的卷积输出只被
    pool 读，于是卷积按行带（直接卷积 2 行、Winograd 一个 tile 行 = 4 行）算进线程局部缓冲后立刻
    pool，原分辨率的卷积输出不再落 arena。直接卷积和 Winograd 拆出 `DenseRow` / `WinoTiles`，
    与非融合路径共用逐 tile 的计算，输出逐位一致。
-5. **UpHead 重算 skip**（CPU `6b77a95`，Vulkan `5b57738`）：尾部 UpHead 的 skip 是 stem 卷积
+5. **UpHead 重算 skip**（CPU `6b195bd`，Vulkan `5b57738`）：尾部 UpHead 的 skip 是 stem 卷积
    （3/6 → 16/32 通道）的原分辨率输出，要从第一层活到最后一层（dr 32 通道 = 128 B/px）。现在
    UpHead 改读 stem 卷积的输入（反正一直存活），逐行（Vulkan 逐像素）重算 skip。代价是 stem
    卷积多算一遍（约占模型 MAC 的 10%，但通道少、访存小），AVX2 语料 +1.8%，3.7 MP 单尺寸稳态持平。
