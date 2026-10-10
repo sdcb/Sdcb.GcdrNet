@@ -6,8 +6,8 @@ namespace Sdcb.GcdrNet.Tests;
 /// <summary>
 /// Throughput/robustness smoke over the RealDAE corpus (tests/testdata/realdae):
 /// decode webp -> enhance -> sanity-check the output. A spread of ~10 images
-/// covering small to 2600px inputs; not an oracle test (no golden per image).
-/// The webp corpus is local-only data (gitignored) — tests skip when absent.
+/// covering small to 2600px inputs; not an oracle test (paired NN_gt.webp ground
+/// truths are local-only data, gitignored — not needed by this smoke test).
 /// </summary>
 public class CorpusTests
 {
