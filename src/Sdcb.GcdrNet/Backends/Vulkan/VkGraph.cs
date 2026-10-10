@@ -203,7 +203,8 @@ internal sealed class VkGraphModel : IDisposable
                 uint flags = (p.BiasValue >= 0 ? 1u : 0u)
                     | (p.PadMode == PadMode.Reflect ? 2u : 0u)
                     | (p.Act == ActivationKind.Relu ? 4u : 0u)
-                    | (p.AddValue >= 0 ? 8u : 0u);
+                    | (p.AddValue >= 0 ? 8u : 0u)
+                    | (p.Act == ActivationKind.Gelu ? 16u : 0u);
                 if (p.Group > 1)
                 {
                     if (p.Group != ic) throw new NotSupportedException("grouped non-depthwise conv");
@@ -259,9 +260,12 @@ internal sealed class VkGraphModel : IDisposable
                 uint m = (uint)(V[n.In[0]].ElementCount / sa[^1]);
                 uint k = (uint)sa[^1];
                 uint nn = (uint)shapeOut()[^1];
+                uint gflags = (p.TransB ? 1u : 0u) | (p.BiasValue >= 0 ? 2u : 0u)
+                    | (p.Act == ActivationKind.Relu ? 4u : 0u)
+                    | (p.Act == ActivationKind.Gelu ? 8u : 0u);
                 yield return ND("gemm",
                     [Bind(n.In[0]), Bind(n.In[1]), B(p.BiasValue), Bind(n.Out[0])],
-                    PcOf(m, nn, k, (p.TransB ? 1u : 0u) | (p.BiasValue >= 0 ? 2u : 0u)),
+                    PcOf(m, nn, k, gflags),
                     (nn + 63) / 64, (m + 63) / 64, name: "gemm");
                 break;
             }

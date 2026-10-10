@@ -15,7 +15,7 @@ layout(push_constant) uniform PC {
     uint oc, oh, ow;
     uint kh, kw, sh, sw;
     uint pt, pl;
-    uint flags;     // bit0 hasBias, bit1 reflectPad, bit2 relu, bit3 hasAdd
+    uint flags;     // bit0 hasBias, bit1 reflectPad, bit2 relu, bit3 hasAdd, bit4 gelu
 } p;
 
 #ifndef KH
@@ -39,6 +39,15 @@ shared vec4 Asv[BK * BM / 4];
 shared vec4 Bsv[BK * BN / 4];
 
 int mirror(int i, int d) { if (d <= 1) return 0; while (i < 0 || i >= d) i = i < 0 ? -i : 2 * d - 2 - i; return i; }
+
+float ferf(float v)
+{
+    float s = v < 0.0 ? -1.0 : 1.0;
+    float ax = abs(v);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+    return (1.0 - poly * exp(-ax * ax)) * s;
+}
 
 void main()
 {
@@ -126,6 +135,7 @@ void main()
             float v = acc[i][j] + bias;
             if (hasAdd) v += r[di];
             if (relu) v = max(v, 0.0);
+            if ((p.flags & 16u) != 0u) v = 0.5 * v * (1.0 + ferf(v * 0.7071067811865475));
             o[di] = v;
         }
     }

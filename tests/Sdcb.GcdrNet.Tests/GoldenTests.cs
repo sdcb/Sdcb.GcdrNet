@@ -26,7 +26,7 @@ public class GoldenTests
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
-        Assert.True(max < 2e-3f, $"gcnet[{tag}] max diff {max} rmse {rmse} (shape {string.Join('x', sess.OutputShape)})");
+        Assert.True(max < 1e-4f, $"gcnet[{tag}] max diff {max} rmse {rmse} (shape {string.Join('x', sess.OutputShape)})");
     }
 
     [Theory]
@@ -45,7 +45,7 @@ public class GoldenTests
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
-        Assert.True(max < 2e-3f, $"drnet[{tag}] max diff {max} rmse {rmse}");
+        Assert.True(max < 1e-4f, $"drnet[{tag}] max diff {max} rmse {rmse}");
     }
 
     [Theory]

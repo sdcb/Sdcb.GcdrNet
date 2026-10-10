@@ -47,6 +47,7 @@ internal static unsafe class Avx2Kernels
     {
         if (act == ActivationKind.Relu) v = V256.Max(v, F32x8.Zero);
         else if (act == ActivationKind.Sigmoid) v = SimdMath.SigmoidCore(v);
+        else if (act == ActivationKind.Gelu) v = SimdMath.GeluCore(v);
     }
 
     // lane-wise fetch with pad resolution (edge chunks only)

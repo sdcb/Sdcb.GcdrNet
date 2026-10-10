@@ -10,12 +10,21 @@ layout(set = 0, binding = 3) writeonly buffer O { float o[]; };
 
 layout(push_constant) uniform PC {
     uint m, n, k;
-    uint flags;     // bit0 transB, bit1 hasBias
+    uint flags;     // bit0 transB, bit1 hasBias, bit2 relu, bit3 gelu
 } p;
 
 const uint BM = 64u, BN = 64u, BK = 16u;
 shared float As[BK * BM];
 shared float Bs[BK * BN];
+
+float ferf(float v)
+{
+    float s = v < 0.0 ? -1.0 : 1.0;
+    float ax = abs(v);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+    return (1.0 - poly * exp(-ax * ax)) * s;
+}
 
 void main()
 {
@@ -69,6 +78,8 @@ void main()
             if (gn >= p.n) continue;
             float v = acc[i][j];
             if (hasBias) v += bs[gn];
+            if ((p.flags & 4u) != 0u) v = max(v, 0.0);
+            if ((p.flags & 8u) != 0u) v = 0.5 * v * (1.0 + ferf(v * 0.7071067811865475));
             o[gm * p.n + gn] = v;
         }
     }
