@@ -15,49 +15,40 @@ public sealed unsafe class InferenceSession : IDisposable
     // sessions otherwise pile up until a (rare, on big-RAM hosts) gen2 GC
     private nint _arena;
     private readonly long _arenaBytes;
+    private readonly bool _ownsArena;
     private readonly int[] _offsets;
     private readonly long[] _nodeTicks;
     private readonly int _inputValue, _outputValue;
 
     public InferenceSession(CompiledModel model) : this(model.Plan) { }
 
-    internal InferenceSession(ExecPlan plan)
+    internal InferenceSession(ExecPlan plan) : this(plan, 0) { }
+
+    /// <summary>
+    /// Session over <paramref name="plan"/>. With <paramref name="arena"/> = 0 the session owns a
+    /// fresh zeroed native arena; otherwise it borrows the caller's arena (at least
+    /// ArenaFloats floats; contents need not be zero — every buffer is written before it is
+    /// read), which outlives the session and is never freed by it.
+    /// </summary>
+    internal InferenceSession(ExecPlan plan, nint arena)
     {
         _plan = plan;
         _arenaBytes = (long)plan.ArenaFloats * sizeof(float);
-        // calloc: large blocks come straight from fresh OS pages (already zero, faulted in lazily
-        // by the parallel kernels) instead of a single-threaded multi-GB memset up front
-        _arena = (nint)NativeMemory.AllocZeroed((nuint)Math.Max(_arenaBytes, 64));
-        if (_arenaBytes > 0) GC.AddMemoryPressure(_arenaBytes);
+        if (arena == 0)
+        {
+            // calloc: large blocks come straight from fresh OS pages (already zero, faulted in lazily
+            // by the parallel kernels) instead of a single-threaded multi-GB memset up front
+            _arena = (nint)NativeMemory.AllocZeroed((nuint)Math.Max(_arenaBytes, 64));
+            _ownsArena = true;
+            if (_arenaBytes > 0) GC.AddMemoryPressure(_arenaBytes);
+        }
+        else _arena = arena;
         _offsets = plan.BufOffset;
         _inputValue = plan.InputValue;
         _outputValue = plan.OutputValue;
         _nodeTicks = new long[plan.Nodes.Length];
-        if (plan.Nhwc)
-            foreach (ExecNode n in plan.Nodes)
-                if (n.P is GemmP gp && gp.KernelPlan is null && plan.Values[n.In[1]].Floats is { } bw)
-                {
-                    int[] bs = plan.Values[n.In[1]].Shape;
-                    int kk = gp.TransB ? bs[1] : bs[0], nn = gp.TransB ? bs[0] : bs[1];
-                    ReadOnlySpan<float> gb = gp.BiasValue >= 0 ? plan.Values[gp.BiasValue].Floats : default;
-                    Interlocked.CompareExchange(ref gp.KernelPlan, Nhwc.PackGemm(bw, kk, nn, gp.TransB, gb), null);
-                }
-                else if (n.P is ConvP cp && cp.KernelPlan is null)
-                {
-                    // CPU-private packed weights; plans are shared, packing is idempotent
-                    CValue w = plan.Values[n.In[1]];
-                    ReadOnlySpan<float> b = cp.BiasValue >= 0 ? plan.Values[cp.BiasValue].Floats : default;
-                    Interlocked.CompareExchange(ref cp.KernelPlan,
-                        Nhwc.Pack(w.Floats!, w.Shape, b, cp.Group, plan.Values[n.In[0]].Shape[1]), null);
-                }
-                else if (n.P is UpHeadP up && up.KernelPlan is null)
-                {
-                    CValue w = plan.Values[n.In[2]];
-                    ReadOnlySpan<float> b = n.In.Length > 3 ? plan.Values[n.In[3]].Floats : default;
-                    Interlocked.CompareExchange(ref up.KernelPlan, Nhwc.PackUpHead(w.Floats!, w.Shape[0], w.Shape[1], b), null);
-                }
+        CpuKernels.Pack(plan, null);
     }
-
     /// <summary>Input tensor shape (e.g. [1,3,H,W]).</summary>
     public int[] InputShape => _plan.Values[_inputValue].Shape;
     public int[] OutputShape => _plan.Values[_outputValue].Shape;
@@ -316,7 +307,7 @@ public sealed unsafe class InferenceSession : IDisposable
     private void Free()
     {
         nint p = Interlocked.Exchange(ref _arena, 0);
-        if (p == 0) return;
+        if (p == 0 || !_ownsArena) return;
         NativeMemory.Free((void*)p);
         if (_arenaBytes > 0) GC.RemoveMemoryPressure(_arenaBytes);
     }

@@ -16,6 +16,7 @@ internal sealed class NhwcConvPlan
     public required float[] Bias;   // dense: padded to blocks*16; depthwise: [c]
     public bool Depthwise;
     public int Blocks;
+    public float[]? WinoU;  // Winograd F(4x4,3x3) weights [36][oc/16][ic][16], null = direct conv
 }
 
 /// <summary>Packed <see cref="ExecOp.UpHead"/> weights: [c][8] oc lanes (zero-padded) + bias[8].</summary>
@@ -34,7 +35,7 @@ internal sealed class UpHeadPlan
 /// AVX2 micro-kernel (after SimdPaddleOCR's Nhwc.Conv) with bias-init and a
 /// fused residual + activation epilogue; other tiers use Vector&lt;float&gt;.
 /// </summary>
-internal static unsafe class Nhwc
+internal static unsafe partial class Nhwc
 {
     private const int Ob = 16, Tile = 6;
     private static readonly ParallelOptions PO = new() { MaxDegreeOfParallelism = Avx2Kernels.Threads };
@@ -155,6 +156,11 @@ internal static unsafe class Nhwc
     {
         if (!add.IsEmpty && add.Length != dst.Length)
             throw new NotSupportedException($"conv residual addend has {add.Length} elems, expected {dst.Length}.");
+        if (kp.WinoU is not null)
+        {
+            WinogradConv(src, ih, iw, ic, dst, oh, ow, oc, p, kp, add);
+            return;
+        }
         int kh = p.Kernel[0], kw = p.Kernel[1];
         int[] rm = Map(oh, kh, p.Strides[0], p.Pads[0], ih, p.PadMode);
         int[] cm = Map(ow, kw, p.Strides[1], p.Pads[1], iw, p.PadMode);

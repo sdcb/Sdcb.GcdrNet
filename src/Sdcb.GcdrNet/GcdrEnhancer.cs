@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using Sdcb.GcdrNet.Engine;
 using Sdcb.GcdrNet.Kernels;
 using Sdcb.GcdrNet.Onnx;
@@ -19,22 +20,23 @@ public enum GcdrBackend
 /// <summary>
 /// GCDRNet two-stage document enhancer: GC-Net shading estimation → division
 /// correction → DR-Net detail restoration. BGR uint8 in, BGR uint8 out.
-/// Thread-safe: CPU sessions are pooled per input size, Vulkan workers in one
-/// size-agnostic pool (rent/return).
+/// Thread-safe: size-agnostic workers (CPU arenas / Vulkan pipelines) are pooled
+/// and rented per call; per-size plans are cached and share packed weights.
 /// </summary>
 public sealed class GcdrEnhancer : IDisposable
 {
     private readonly OnnxModel _gcModel, _drModel;
     private readonly GcdrBackend _backend;
 
-    // CPU per-size pools: bounded by MaxSizes distinct sizes, MaxPerSize idle
-    // instances per size, and a memory budget — arena floats scale ~1KB/px across
-    // both sessions, so a handful of multi-MP sizes would otherwise exhaust the
-    // host before the count cap ever matters
+    // CPU: per-size plans are managed metadata (cached, at most MaxSizes; packed
+    // weights shared across sizes through the kernel caches). Workers own grow-only
+    // native arenas (CpuArenaBudget, see CpuWorker) and serve every size; idle
+    // workers beyond the first are kept only while their arenas fit the budget.
     private const int MaxSizes = 8, MaxPerSize = 4;
-    private const long CpuPoolBudget = 4L << 30;  // ~4 GB host memory per cpu pool dict
-    private readonly ConcurrentDictionary<long, SizePool<InferenceSession>> _gcPool = new();
-    private readonly ConcurrentDictionary<long, SizePool<InferenceSession>> _drPool = new();
+    private const long CpuArenaBudget = 4L << 30;
+    private readonly ConcurrentDictionary<long, (ExecPlan gc, ExecPlan dr)> _cpuPlans = new();
+    private readonly CpuKernels.Cache _gcKernels = new(), _drKernels = new();
+    private SizePool<CpuWorker>? _cpuPool;
     // Vulkan workers are size-agnostic (budgeted grow-only arenas, re-record on size
     // change): one pool serves every size; idle workers beyond the first are kept
     // only while their device memory fits the budget
@@ -42,7 +44,8 @@ public sealed class GcdrEnhancer : IDisposable
     private SizePool<Backends.Vulkan.VkGcdrPipeline>? _vkPool;
     private long _poolsCreated, _workersCreated, _poolsEvicted;
 
-    /// <summary>Pool diagnostics: distinct size pools created, worker instances created, pools evicted.</summary>
+    /// <summary>Diagnostics: CPU size plans compiled (Vulkan: worker pools created), worker
+    /// instances created, CPU size plans evicted.</summary>
     public (long pools, long workers, long evicted) PoolStats =>
         (_poolsCreated, _workersCreated, _poolsEvicted);
 
@@ -71,18 +74,36 @@ public sealed class GcdrEnhancer : IDisposable
 
     private static long Key(int h, int w) => (long)h * 65536 + w;
 
-    private SizePool<InferenceSession> CpuPool(bool gc, int h, int w)
+    /// <summary>gc/dr plans for one padded size (compiled once, weights packed via the shared caches).</summary>
+    private (ExecPlan gc, ExecPlan dr) CpuPlans(int h, int w)
     {
-        var pools = gc ? _gcPool : _drPool;
         long key = Key(h, w);
-        if (pools.TryGetValue(key, out var p)) return p;
-        var model = gc ? _gcModel : _drModel;
-        int c = gc ? 3 : 6;
-        p = new SizePool<InferenceSession>(MaxPerSize,
-            () => { Interlocked.Increment(ref _workersCreated); return new InferenceSession(GraphCompiler.Compile(model, [1, c, h, w], CpuPlan)); });
-        if (!pools.TryAdd(key, p)) { p.Dispose(); return pools[key]; }
+        if (_cpuPlans.TryGetValue(key, out var p)) return p;
+        ExecPlan gc = GraphCompiler.Compile(_gcModel, [1, 3, h, w], CpuPlan);
+        CpuKernels.Pack(gc, _gcKernels);
+        ExecPlan dr = GraphCompiler.Compile(_drModel, [1, 6, h, w], CpuPlan);
+        CpuKernels.Pack(dr, _drKernels);
+        p = (gc, dr);
+        if (!_cpuPlans.TryAdd(key, p)) return _cpuPlans.TryGetValue(key, out var won) ? won : p;
         Interlocked.Increment(ref _poolsCreated);
-        EvictIfNeeded(pools, key, CpuPoolBudget, 1024);
+        // bound the cache (plans are managed; in-flight users keep theirs alive)
+        while (_cpuPlans.Count > MaxSizes)
+        {
+            long victim = -1;
+            foreach (long k in _cpuPlans.Keys) if (k != key) { victim = k; break; }
+            if (victim < 0 || !_cpuPlans.TryRemove(victim, out _)) break;
+            Interlocked.Increment(ref _poolsEvicted);
+        }
+        return p;
+    }
+
+    private SizePool<CpuWorker> CpuPool()
+    {
+        if (_cpuPool is { } p) return p;
+        p = new SizePool<CpuWorker>(MaxPerSize,
+            () => { Interlocked.Increment(ref _workersCreated); return new CpuWorker(); },
+            w => w.Bytes, CpuArenaBudget);
+        if (Interlocked.CompareExchange(ref _cpuPool, p, null) is { } won) { p.Dispose(); return won; }
         return p;
     }
 
@@ -97,29 +118,6 @@ public sealed class GcdrEnhancer : IDisposable
         return p;
     }
 
-    /// <summary>Per-pool footprint estimate for the eviction budget: activations ~1KB/px + 32MB base.</summary>
-    private static long Footprint(long key, int bytesPerPx) => ((key >> 16) * (key & 0xFFFF) + 1) * bytesPerPx + (32L << 20);
-
-    /// <summary>Bounded size cache: evict pools until total estimated footprint fits the
-    /// budget and count ≤ MaxSizes. A single over-budget pool is kept.</summary>
-    private void EvictIfNeeded<T>(ConcurrentDictionary<long, SizePool<T>> pools, long keep, long budget, int bytesPerPx)
-        where T : IDisposable
-    {
-        long total = 0; int n = 0;
-        foreach (long k in pools.Keys) { total += Footprint(k, bytesPerPx); n++; }
-        while ((n > MaxSizes || total > budget) && pools.Count > 1)
-        {
-            long victim = -1;
-            foreach (long k in pools.Keys) if (k != keep) { victim = k; break; }
-            if (victim < 0) return;
-            if (pools.TryRemove(victim, out var p))
-            {
-                p.Dispose();
-                total -= Footprint(victim, bytesPerPx); n--;
-                Interlocked.Increment(ref _poolsEvicted);
-            }
-        }
-    }
 
     /// <summary>
     /// Enhances a BGR uint8 HWC image: reads <paramref name="bgrSrc"/>
@@ -146,12 +144,15 @@ public sealed class GcdrEnhancer : IDisposable
         int ph = (-height) & 31, pw = (-width) & 31;
         int h = height + ph, w = width + pw;
 
-        var gcPool = CpuPool(true, h, w);
-        var drPool = CpuPool(false, h, w);
-        InferenceSession gc = gcPool.Rent();
-        InferenceSession dr = drPool.Rent();
+        var (gcPlan, drPlan) = CpuPlans(h, w);
+        var cpuPool = CpuPool();
+        CpuWorker worker = cpuPool.Rent();
         try
         {
+            var (gcArena, drArena) = worker.Arenas((long)gcPlan.ArenaFloats * sizeof(float), (long)drPlan.ArenaFloats * sizeof(float));
+            using var gc = new InferenceSession(gcPlan, gcArena);
+            using var dr = new InferenceSession(drPlan, drArena);
+
             // stage 0: fill GC input — BGR u8 → float /255, top/left replicate pad
             Span<float> x = gc.Input;
             if (CpuNhwc) PixelOps.BgrToNhwcPad(bgrSrc, width, height, srcStride, x, h, w, ph, pw);
@@ -181,11 +182,7 @@ public sealed class GcdrEnhancer : IDisposable
             if (CpuNhwc) PixelOps.NhwcToBgrCrop(dr.Output, h, w, ph, pw, bgrDst, width, height, dstStride);
             else PixelOps.NchwToBgrCrop(dr.Output, h, w, ph, pw, bgrDst, width, height, dstStride);
         }
-        finally
-        {
-            drPool.Return(dr);
-            gcPool.Return(gc);
-        }
+        finally { cpuPool.Return(worker); }
     }
 
     private static bool VulkanOk()
@@ -204,10 +201,64 @@ public sealed class GcdrEnhancer : IDisposable
 
     public void Dispose()
     {
-        foreach (var s in _gcPool.Values) s.Dispose();
-        foreach (var s in _drPool.Values) s.Dispose();
+        Interlocked.Exchange(ref _cpuPool, null)?.Dispose();
         Interlocked.Exchange(ref _vkPool, null)?.Dispose();
-        _gcPool.Clear(); _drPool.Clear();
+        _cpuPlans.Clear();
+    }
+
+    /// <summary>
+    /// Size-agnostic CPU worker: native gc/dr arenas, borrowed by per-call sessions.
+    /// Within <see cref="CpuArenaBudget"/> they only grow (25% headroom on regrowth),
+    /// so mixed sizes neither reallocate nor re-fault pages; an over-budget pair (one
+    /// huge image) drops to exact size once a size that fits comes along.
+    /// </summary>
+    private sealed unsafe class CpuWorker : IDisposable
+    {
+        private nint _gc, _dr;
+        private long _gcBytes, _drBytes;
+
+        public long Bytes => _gcBytes + _drBytes;
+
+        public (nint gc, nint dr) Arenas(long needGc, long needDr)
+        {
+            needGc = Math.Max(needGc, 64); needDr = Math.Max(needDr, 64);
+            bool shrink = _gc != 0 && _dr != 0 && _gcBytes + _drBytes > CpuArenaBudget && needGc + needDr <= CpuArenaBudget;
+            bool headroom = _gc != 0 && (needGc + needDr) / 4 * 5 <= CpuArenaBudget;
+            Ensure(ref _gc, ref _gcBytes, needGc, shrink, headroom);
+            Ensure(ref _dr, ref _drBytes, needDr, shrink, headroom);
+            return (_gc, _dr);
+        }
+
+        private static void Ensure(ref nint p, ref long bytes, long need, bool shrink, bool headroom)
+        {
+            if (p != 0 && bytes >= need && !shrink) return;
+            Release(ref p, ref bytes);
+            long cap = headroom && !shrink ? need / 4 * 5 : need;
+            p = (nint)NativeMemory.AllocZeroed((nuint)cap);
+            bytes = cap;
+            GC.AddMemoryPressure(cap);
+        }
+
+        private static void Release(ref nint p, ref long bytes)
+        {
+            if (p == 0) return;
+            NativeMemory.Free((void*)p);
+            GC.RemoveMemoryPressure(bytes);
+            p = 0; bytes = 0;
+        }
+
+        public void Dispose()
+        {
+            Release(ref _gc, ref _gcBytes);
+            Release(ref _dr, ref _drBytes);
+            GC.SuppressFinalize(this);
+        }
+
+        ~CpuWorker()
+        {
+            Release(ref _gc, ref _gcBytes);
+            Release(ref _dr, ref _drBytes);
+        }
     }
 
     /// <summary>Bounded rent/return pool of stateful workers (at most <c>max</c> idle and,
