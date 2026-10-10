@@ -1,5 +1,5 @@
 {
- "source": "RealDAE task_{color,shadow,bleed}_test, mixed; max edge 2600, webp q85; NN_gt.webp pairs when present (gt files are local-only, gitignored)",
+ "source": "RealDAE task_{color,shadow,bleed}_test, mixed; max edge 2600, webp q85; NN_gt.webp pairs when present",
  "images": [
   {
    "name": "01_color.webp",
