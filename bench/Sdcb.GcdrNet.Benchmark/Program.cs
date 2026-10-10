@@ -685,7 +685,7 @@ public static class Program
                 foreach (var (tag, ss) in new[] { ("gc", s1), ("dr", s2) })
                 {
                     Console.WriteLine($"--- {tag} top nodes (ms/run) ---");
-                    foreach (var (i, n, t) in ss.NodeProfile().OrderByDescending(x => x.t).Take(14))
+                    foreach (var (i, n, t) in ss.NodeProfile().OrderByDescending(x => x.t).Take(int.TryParse(Environment.GetEnvironmentVariable("GCDRNET_PROF_TOP"), out int top) ? top : 14))
                     {
                         string extra = n.P is ConvP cp ? $" k{cp.Kernel[0]} s{cp.Strides[0]} g{cp.Group}" : "";
                         Console.WriteLine($"  #{i,-3} {n.Op,-14}{extra,-12} {string.Join('x', ss.ShapeOf(n.In[0]))}->{string.Join('x', ss.ShapeOf(n.Out[0]))}  {t.TotalMilliseconds / (reps + 1),7:F2}");
