@@ -35,7 +35,13 @@ rem more, narrower (64x16) subgroup strips per tile measured fastest on the Rade
 "%GLSLC%" %O% -DLITE -DSGX=4u -DSGY=2u -DTSM=4u -DTSN=1u -DNTHR=256 "%CM%" -o "%DIR%\conv_cm_l_n64_h.spv" || exit /b 1
 "%GLSLC%" %O% -DLITE -DSGX=2u -DSGY=2u -DTSM=4u -DTSN=1u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_l_n32_h.spv" || exit /b 1
 "%GLSLC%" %O% -DLITE -DSCALARK -DSGX=1u -DSGY=4u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_l_n32s_h.spv" || exit /b 1
-rem subgroup-size probe for pinned (requiredSubgroupSize = 32) pipelines
+rem SG16: 8x16x16 fragments on 16-lane subgroups (Intel Xe2 XMX), LITE staging, BM = 128;
+rem a 16x32 strip per subgroup, eight stacked along M, measured fastest on the Arc B580
+"%GLSLC%" %O% -DLITE -DSG16 -DSGX=4u -DSGY=8u -DTSM=2u -DTSN=2u -DNTHR=512 "%CM%" -o "%DIR%\conv_cm_sg16_h.spv" || exit /b 1
+"%GLSLC%" %O% -DLITE -DSG16 -DSGX=2u -DSGY=8u -DTSM=2u -DTSN=2u -DNTHR=256 "%CM%" -o "%DIR%\conv_cm_sg16_n64_h.spv" || exit /b 1
+"%GLSLC%" %O% -DLITE -DSG16 -DSGX=1u -DSGY=8u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_sg16_n32_h.spv" || exit /b 1
+"%GLSLC%" %O% -DLITE -DSG16 -DSCALARK -DSGX=1u -DSGY=8u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_sg16_n32s_h.spv" || exit /b 1
+rem subgroup-size probe for pinned (requiredSubgroupSize = 32 / 16) pipelines
 "%GLSLC%" %O% "%DIR%\sgprobe.comp" -o "%DIR%\sgprobe.spv" || exit /b 1
 exit /b 0
 
