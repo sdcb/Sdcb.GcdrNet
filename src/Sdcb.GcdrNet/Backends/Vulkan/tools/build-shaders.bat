@@ -13,7 +13,7 @@ if not exist "%GLSLC%" (
 set "DIR=%~dp0..\Shaders"
 set "O=-O --target-env=vulkan1.1"
 for %%f in ("%DIR%\*.comp") do (
-    if not "%%~nxf"=="conv_tile.comp" if not "%%~nxf"=="conv_cm.comp" if not "%%~nxf"=="sgprobe.comp" (
+    if not "%%~nxf"=="conv_tile.comp" if not "%%~nxf"=="conv_cm.comp" if not "%%~nxf"=="sgprobe.comp" if not "%%~nxf"=="conv_dot.comp" if not "%%~nxf"=="gemm_dot.comp" (
         echo glslc %%~nxf
         "%GLSLC%" %O% "%%f" -o "%%~dpnf.spv" || exit /b 1
         "%GLSLC%" %O% -DF16 "%%f" -o "%%~dpnf_h.spv" || exit /b 1
@@ -41,6 +41,15 @@ rem a 16x32 strip per subgroup, eight stacked along M, measured fastest on the A
 "%GLSLC%" %O% -DLITE -DSG16 -DSGX=2u -DSGY=8u -DTSM=2u -DTSN=2u -DNTHR=256 "%CM%" -o "%DIR%\conv_cm_sg16_n64_h.spv" || exit /b 1
 "%GLSLC%" %O% -DLITE -DSG16 -DSGX=1u -DSGY=8u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_sg16_n32_h.spv" || exit /b 1
 "%GLSLC%" %O% -DLITE -DSG16 -DSCALARK -DSGX=1u -DSGY=8u -DTSM=2u -DTSN=2u -DNTHR=128 "%CM%" -o "%DIR%\conv_cm_sg16_n32s_h.spv" || exit /b 1
+rem wide-wave no-coopmat GPUs (Adreno): register-tiled direct kernels, fp16 storage only
+set "CD=%DIR%\conv_dot.comp"
+"%GLSLC%" %O% -DSW=1u -DTM=4 -DTN=2 "%CD%" -o "%DIR%\conv_dot_s1_4x2_h.spv" || exit /b 1
+"%GLSLC%" %O% -DSW=1u -DTM=4 -DTN=1 "%CD%" -o "%DIR%\conv_dot_s1_4x1_h.spv" || exit /b 1
+"%GLSLC%" %O% -DSW=2u -DTM=2 -DTN=2 "%CD%" -o "%DIR%\conv_dot_s2_2x2_h.spv" || exit /b 1
+"%GLSLC%" %O% -DSW=2u -DTM=2 -DTN=1 "%CD%" -o "%DIR%\conv_dot_s2_2x1_h.spv" || exit /b 1
+"%GLSLC%" %O% "%DIR%\gemm_dot.comp" -o "%DIR%\gemm_dot_h.spv" || exit /b 1
+"%GLSLC%" %O% -DF16 -DPIXELS_INNER "%DIR%\convpool.comp" -o "%DIR%\convpool_pi_h.spv" || exit /b 1
+"%GLSLC%" %O% -DF16 -DNP=2u "%DIR%\uphead_sc.comp" -o "%DIR%\uphead_sc2_h.spv" || exit /b 1
 rem subgroup-size probe for pinned (requiredSubgroupSize = 32 / 16) pipelines
 "%GLSLC%" %O% "%DIR%\sgprobe.comp" -o "%DIR%\sgprobe.spv" || exit /b 1
 exit /b 0

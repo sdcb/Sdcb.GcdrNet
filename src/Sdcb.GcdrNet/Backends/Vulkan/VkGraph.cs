@@ -187,7 +187,7 @@ internal sealed class VkGraphModel : IDisposable
     /// dense, channel counts in 16 B quads, an epilogue it implements, M within the grid limit.</summary>
     private static bool UseCoopConv(VkDevice dev, bool f16, ExecPlan plan, ExecNode n, ConvP cp)
     {
-        if (!dev.CoopMat16 || !f16 || cp.Group != 1 || cp.Pool is not null || cp.Dilations.Any(d => d != 1)) return false;
+        if (!dev.CoopMat16 || dev.ConvDot || !f16 || cp.Group != 1 || cp.Pool is not null || cp.Dilations.Any(d => d != 1)) return false;
         if (cp.Act is not (ActivationKind.None or ActivationKind.Relu or ActivationKind.Gelu)) return false;
         if (cp.PadMode == PadMode.Constant && cp.PadValue != 0f) return false;
         int[] si = plan.Values[n.In[0]].PhysShape, so = plan.Values[n.Out[0]].PhysShape;   // [1,h,w,c]
@@ -211,7 +211,7 @@ internal sealed class VkGraphModel : IDisposable
     /// on a coopmat device, const B, K/N in 16 B quads, relu/gelu/none epilogue.</summary>
     private static bool UseCoopGemm(VkDevice dev, bool f16, ExecPlan plan, ExecNode n, GemmP gp)
     {
-        if (!dev.CoopMat16 || !f16 || plan.Values[n.In[1]].Floats is null || plan.Values[n.In[1]].Shape.Length != 2) return false;
+        if (!dev.CoopMat16 || dev.ConvDot || !f16 || plan.Values[n.In[1]].Floats is null || plan.Values[n.In[1]].Shape.Length != 2) return false;
         // B packed per value: only when no other node reads it (its transB could differ)
         if (plan.Nodes.Count(m => m.In.Contains(n.In[1])) != 1) return false;
         if (gp.Act is not (ActivationKind.None or ActivationKind.Relu or ActivationKind.Gelu)) return false;
@@ -365,7 +365,8 @@ internal sealed class VkGraphModel : IDisposable
                     uint pf = (p.BiasValue >= 0 ? 1u : 0u) | (p.PadMode == PadMode.Reflect ? 2u : 0u)
                         | (p.Act == ActivationKind.Relu ? 4u : 0u) | (pool.FuseRelu ? 8u : 0u);
                     bool k3 = _dev.ConvPoolK3 && p.Kernel[0] == 3 && p.Kernel[1] == 3;
-                    yield return ND(k3 ? "convpool_k3" : "convpool",
+                    string cpName = k3 ? "convpool_k3" : _dev.ConvDot && F16 && cw[0] % 8 == 0 ? "convpool_pi" : "convpool";
+                    yield return ND(cpName,
                         [Bind(n.In[0]), Bind(n.In[1], CK.ConvW), B(p.BiasValue, CK.F32), Bind(n.Out[0])],
                         PcOfF(U(ci[3], ci[1], ci[2], cw[0], co[1], co[2], p.Kernel[0], p.Kernel[1], p.Pads[0], p.Pads[1], (int)pf),
                             p.PadMode == PadMode.Constant ? p.PadValue : 0f),
@@ -420,6 +421,20 @@ internal sealed class VkGraphModel : IDisposable
                     p.Kernel[0] == 3 && p.Kernel[1] == 3 && p.Strides[0] == 2 && p.Strides[1] == 2 ? "conv_k33s2" :
                     p.Kernel[0] == 1 && p.Kernel[1] == 1 && p.Strides[0] == 1 && p.Strides[1] == 1 ? "conv_k11s1" :
                     "conv_gen";
+                if (_dev.ConvDot && F16 && convShader is "conv_k33s1" or "conv_k33s2" && ic % 4 == 0 && oc % 4 == 0)
+                {
+                    // Adreno 750 sweep (ms, 1600x1152 gc+dr): stride 1 at 4 px x 8 oc, stride 2 at 2 px x 8 oc
+                    uint tm = p.Strides[1] == 1 ? 4u : 2u, tn = oc % 8 == 0 ? 2u : 1u;
+                    uint threads = oc / (4 * tn) * ((ow + tm - 1) / tm) * oh;
+                    uint wgs = (threads + 63) / 64, gx = Math.Min(wgs, 32768u);
+                    yield return ND($"conv_dot_s{p.Strides[1]}_{tm}x{tn}",
+                        [Bind(n.In[0]), Bind(n.In[1], CK.ConvW), B(p.BiasValue, CK.F32), B(p.AddValue), Bind(n.Out[0])],
+                        PcOf(ic, ih, iw, oc, oh, ow, (uint)p.Kernel[0], (uint)p.Kernel[1],
+                            (uint)p.Strides[0], (uint)p.Strides[1], (uint)p.Pads[0], (uint)p.Pads[1],
+                            flags, 0),
+                        gx, (wgs + gx - 1) / gx, name: "conv");
+                    break;
+                }
                 yield return ND(convShader,
                     [Bind(n.In[0]), Bind(n.In[1], CK.ConvW), B(p.BiasValue, CK.F32), B(p.AddValue), Bind(n.Out[0])],
                     PcOf(ic, ih, iw, oc, oh, ow, (uint)p.Kernel[0], (uint)p.Kernel[1],
@@ -477,6 +492,16 @@ internal sealed class VkGraphModel : IDisposable
                 uint gflags = (p.TransB ? 1u : 0u) | (p.BiasValue >= 0 ? 2u : 0u)
                     | (p.Act == ActivationKind.Relu ? 4u : 0u)
                     | (p.Act == ActivationKind.Gelu ? 8u : 0u);
+                if (_dev.ConvDot && F16 && !p.TransB && k % 4 == 0 && nn % 8 == 0)
+                {
+                    // 4 rows x 8 columns per invocation
+                    uint gth = nn / 8 * ((m + 3) / 4);
+                    uint gwg = (gth + 63) / 64, ggx = Math.Min(gwg, 32768u);
+                    yield return ND("gemm_dot",
+                        [Bind(n.In[0]), Bind(n.In[1]), B(p.BiasValue, CK.F32), Bind(n.Out[0])],
+                        PcOf(m, nn, k, gflags), ggx, (gwg + ggx - 1) / ggx, name: "gemm");
+                    break;
+                }
                 yield return ND("gemm",
                     [Bind(n.In[0]), Bind(n.In[1]), B(p.BiasValue, CK.F32), Bind(n.Out[0])],
                     PcOf(m, nn, k, gflags),
@@ -519,13 +544,14 @@ internal sealed class VkGraphModel : IDisposable
                         throw new NotSupportedException("Vulkan UpHead: unsupported skip conv");
                     uint cf = (sc.BiasValue >= 0 ? 1u : 0u) | (sc.PadMode == PadMode.Reflect ? 2u : 0u)
                         | (sc.Act == ActivationKind.Relu ? 4u : 0u);
-                    yield return ND("uphead_sc",
+                    uint np = _dev.ConvDot && F16 ? 2u : 1u;
+                    yield return ND(np > 1 ? $"uphead_sc{np}" : "uphead_sc",
                         [Bind(n.In[0]), Bind(n.In[1]), Bind(n.In[2]), hasBias ? Bind(n.In[3], CK.F32) : B(-1, CK.F32), Bind(n.Out[0]),
                          Bind(p.SkipW, CK.ConvW), B(p.SkipB, CK.F32)],
                         PcOfF([c, (uint)si[1], (uint)si[2], (uint)so[1], (uint)so[2], oc, flags],
                             p.Scales[2], p.Scales[3]).Concat(PcOfF(U(xi[3], sc.Kernel[0], sc.Kernel[1], sc.Pads[0], sc.Pads[1], (int)cf),
                             sc.PadMode == PadMode.Constant ? sc.PadValue : 0f)).ToArray(),
-                        G((uint)so[1] * (uint)so[2]), name: "uphead_sc");
+                        G((uint)so[1] * (((uint)so[2] + np - 1) / np)), name: "uphead_sc");
                     break;
                 }
                 yield return ND("uphead",

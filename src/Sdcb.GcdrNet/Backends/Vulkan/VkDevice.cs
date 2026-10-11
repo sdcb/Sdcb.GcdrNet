@@ -46,6 +46,12 @@ internal unsafe sealed class VkDevice : IDisposable
     /// <summary>3x3 stem conv+pool uses convpool_k3 (input window rows in registers): Intel GPUs
     /// (Arc B580: 7.5 -> 4.9 ms for the two stems) (GCDRNET_VK_CONVPOOL3=0 disables).</summary>
     public bool ConvPoolK3;
+    /// <summary>Register-tiled kernels for GPUs without cooperative matrices whose compute subgroups
+    /// are at least 64 lanes (Adreno 750: 64/128, 32 KB shared memory), where conv_tile / gemm's
+    /// shared-memory staging is load-bound: 3x3 convs on conv_dot.comp, Gemm on gemm_dot.comp,
+    /// the stem conv+pool with the four pool pixels per weight load (convpool_pi) and the UpHead
+    /// tail two pixels per invocation (uphead_sc2). fp16 storage only (GCDRNET_VK_DOT=0 disables).</summary>
+    public bool ConvDot;
     private const uint VendorIntel = 0x8086;
     /// <summary>Largest DEVICE_LOCAL heap (bytes).</summary>
     public ulong DeviceLocalHeap;
@@ -373,12 +379,16 @@ internal unsafe sealed class VkDevice : IDisposable
             d.CoopLite = false;
             d.CoopSubgroupSize = 0;
         }
+        d.ConvDot = !d.CoopMat16 && hasSgc && d.SubgroupMin >= 64 && d.StorageBuffer16
+            && Environment.GetEnvironmentVariable("GCDRNET_VK_DOT") != "0";
         if (Environment.GetEnvironmentVariable("GCDRNET_VK_VERBOSE") == "1")
         {
-            Console.Error.WriteLine($"[vk] device={d.DeviceName} type={props.DeviceType} vendor=0x{d.VendorId:x4} qfamily={d.QueueFamily} " +
+            Console.Error.WriteLine($"[vk] device={d.DeviceName} type={props.DeviceType} vendor=0x{d.VendorId:x4} " +
+                $"api={props.ApiVersion >> 22}.{(props.ApiVersion >> 12) & 0x3ff}.{props.ApiVersion & 0xfff} driver=0x{props.DriverVersion:x8} qfamily={d.QueueFamily} " +
                 $"sg={d.SubgroupSize} sgRange={d.SubgroupMin}-{d.SubgroupMax} sgcCompute={sgcCompute} push={d.PushDescriptors} " +
                 $"coopmat={d.CoopMat16} coopSg={(d.CoopSubgroupSize == 0 ? "default" : d.CoopSubgroupSize.ToString())} " +
-                $"m8={d.CoopM8} fullSg={d._fullSubgroups} lite={d.CoopLite} vec4={d.Vec4Eltwise} cp3={d.ConvPoolK3} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
+                $"m8={d.CoopM8} fullSg={d._fullSubgroups} lite={d.CoopLite} vec4={d.Vec4Eltwise} cp3={d.ConvPoolK3} " +
+                $"dot={d.ConvDot} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
             for (uint i = 0; i < nqf; i++)
                 Console.Error.WriteLine($"[vk] qf{i}: flags=0x{qf[i].QueueFlags:x} count={qf[i].QueueCount} tsbits={qf[i].TimestampValidBits}"
                     + (i == d.QueueFamily ? " <- selected" : ""));

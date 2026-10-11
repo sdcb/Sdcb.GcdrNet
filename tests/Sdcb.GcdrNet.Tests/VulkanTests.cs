@@ -134,3 +134,46 @@ public class VulkanTests
         catch { return false; }
     }
 }
+
+/// <summary>The register-tiled wide-wave route (<see cref="VkDevice.ConvDot"/>: conv_dot, gemm_dot,
+/// convpool_pi, uphead_sc2), forced on whatever device runs the tests: the shaders use no
+/// subgroup operations, so any fp16-storage GPU validates their math against the golden data.</summary>
+[Collection(TierToggle.Name)]
+public class VulkanConvDotTests
+{
+    private static string GcPath => Path.Combine(Golden.Dir, "models", "gcdrnet_gcnet_sim.onnx");
+    private static string DrPath => Path.Combine(Golden.Dir, "models", "gcdrnet_drnet_sim.onnx");
+
+    [SkippableTheory]
+    [InlineData("gc", "small", "input", "shadow")]
+    [InlineData("gc", "pad", "input", "shadow")]
+    [InlineData("gc", "mid", "input", "shadow")]
+    [InlineData("dr", "small", "dr_in", "output")]
+    [InlineData("dr", "pad", "dr_in", "output")]
+    [InlineData("dr", "mid", "dr_in", "output")]
+    public void ConvDotRoute_MatchesGolden(string which, string tag, string inName, string outName)
+    {
+        VkDevice dev;
+        try { dev = VkBackend.Default.Dev; }
+        catch { dev = null!; }
+        Skip.If(dev is null || !VkBackend.Default.F16, "needs a Vulkan device with fp16 storage");
+
+        float[] input = Golden.F32(tag, inName);
+        int[] shape = Golden.ShapeOf(tag, inName);
+        float[] expect = Golden.F32(tag, outName);
+        bool saved = dev.ConvDot;
+        dev.ConvDot = true;
+        try
+        {
+            // a fresh model instance: graphs are cached per model, so this compiles a new one
+            OnnxModel m = OnnxModel.Load(which == "gc" ? GcPath : DrPath);
+            using var sess = VkBackend.Default.NewSession(m, shape);
+            Assert.Contains(VkBackend.Default.GraphFor(m, shape).Dispatches, d => d.Name!.StartsWith("conv_dot", StringComparison.Ordinal));
+            input.CopyTo(sess.Input);
+            sess.Run();
+            var (max, rmse, _) = Golden.Diff(sess.Output, expect);
+            Assert.True(max < 2e-2f, $"{which}-convdot[{tag}] max diff {max} rmse {rmse}");
+        }
+        finally { dev.ConvDot = saved; }
+    }
+}

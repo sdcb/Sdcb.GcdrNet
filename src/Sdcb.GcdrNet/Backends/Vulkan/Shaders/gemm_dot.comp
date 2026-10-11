@@ -1,0 +1,89 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+// GEMM C[M,N] = A[M,K] * B[K,N] + bias[N] for the conv_dot devices (wide waves, no
+// cooperative matrices): conv_dot.comp's register tiling for a 1x1 "conv" without
+// shared memory. Each invocation computes TM rows x TN*4 columns from f16vec4 loads
+// (n4 fastest across the wave: A loads broadcast, B loads coalesce). Requires fp16
+// storage, !transB, K % 4 == 0 and N % (4*TN) == 0. fp32 accumulation, K in order.
+// Push constants as gemm.comp (flags: bit0 transB (unsupported), bit1 bias, bit2 relu,
+// bit3 gelu).
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer A  { f16vec4 a[]; };
+layout(set = 0, binding = 1) readonly buffer B  { f16vec4 b[]; };
+layout(set = 0, binding = 2) readonly buffer BS { float bs[]; };
+layout(set = 0, binding = 3) writeonly buffer O { f16vec4 o[]; };
+
+layout(push_constant) uniform PC {
+    uint m, n, k;
+    uint flags;
+} p;
+
+#ifndef TM
+#define TM 4
+#endif
+#ifndef TN
+#define TN 2
+#endif
+
+float ferf(float v)
+{
+    float s = v < 0.0 ? -1.0 : 1.0;
+    float ax = abs(v);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+    return (1.0 - poly * exp(-ax * ax)) * s;
+}
+
+void main()
+{
+    uint ng = p.n / uint(4 * TN);
+    uint gid = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint mg = (p.m + uint(TM) - 1u) / uint(TM);
+    if (gid >= ng * mg) return;
+    uint g = gid % ng, m0 = (gid / ng) * uint(TM);
+    uint k4 = p.k >> 2, n4s = p.n >> 2, n40 = g * uint(TN);
+
+    vec4 acc[TM * TN];
+    [[unroll]] for (int i = 0; i < TM * TN; i++) acc[i] = vec4(0.0);
+    uint arow[TM];
+    [[unroll]] for (int i = 0; i < TM; i++) arow[i] = min(m0 + uint(i), p.m - 1u) * k4;
+
+    for (uint kk = 0u; kk < k4; kk++)
+    {
+        vec4 av[TM];
+        [[unroll]] for (int i = 0; i < TM; i++) av[i] = vec4(a[arow[i] + kk]);
+        uint brow = kk * 4u * n4s + n40;
+        [[unroll]] for (int j = 0; j < TN; j++)
+        {
+            vec4 w0 = vec4(b[brow + uint(j)]);
+            vec4 w1 = vec4(b[brow + n4s + uint(j)]);
+            vec4 w2 = vec4(b[brow + 2u * n4s + uint(j)]);
+            vec4 w3 = vec4(b[brow + 3u * n4s + uint(j)]);
+            [[unroll]] for (int i = 0; i < TM; i++)
+                acc[i * TN + j] += av[i].x * w0 + av[i].y * w1 + av[i].z * w2 + av[i].w * w3;
+        }
+    }
+
+    bool hasBias = (p.flags & 2u) != 0u, relu = (p.flags & 4u) != 0u, gelu = (p.flags & 8u) != 0u;
+    [[unroll]] for (int j = 0; j < TN; j++)
+    {
+        uint n4 = n40 + uint(j), c0 = n4 * 4u;
+        vec4 bias = hasBias ? vec4(bs[c0], bs[c0 + 1u], bs[c0 + 2u], bs[c0 + 3u]) : vec4(0.0);
+        [[unroll]] for (int i = 0; i < TM; i++)
+        {
+            uint row = m0 + uint(i);
+            if (row < p.m)
+            {
+                vec4 v = acc[i * TN + j] + bias;
+                if (relu) v = max(v, vec4(0.0));
+                if (gelu) v = vec4(0.5 * v.x * (1.0 + ferf(v.x * 0.7071067811865475)),
+                                   0.5 * v.y * (1.0 + ferf(v.y * 0.7071067811865475)),
+                                   0.5 * v.z * (1.0 + ferf(v.z * 0.7071067811865475)),
+                                   0.5 * v.w * (1.0 + ferf(v.w * 0.7071067811865475)));
+                o[row * n4s + n4] = f16vec4(v);
+            }
+        }
+    }
+}
