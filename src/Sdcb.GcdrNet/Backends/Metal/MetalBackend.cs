@@ -16,12 +16,6 @@ internal sealed class MetalBackend : IDisposable
 
     private static readonly Lazy<MetalBackend> s_default = new(() => new MetalBackend());
     internal static MetalBackend Default => s_default.Value;
-    /// <summary>Metal availability: a usable device that supports simdgroup MMA (Apple7+).</summary>
-    internal static bool Available()
-    {
-        try { return Default.Dev is not null; }
-        catch { return false; }
-    }
 
     internal static CompileOptions PlanOptions => new(Nhwc: true, PhysicalIo: false, Gpu: true);
     internal static CompileOptions PipeOptions => new(Nhwc: true, PhysicalIo: true, Gpu: true);
