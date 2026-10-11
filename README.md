@@ -58,14 +58,14 @@ Snapdragon 8 Gen 3 (realme GT5 Pro, Android 16; Adreno 750 without coopmat, 64/1
 | Package | Contents |
 |---|---|
 | `Sdcb.SimdGcdrNet` | the engine (CPU / Vulkan / Metal); ships LINQPad samples (System.Drawing, ImageSharp, OpenCvSharp, SkiaSharp + SimdPaddleOCR) |
-| `Sdcb.SimdGcdrNet.Models` | the GC-Net + DR-Net ONNX models (~21 MB) as embedded resources |
+| `Sdcb.SimdGcdrNet.Models` | the GC-Net + DR-Net ONNX models (~21 MB) as embedded resources; no dependencies, versioned independently of the engine |
 
 ```csharp
 using Sdcb.SimdGcdrNet;
 using Sdcb.SimdGcdrNet.Models;
 
 // Auto: Metal on macOS Apple Silicon, else Vulkan, else CPU. Also: Cpu (default) / Vulkan / Metal.
-using GcdrEnhancer enh = GcdrModels.CreateEnhancer(GcdrBackend.Auto);
+using GcdrEnhancer enh = GcdrEnhancer.FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet, GcdrBackend.Auto);
 // without the models package: GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx", ...)
 // (models in tests/testdata/models), or FromBytes / FromStreams
 
@@ -189,14 +189,14 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 | 包 | 内容 |
 |---|---|
 | `Sdcb.SimdGcdrNet` | 推理引擎（CPU / Vulkan / Metal）；附带 LINQPad 示例（System.Drawing、ImageSharp、OpenCvSharp、SkiaSharp + SimdPaddleOCR） |
-| `Sdcb.SimdGcdrNet.Models` | GC-Net + DR-Net 两个 ONNX 模型（约 21 MB），以嵌入资源形式提供 |
+| `Sdcb.SimdGcdrNet.Models` | GC-Net + DR-Net 两个 ONNX 模型（约 21 MB），以嵌入资源形式提供；无任何依赖，版本独立于引擎 |
 
 ```csharp
 using Sdcb.SimdGcdrNet;
 using Sdcb.SimdGcdrNet.Models;
 
 // Auto：macOS Apple Silicon 优先 Metal，否则 Vulkan，最后 CPU；也可显式 Cpu（默认）/ Vulkan / Metal
-using GcdrEnhancer enh = GcdrModels.CreateEnhancer(GcdrBackend.Auto);
+using GcdrEnhancer enh = GcdrEnhancer.FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet, GcdrBackend.Auto);
 // 不用模型包：GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx", ...)
 // （模型见 tests/testdata/models），或 FromBytes / FromStreams
 

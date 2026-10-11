@@ -85,6 +85,19 @@ public sealed class GcdrEnhancer : IDisposable
         return new(OnnxModel.Load(gcnetOnnx), OnnxModel.Load(drnetOnnx), backend);
     }
 
+    /// <summary>Opens, reads and disposes both ONNX model streams, e.g.
+    /// <c>FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet)</c> with the
+    /// Sdcb.SimdGcdrNet.Models package.</summary>
+    public static GcdrEnhancer FromStreams(Func<Stream> openGcnetOnnx, Func<Stream> openDrnetOnnx,
+        GcdrBackend backend = GcdrBackend.Cpu)
+    {
+        ArgumentNullException.ThrowIfNull(openGcnetOnnx);
+        ArgumentNullException.ThrowIfNull(openDrnetOnnx);
+        using Stream gc = openGcnetOnnx();
+        using Stream dr = openDrnetOnnx();
+        return FromStreams(gc, dr, backend);
+    }
+
     // pipeline sessions keep I/O in plan layout: the glue kernels below read/write
     // channels-last directly, so the plan has no boundary relayouts
     private static readonly CompileOptions CpuPlan = new(CompileOptions.DefaultNhwc, PhysicalIo: true);

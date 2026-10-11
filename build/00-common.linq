@@ -21,9 +21,8 @@ static void NuGetRun(string args) => Run(@".\nuget.exe", args, Encoding.GetEncod
 static void DotNetRun(string args) => Run("dotnet", args.Dump(), Encoding.GetEncoding("utf-8"));
 static void Run(string exe, string args, Encoding encoding) => Util.Cmd(exe, args, encoding);
 
-// Independent package versions: Sdcb.SimdGcdrNet ships often, Sdcb.SimdGcdrNet.Models only when the
-// models change. Keep the Directory.Build.props defaults in sync. Never pack with -p:Version=;
-// it is global and would also become the models package's Sdcb.SimdGcdrNet dependency version.
+// Independent package versions: Sdcb.SimdGcdrNet ships often, Sdcb.SimdGcdrNet.Models (no
+// dependencies) only when the models change. Keep the Directory.Build.props defaults in sync.
 static ProjectVersion[] Projects =
 {
 	new("Sdcb.SimdGcdrNet", "0.1.0"),

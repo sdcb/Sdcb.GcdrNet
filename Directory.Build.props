@@ -1,8 +1,7 @@
 <Project>
   <!--
-    Independent NuGet versions. Edit here and keep build/00-common.linq in sync.
-    Pack with these properties, not -p:Version= (a global Version would also become the
-    Sdcb.SimdGcdrNet dependency version of the models package).
+    Independent NuGet versions (the models package has no dependencies, so engine releases
+    never force a models release). Edit here and keep build/00-common.linq in sync.
   -->
   <PropertyGroup>
     <SdcbSimdGcdrNetVersion Condition="'$(SdcbSimdGcdrNetVersion)' == ''">0.1.0</SdcbSimdGcdrNetVersion>
@@ -47,7 +46,7 @@
     <PackageId>Sdcb.SimdGcdrNet.Models</PackageId>
     <Version>$(SdcbSimdGcdrNetModelsVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Embedded GCDRNet ONNX models (GC-Net + DR-Net) for Sdcb.SimdGcdrNet: GcdrModels.CreateEnhancer() with no model files to deploy.</Description>
+    <Description>Embedded GCDRNet ONNX models (GC-Net + DR-Net) for Sdcb.SimdGcdrNet, no dependencies: GcdrEnhancer.FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet) with no model files to deploy.</Description>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">

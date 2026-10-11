@@ -5,8 +5,8 @@
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Sdcb.SimdGcdrNet\Sdcb.SimdGcdrNet.csproj" />
-    <!-- single source of truth: the simplified models the tests and benchmarks use -->
+    <!-- no dependency on Sdcb.SimdGcdrNet: engine releases don't force a models release.
+         Single source of truth: the simplified models the tests and benchmarks use. -->
     <EmbeddedResource Include="..\..\tests\testdata\models\gcdrnet_gcnet_sim.onnx" LogicalName="gcnet.onnx" Link="gcnet.onnx" />
     <EmbeddedResource Include="..\..\tests\testdata\models\gcdrnet_drnet_sim.onnx" LogicalName="drnet.onnx" Link="drnet.onnx" />
   </ItemGroup>
