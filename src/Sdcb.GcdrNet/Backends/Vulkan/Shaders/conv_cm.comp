@@ -25,6 +25,9 @@
 // subgroup tile fits in 20 KB; scalar epilogue; workgroups rastered in groups of RASTER
 // N-columns so the tiles in flight share A strips in L2. Same k order and epilogue math as
 // the default build.
+// SG16 (with LITE; Intel Xe2 XMX, after SimdPaddleOCR's conv1x1_cm): 16-lane subgroups
+// (requiredSubgroupSize = 16) and the 8x16x16 shape — A and accumulator fragments are 8
+// rows, so a TSM*8 x TSN*16 strip per subgroup; staging, k order and epilogue as LITE.
 // flags: bit0 bias, bit1 residual, bit2 reflect pad, bits[4:6] act (0 none, 1 relu, 2 gelu)
 
 #ifndef TSM
@@ -42,12 +45,23 @@
 #ifndef NTHR
 #define NTHR 256
 #endif
+#ifdef SG16
+#ifndef LITE
+#error SG16 requires LITE
+#endif
+#define SGSZ 16u
+#define AM 8                           // A / accumulator fragment rows
+#define AMU 8u
+#else
 #define SGSZ 32u
+#define AM 16
+#define AMU 16u
+#endif
 #define RASTER 4u
 
 layout(local_size_x = NTHR) in;
 
-const uint STRM = TSM * 16u;
+const uint STRM = TSM * AMU;
 const uint STRN = TSN * 16u;
 const uint BM = SGY * STRM;
 const uint BN = SGX * STRN;
@@ -78,7 +92,7 @@ layout(push_constant) uniform PC {
 #ifdef LITE
 const uint LDS4 = LDS / 2u;                // row stride in 16 B units
 const uint SM_AB = (BM + BN) * LDS4;       // A rows, then B rows (single buffer)
-const uint SM_ST = NTHR / SGSZ * 64u;      // one 16x16 fp32 tile per subgroup (epilogue)
+const uint SM_ST = NTHR / SGSZ * (AMU * 4u);   // one AMx16 fp32 tile per subgroup (epilogue)
 shared uvec4 smem[SM_AB > SM_ST ? SM_AB : SM_ST];
 #else
 shared f16vec4 sA[2u * BM * LDS];
@@ -220,10 +234,10 @@ void main()
     bool hasRes = (p.flags & 2u) != 0u;
     bool reflect = (p.flags & 4u) != 0u;
 
-    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc[TSM][TSN];
+    coopmat<float, gl_ScopeSubgroup, AM, 16, gl_MatrixUseAccumulator> acc[TSM][TSN];
     [[unroll]] for (uint i = 0u; i < TSM; i++)
         [[unroll]] for (uint j = 0u; j < TSN; j++)
-            acc[i][j] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0f);
+            acc[i][j] = coopmat<float, gl_ScopeSubgroup, AM, 16, gl_MatrixUseAccumulator>(0.0f);
 
     uint kq = tid % BKQ;
     uint r0 = tid / BKQ;
@@ -242,7 +256,7 @@ void main()
     storeSlice(ra, rb, va, vb, 0u, r0, kq);
     barrier();
 
-    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> ma[TSM];
+    coopmat<float16_t, gl_ScopeSubgroup, AM, 16, gl_MatrixUseA> ma[TSM];
     coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> mb[TSN];
 #ifdef LITE
     uint ab = sgy * STRM * LDS4, bb = (BM + sgx * STRN) * LDS4;
@@ -251,7 +265,7 @@ void main()
         if (more) loadSlice(ra, rb, va, vb, kt + 1u, n0, r0, kq, reflect);
         [[unroll]] for (uint kk = 0u; kk < BKV / 2u; kk += 2u) {
             [[unroll]] for (uint i = 0u; i < TSM; i++)
-                coopMatLoad(ma[i], smem, ab + i * 16u * LDS4 + kk, LDS4, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatLoad(ma[i], smem, ab + i * AMU * LDS4 + kk, LDS4, gl_CooperativeMatrixLayoutRowMajor);
             [[unroll]] for (uint j = 0u; j < TSN; j++)
                 coopMatLoad(mb[j], smem, bb + j * 16u * LDS4 + kk, LDS4, gl_CooperativeMatrixLayoutColumnMajor);
             [[unroll]] for (uint i = 0u; i < TSM; i++)
@@ -284,18 +298,18 @@ void main()
 #endif
 
 #ifdef LITE
-    // lane owns elements lane + 32l of each 16x16 tile: scalar fp16 stores, half-row coalesced
+    // lane owns elements lane + SGSZ*l of each AMx16 tile: scalar fp16 stores, coalesced rows
     [[unroll]] for (uint i = 0u; i < TSM; i++) {
         [[unroll]] for (uint j = 0u; j < TSN; j++) {
-            coopMatStore(acc[i][j], smem, sg * 64u, 4u, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatStore(acc[i][j], smem, sg * (AMU * 4u), 4u, gl_CooperativeMatrixLayoutRowMajor);
             subgroupMemoryBarrierShared();
             subgroupBarrier();
-            uint fr = m0 + sgy * STRM + i * 16u, cn = n0 + sgx * STRN + j * 16u;
-            for (uint l = 0u; l < 8u; l++) {
-                uint e = l * 32u + lane;
+            uint fr = m0 + sgy * STRM + i * AMU, cn = n0 + sgx * STRN + j * 16u;
+            for (uint l = 0u; l < AMU * 16u / SGSZ; l++) {
+                uint e = l * SGSZ + lane;
                 uint gmr = fr + (e >> 4), gn = cn + (e & 15u);
                 if (gmr < p.mDim && gn < p.nDim) {
-                    float v = uintBitsToFloat(smem[sg * 64u + (e >> 2)][e & 3u]);
+                    float v = uintBitsToFloat(smem[sg * (AMU * 4u) + (e >> 2)][e & 3u]);
                     if (hasBias) v += bias[gn];
                     uint oe = gmr * p.nDim + gn;
                     if (hasRes) v += float(res1[oe]);
