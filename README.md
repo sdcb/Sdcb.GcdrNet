@@ -22,12 +22,12 @@ The model is a two-stage pipeline:
 
 - **Zero inference-engine dependency** — self-contained ONNX proto reader, graph compiler
   (shape specialization, constant folding, operator fusion, buffer-arena planning).
-- **CPU backend** with ISA tiered dispatch: AVX-512 → AVX2 (+FMA, multithreaded) → `Vector<float>` → Scalar.
+- **CPU backend** with ISA tiered dispatch: AVX-512 → AVX2 (+FMA, multithreaded) → `Vector<float>` → Scalar on x64;
+  NEON (AArch64 AdvSimd) → Scalar on arm64.
 - **Vulkan compute backend** (Windows/Linux/Android `libvulkan`): push-descriptors, ReBAR-aware
   staging, single-recorded-command-buffer graph execution, fused `bgr2nchw → GC → div6 → DR →
   nchw2bgr` pipeline with arbitrary source/destination strides.
-- Backend abstraction (`GcdrBackend`) leaves room for a future Metal backend;
-  a NEON kernel slot is reserved in the ISA hierarchy.
+- Backend abstraction (`GcdrBackend`) leaves room for a future Metal backend.
 
 ### Performance (RTX 3080 Ti, 1600×1152)
 
@@ -43,6 +43,9 @@ Ryzen AI 9 H 365 (AVX-512) + Radeon 880M (RDNA 3.5 iGPU): see [docs/amd-h365-880
 
 Ryzen 9 5950X (AVX2, 16C/32T) + Intel Arc B580 (Xe2, XMX via 8x16x16 coopmat): see [docs/amd-5950x-b580.md](docs/amd-5950x-b580.md)
 (Vulkan ~36 ms/img, CPU AVX2 ~414 ms/img on the same corpus).
+
+Rockchip RK3399 (2× A72 + 4× A53, NEON, passively cooled): see [docs/rockchip-rk3399.md](docs/rockchip-rk3399.md)
+(CPU NEON ~9.0 s/img on the same corpus, 2.6× the generic `Vector<float>` path at a locked 1 GHz).
 
 ### Quick start
 
@@ -114,10 +117,10 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 ### 特性
 
 - **零推理引擎依赖**：自带 ONNX proto 读取 + 图编译（shape 特化、常量折叠、算子融合、arena 规划）
-- **CPU 后端**：AVX-512 → AVX2+FMA 多线程 → `Vector<float>` → Scalar 四档 ISA 自动分发
+- **CPU 后端**：x64 上 AVX-512 → AVX2+FMA 多线程 → `Vector<float>` → Scalar 四档 ISA 自动分发；arm64 上 NEON（AdvSimd）→ Scalar
 - **Vulkan 后端**：push-descriptor、ReBAR 感知 staging、单命令缓冲图执行、
   融合流水线（bgr2nchw→GC→div6→DR→nchw2bgr），支持任意 src/dst stride
-- 预留 Metal 后端接口位与 NEON 内核位
+- 预留 Metal 后端接口位
 
 ### 性能（RTX 3080 Ti，1600×1152）
 
@@ -133,6 +136,9 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 
 锐龙 9 5950X（AVX2，16C/32T）+ Intel Arc B580（Xe2，8x16x16 coopmat 走 XMX）见 [docs/amd-5950x-b580.md](docs/amd-5950x-b580.md)
 （同一语料 Vulkan ~36 ms/张，CPU AVX2 ~414 ms/张）。
+
+瑞芯微 RK3399（2× A72 + 4× A53，NEON，被动散热）见 [docs/rockchip-rk3399.md](docs/rockchip-rk3399.md)
+（同一语料 CPU NEON ~9.0 s/张；锁 1 GHz 时是通用 `Vector<float>` 路径的 2.6 倍）。
 
 ### 快速上手
 
