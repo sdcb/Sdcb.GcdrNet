@@ -1,7 +1,7 @@
 <Query Kind="Program">
   <NuGetReference>Sdcb.SimdGcdrNet</NuGetReference>
   <NuGetReference>Sdcb.SimdGcdrNet.Models</NuGetReference>
-  <NuGetReference Version="3.1.11">SixLabors.ImageSharp</NuGetReference>
+  <NuGetReference Version="3.2.0">SixLabors.ImageSharp</NuGetReference>
   <Namespace>Sdcb.SimdGcdrNet</Namespace>
   <Namespace>Sdcb.SimdGcdrNet.Models</Namespace>
   <Namespace>SixLabors.ImageSharp</Namespace>
