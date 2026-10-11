@@ -1,6 +1,12 @@
 <Project>
+  <!--
+    Independent NuGet versions. Edit here and keep build/00-common.linq in sync.
+    Pack with these properties, not -p:Version= (a global Version would also become the
+    Sdcb.GcdrNet dependency version of the models package).
+  -->
   <PropertyGroup>
-    <GcdrNetVersion Condition="'$(GcdrNetVersion)' == ''">0.1.0</GcdrNetVersion>
+    <SdcbGcdrNetVersion Condition="'$(SdcbGcdrNetVersion)' == ''">0.1.0</SdcbGcdrNetVersion>
+    <SdcbGcdrNetModelsVersion Condition="'$(SdcbGcdrNetModelsVersion)' == ''">1.0.0</SdcbGcdrNetModelsVersion>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -24,14 +30,24 @@
     <PackageTags>Sdcb;GCDRNet;document;shadow-removal;image-enhancement;SIMD</PackageTags>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true' or '$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.GcdrNet'">
     <PackageId>Sdcb.GcdrNet</PackageId>
-    <Version>$(GcdrNetVersion)</Version>
+    <Version>$(SdcbGcdrNetVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX-512/AVX2/Vector/Scalar) and Vulkan backends; no onnxruntime dependency.</Description>
+    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX-512/AVX2/NEON/Vector) and GPU (Vulkan, Metal) backends; no onnxruntime dependency. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32. Models ship separately in Sdcb.GcdrNet.Models.</Description>
+    <PackageTags>Sdcb;GCDRNet;document;shadow-removal;image-enhancement;SIMD;Vulkan;Metal;linqpad-samples</PackageTags>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.GcdrNet.Models'">
+    <PackageId>Sdcb.GcdrNet.Models</PackageId>
+    <Version>$(SdcbGcdrNetModelsVersion)</Version>
+    <IsPackable>true</IsPackable>
+    <Description>Embedded GCDRNet ONNX models (GC-Net + DR-Net) for Sdcb.GcdrNet: GcdrModels.CreateEnhancer() with no model files to deploy.</Description>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">

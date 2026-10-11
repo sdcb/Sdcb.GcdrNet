@@ -5,3 +5,5 @@ artifacts/
 *.user
 vstest*.log
 .windsurf/
+build/nupkgs/
+build/nuget.exe

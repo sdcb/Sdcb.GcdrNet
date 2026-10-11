@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="src/Sdcb.GcdrNet/Sdcb.GcdrNet.csproj" />
+  <Project Path="src/Sdcb.GcdrNet.Models/Sdcb.GcdrNet.Models.csproj" />
   <Project Path="bench/Sdcb.GcdrNet.Benchmark/Sdcb.GcdrNet.Benchmark.csproj" />
   <Project Path="tests/Sdcb.GcdrNet.Tests/Sdcb.GcdrNet.Tests.csproj" />
   <Project Path="examples/EnhanceImage/EnhanceImage.csproj" />

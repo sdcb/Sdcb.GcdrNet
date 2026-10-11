@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Sdcb.GcdrNet\Sdcb.GcdrNet.csproj" />
+    <ProjectReference Include="..\..\src\Sdcb.GcdrNet.Models\Sdcb.GcdrNet.Models.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\testdata\**" CopyToOutputDirectory="PreserveNewest" Link="testdata\%(RecursiveDir)%(Filename)%(Extension)" />

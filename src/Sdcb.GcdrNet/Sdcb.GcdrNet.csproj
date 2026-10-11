@@ -2,7 +2,6 @@
   <PropertyGroup>
     <AssemblyName>Sdcb.GcdrNet</AssemblyName>
     <RootNamespace>Sdcb.GcdrNet</RootNamespace>
-    <Description>Pure C# GCDRNet inference engine: document shadow removal / appearance enhancement without onnxruntime.</Description>
   </PropertyGroup>
   <ItemGroup>
     <!-- SPIR-V binaries are committed next to the .comp sources; regenerate with
@@ -11,5 +10,7 @@
     <EmbeddedResource Include="Backends\Metal\Shaders\*.metal" />
     <None Remove="Backends\Vulkan\Shaders\*.comp" />
     <None Remove="Backends\Vulkan\Shaders\*.spv" />
+    <!-- LINQPad picks these up from packages tagged linqpad-samples -->
+    <None Include="linqpad-samples\*.linq" Pack="true" PackagePath="linqpad-samples" />
   </ItemGroup>
 </Project>

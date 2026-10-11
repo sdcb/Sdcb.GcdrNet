@@ -55,17 +55,27 @@ Snapdragon 8 Gen 3 (realme GT5 Pro, Android 16; Adreno 750 without coopmat, 64/1
 
 ### Quick start
 
+| Package | Contents |
+|---|---|
+| `Sdcb.GcdrNet` | the engine (CPU / Vulkan / Metal); ships LINQPad samples (System.Drawing, ImageSharp, OpenCvSharp, SkiaSharp + SimdPaddleOCR) |
+| `Sdcb.GcdrNet.Models` | the GC-Net + DR-Net ONNX models (~21 MB) as embedded resources |
+
 ```csharp
 using Sdcb.GcdrNet;
+using Sdcb.GcdrNet.Models;
 
-// gcnet/drnet simplified ONNX (see tests/testdata/models)
-using var enh = GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx",
-    GcdrBackend.Auto);   // Auto: Metal on macOS Apple Silicon, else Vulkan, else CPU. Also: Cpu / Vulkan / Metal.
+// Auto: Metal on macOS Apple Silicon, else Vulkan, else CPU. Also: Cpu (default) / Vulkan / Metal.
+using GcdrEnhancer enh = GcdrModels.CreateEnhancer(GcdrBackend.Auto);
+// without the models package: GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx", ...)
+// (models in tests/testdata/models), or FromBytes / FromStreams
 
-byte[] bgr = File.ReadAllBytes("input.bgr");          // tightly packed BGR, HWC
-byte[] dst = enh.Enhance(bgr, width: 1600, height: 1152);
-// or strided: enh.Enhance(srcSpan, w, h, srcStride, dstSpan, dstStride);
+byte[] dst = enh.Enhance(bgr, width: 1600, height: 1152);   // tightly packed BGR24, HWC
+// strided, any interleaved 8-bit layout, output in the same layout (alpha copied through):
+enh.Enhance(srcSpan, w, h, srcStride, dstSpan, dstStride, GcdrPixelFormat.Rgba32);
 ```
+
+Pixel formats: `Bgr24` (OpenCV `Mat`, GDI+ 24bpp), `Rgb24`, `Bgra32` (SkiaSharp, GDI+ 32bpp),
+`Rgba32` (ImageSharp, browser canvas). `dst` may be the same buffer as `src` (same stride) for in-place enhancement.
 
 Input is padded to a multiple of 32 with top/left **replicate** padding and cropped back —
 matching the reference Python implementation.
@@ -90,6 +100,10 @@ matching the reference Python implementation.
   profile, CPU-vs-Metal per-node trace), `--vkprof` (per-shader/per-dispatch GPU timing), `--vkcheck` / `--vknodes`
   (Vulkan vs CPU, whole graph / per node)
 - `bench/Sdcb.GcdrNet.AndroidBench` — the same modes inside an Android APK (`run.ps1`: build → adb install → push testdata → run → pull logs)
+- `src/Sdcb.GcdrNet.Models` — `GcdrModels` over the embedded ONNX files (taken from `tests/testdata/models`)
+- `src/Sdcb.GcdrNet/linqpad-samples` — LINQPad samples packed into `Sdcb.GcdrNet` (tag `linqpad-samples`)
+- `build/` — LINQPad scripts to pack (`01-build-packages`) and publish (`02-publish-proget-nuget`) the
+  packages; versions live in `00-common.linq` and `Directory.Build.props`
 
 ### Tests
 
@@ -161,15 +175,27 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 
 ### 快速上手
 
+| 包 | 内容 |
+|---|---|
+| `Sdcb.GcdrNet` | 推理引擎（CPU / Vulkan / Metal）；附带 LINQPad 示例（System.Drawing、ImageSharp、OpenCvSharp、SkiaSharp + SimdPaddleOCR） |
+| `Sdcb.GcdrNet.Models` | GC-Net + DR-Net 两个 ONNX 模型（约 21 MB），以嵌入资源形式提供 |
+
 ```csharp
 using Sdcb.GcdrNet;
+using Sdcb.GcdrNet.Models;
 
-using var enh = GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx",
-    GcdrBackend.Auto);   // Auto：macOS Apple Silicon 优先 Metal，否则 Vulkan，最后 CPU；也可显式 Cpu / Vulkan / Metal
+// Auto：macOS Apple Silicon 优先 Metal，否则 Vulkan，最后 CPU；也可显式 Cpu（默认）/ Vulkan / Metal
+using GcdrEnhancer enh = GcdrModels.CreateEnhancer(GcdrBackend.Auto);
+// 不用模型包：GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx", ...)
+// （模型见 tests/testdata/models），或 FromBytes / FromStreams
 
-byte[] dst = enh.Enhance(bgrBytes, width: 1600, height: 1152);
-// 非紧密 stride：enh.Enhance(src, w, h, srcStride, dst, dstStride);
+byte[] dst = enh.Enhance(bgrBytes, width: 1600, height: 1152);   // 紧密排列的 BGR24，HWC
+// 带 stride、任意 8 位交错格式，输出与输入同格式（alpha 原样拷回）：
+enh.Enhance(src, w, h, srcStride, dst, dstStride, GcdrPixelFormat.Rgba32);
 ```
+
+像素格式：`Bgr24`（OpenCV `Mat`、GDI+ 24bpp）、`Rgb24`、`Bgra32`（SkiaSharp、GDI+ 32bpp）、
+`Rgba32`（ImageSharp、浏览器 canvas）。`dst` 可以和 `src` 是同一块内存（stride 相同），即原地增强。
 
 输入补齐到 32 倍数（上/左 replicate padding），输出自动裁回，与参考 Python 实现一致。
 
