@@ -140,6 +140,41 @@ public unsafe class VkKernelTests
         AssertClose(got, cpu, 1e-4f, "uphead");
     }
 
+    // stem conv + 2x2/2 max pool; pooled 11 x 15 leaves a partial last workgroup
+    [SkippableTheory]
+    [InlineData("convpool", 3, 16, true, 0f, 1)]
+    [InlineData("convpool_k3", 3, 16, true, 0f, 1)]       // gc stem: reflect, conv relu
+    [InlineData("convpool_k3", 6, 32, false, 0f, 0)]      // dr stem: zero pad, pool relu
+    [InlineData("convpool_k3", 7, 8, false, 0.25f, 1)]    // ic 7, one channel group, pad value
+    [InlineData("convpool_k3", 1, 24, true, 0f, 0)]       // ic 1, three channel groups
+    public void ConvPool_MatchesCpu(string shader, int ic, int oc, bool reflect, float padValue, int act)
+    {
+        Skip.IfNot(VkOk(), "no Vulkan device");
+        var dev = VkBackend.Default.Dev;
+        var rng = new Random(ic * 13 + oc);
+        int h = 22, w = 30, ph = h / 2, pw = w / 2;
+        float[] x = Rand(rng, h * w * ic), wt = Rand(rng, oc * ic * 9), b = Rand(rng, oc);
+        var p = new ConvP
+        {
+            Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3],
+            PadMode = reflect ? PadMode.Reflect : PadMode.Constant, PadValue = padValue,
+            Act = act == 1 ? ActivationKind.Relu : ActivationKind.None,
+            Pool = new PoolP { Kernel = [2, 2], Strides = [2, 2], Pads = [0, 0, 0, 0], FuseRelu = act == 0 },
+        };
+        float[] cpu = new float[ph * pw * oc];
+        Nhwc.ConvPool(x, h, w, ic, cpu, ph, pw, oc, p, Nhwc.Pack(wt, [oc, ic, 3, 3], b, 1, ic));
+        float[] wk = new float[9 * ic * oc];   // [K][oc], k = tap * ic + ci
+        for (int o = 0; o < oc; o++)
+            for (int c = 0; c < ic; c++)
+                for (int t = 0; t < 9; t++) wk[(t * ic + c) * oc + o] = wt[(o * ic + c) * 9 + t];
+        uint flags = 1u | (reflect ? 2u : 0u) | (act == 1 ? 4u : 0u) | (act == 0 ? 8u : 0u);
+        byte[] pc = new byte[48];
+        Buffer.BlockCopy(new uint[] { (uint)ic, (uint)h, (uint)w, (uint)oc, (uint)ph, (uint)pw, 3u, 3u, 1u, 1u, flags }, 0, pc, 0, 44);
+        Buffer.BlockCopy(new float[] { reflect ? 0f : padValue }, 0, pc, 44, 4);
+        float[] got = RunGpu(dev, shader, [x, wk, b], cpu.Length, pc, (uint)(ph * pw * (oc / 8) + 255) / 256);
+        AssertClose(got, cpu, 1e-4f, shader);
+    }
+
     // lite: false = the device's variant (LITE on wave64 / 32 KB parts), true = force the LITE build
     [SkippableTheory]
     [InlineData(6, 32, 1, false, "conv_cm_n32s", false, false, 1)]    // dr stem (scalar k gather)
