@@ -152,6 +152,13 @@ public unsafe class VkKernelTests
     [InlineData(64, 128, 2, false, "conv_cm", true, true, 0)]
     [InlineData(16, 160, 1, false, "conv_cm_n32", true, false, 1)]    // 5 N tiles: partial raster group
     [InlineData(32, 256, 1, false, "conv_cm", false, true, 1)]
+    // shapes aimed at the SG16 build (8-row fragments, 16 lanes): half-used N tile (oc 16),
+    // partial N tile, minimal quad cin, any-cin stem with the epilogue, deep K (36 k-slices)
+    [InlineData(16, 16, 1, true, "conv_cm_n32", false, false, 1)]
+    [InlineData(16, 48, 1, false, "conv_cm_n32", false, true, 2)]
+    [InlineData(8, 64, 2, true, "conv_cm_n64", false, true, 1)]
+    [InlineData(3, 32, 1, false, "conv_cm_n32s", false, true, 2)]
+    [InlineData(128, 128, 1, true, "conv_cm", false, true, 2)]
     public void ConvCm_MatchesCpu(int ic, int oc, int stride, bool reflect, string shader, bool lite, bool residual, int act)
     {
         Skip.IfNot(VkOk() && VkBackend.Default.Dev.CoopMat16, "no coopmat device");
@@ -203,6 +210,25 @@ public unsafe class VkKernelTests
         float[] got = gh.Select(h => (float)h).ToArray();
         float scale = Math.Max(1f, cpu.Max(MathF.Abs));
         AssertClose(got, cpu, 2e-3f * scale, shader);
+    }
+
+    /// <summary>The SG16 build (8x16x16, 16 lanes) is only ever chosen with its pin in place and never
+    /// next to the 32-lane builds; devices that cannot run 16-lane subgroups never select it.</summary>
+    [SkippableFact]
+    public void CoopGate_Consistent()
+    {
+        Skip.IfNot(VkOk(), "no Vulkan device");
+        var dev = VkBackend.Default.Dev;
+        if (dev.CoopM8)
+        {
+            Assert.True(dev.CoopMat16);
+            Assert.Equal(16u, dev.CoopSubgroupSize);
+            Assert.False(dev.CoopLite);
+            Assert.True(dev.SubgroupMin <= 16 && dev.SubgroupMax >= 16);
+        }
+        else if (dev.CoopMat16)
+            Assert.True(dev.CoopSubgroupSize is 0u or 32u);
+        if (dev.SubgroupMin > 16) Assert.False(dev.CoopM8);
     }
 
     private static VkBuffer Half16(VkDevice dev, float[] a)

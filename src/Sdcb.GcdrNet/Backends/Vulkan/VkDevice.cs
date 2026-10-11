@@ -19,14 +19,18 @@ internal unsafe sealed class VkDevice : IDisposable
     public uint MaxSharedMemory;
     public ulong MaxStorageRange = uint.MaxValue;
     public bool PushDescriptors;
-    /// <summary>VK_KHR_cooperative_matrix with a 16x16x16 fp16 x fp16 -> fp32 subgroup
-    /// config, 32-lane subgroups and shaderFloat16 (tensor-core convs; GCDRNET_VK_COOPMAT=0 disables).
-    /// Devices whose default compute subgroup is not 32 lanes (RDNA wave64) qualify only when
-    /// VK_EXT_subgroup_size_control can pin it to 32 (<see cref="CoopSubgroupSize"/>) and a probe
-    /// dispatch confirms 32-lane subgroups; otherwise the convs stay on conv_tile.</summary>
+    /// <summary>Tensor-core convs (conv_cm.comp; GCDRNET_VK_COOPMAT=0 disables): VK_KHR_cooperative_matrix
+    /// plus shaderFloat16, in one of two shapes. Default: a 16x16x16 fp16 x fp16 -> fp32 subgroup config
+    /// on 32-lane subgroups; devices whose default compute subgroup is not 32 lanes (RDNA wave64) qualify
+    /// only when VK_EXT_subgroup_size_control can pin it to 32 (<see cref="CoopSubgroupSize"/>).
+    /// Otherwise <see cref="CoopM8"/>: the 8x16x16 config on subgroups pinned to 16 lanes (Intel Xe2).
+    /// A probe dispatch must confirm the pinned width; failing that the convs stay on conv_tile.</summary>
     public bool CoopMat16;
+    /// <summary>The coopmat convs use the SG16 build (8x16x16 fragments, 16-lane subgroups; Intel Arc
+    /// XMX): taken only when the 16x16x16 / 32-lane path is unavailable (GCDRNET_VK_SG16=0 disables).</summary>
+    public bool CoopM8;
     /// <summary>requiredSubgroupSize for the coopmat pipelines: 0 = device default (already 32),
-    /// 32 = pinned through VK_EXT_subgroup_size_control.</summary>
+    /// 32 / 16 = pinned through VK_EXT_subgroup_size_control.</summary>
     public uint CoopSubgroupSize;
     /// <summary>Coopmat convs use the LITE variants (single-buffered 28 KB staging, scalar epilogue,
     /// grouped raster): wave64-capable parts or less than the 48 KB shared memory the
@@ -84,11 +88,13 @@ internal unsafe sealed class VkDevice : IDisposable
 
     /// <summary>Pipeline of a conv_cm variant ("conv_cm", "conv_cm_n64", ...; fp16 storage): the
     /// LITE build on <see cref="CoopLite"/> devices (or when <paramref name="lite"/> forces it),
-    /// with the subgroup pinned to <see cref="CoopSubgroupSize"/>.</summary>
+    /// the SG16 build (always LITE-style) on <see cref="CoopM8"/> devices, with the subgroup pinned
+    /// to <see cref="CoopSubgroupSize"/>. Every variant keeps BM = 128 rows per workgroup.</summary>
     public VkPipeline GetCoopPipeline(string variant, int bindings, int pcBytes, bool? lite = null)
     {
         if (!variant.StartsWith("conv_cm", StringComparison.Ordinal)) throw new ArgumentException(variant);
-        string name = (lite ?? CoopLite) ? "conv_cm_l" + variant["conv_cm".Length..] : variant;
+        string suffix = variant["conv_cm".Length..];
+        string name = CoopM8 ? "conv_cm_sg16" + suffix : (lite ?? CoopLite) ? "conv_cm_l" + suffix : variant;
         return GetPipeline(name + "_h", bindings, pcBytes, CoopSubgroupSize);
     }
 
@@ -221,19 +227,29 @@ internal unsafe sealed class VkDevice : IDisposable
         // a default other than 32 lanes (RDNA: wave64) needs the compute subgroup pinned to 32
         bool pinSg32 = d.SubgroupSize != 32 && hasSgc && sgcCompute && d.SubgroupMin <= 32 && d.SubgroupMax >= 32
             && Environment.GetEnvironmentVariable("GCDRNET_VK_SG32") != "0";
-        bool wantCm = hasCoop && hasF16Int8 && hasVmm && d.StorageBuffer16 && (d.SubgroupSize == 32 || pinSg32)
+        // the SG16 build (8x16x16, Intel Xe2 XMX) needs 16 lanes in the pinnable compute range
+        bool canSg16 = hasSgc && sgcCompute && d.SubgroupMin <= 16 && d.SubgroupMax >= 16
+            && Environment.GetEnvironmentVariable("GCDRNET_VK_SG16") != "0";
+        bool wantCm = hasCoop && hasF16Int8 && hasVmm && d.StorageBuffer16 && (d.SubgroupSize == 32 || pinSg32 || canSg16)
             && Environment.GetEnvironmentVariable("GCDRNET_VK_COOPMAT") != "0";
+        bool pinSg16 = false;
         if (wantCm)
         {
             f16q.PNext = &coopQ;
             coopQ.PNext = &vmmQ;
-            if (pinSg32) vmmQ.PNext = &sgcQ;
+            if (pinSg32 || canSg16) vmmQ.PNext = &sgcQ;
             Vk.VkPhysicalDeviceFeatures2 fq = new() { SType = VkConst.StPhysicalDeviceFeatures2, PNext = &f16q };
             Vk.vkGetPhysicalDeviceFeatures2(d.PhysDevice, &fq);
-            wantCm = f16q.ShaderFloat16 != 0 && coopQ.CooperativeMatrix != 0 && vmmQ.VulkanMemoryModel != 0
-                && (!pinSg32 || sgcQ.SubgroupSizeControl != 0) && Coop16(d);
+            bool feats = f16q.ShaderFloat16 != 0 && coopQ.CooperativeMatrix != 0 && vmmQ.VulkanMemoryModel != 0;
+            CoopShapes(d, out bool m16, out bool m8);
+            // 16x16x16 on 32 lanes first (NVIDIA, RDNA pinned to 32); 8x16x16 on 16 lanes only without it
+            bool cm32 = feats && (d.SubgroupSize == 32 || pinSg32) && (!pinSg32 || sgcQ.SubgroupSizeControl != 0) && m16;
+            pinSg16 = !cm32 && feats && canSg16 && sgcQ.SubgroupSizeControl != 0 && m8;
+            wantCm = cm32 || pinSg16;
+            pinSg32 &= cm32;
         }
-        pinSg32 &= wantCm;
+        else pinSg32 = false;
+        bool pinSg = pinSg32 || pinSg16;
 
         byte** extsToEnable = stackalloc byte*[5];
         uint nExt = 0;
@@ -244,7 +260,7 @@ internal unsafe sealed class VkDevice : IDisposable
         System.Text.Encoding.ASCII.GetBytes("VK_KHR_vulkan_memory_model\0", new Span<byte>(pVmm, 32));
         System.Text.Encoding.ASCII.GetBytes("VK_EXT_subgroup_size_control\0", new Span<byte>(pSgc, 32));
         if (wantCm) { extsToEnable[nExt++] = pCm; extsToEnable[nExt++] = pF16; extsToEnable[nExt++] = pVmm; }
-        if (pinSg32) extsToEnable[nExt++] = pSgc;
+        if (pinSg) extsToEnable[nExt++] = pSgc;
         Vk.VkPhysicalDeviceShaderFloat16Int8Features f16en = new()
         {
             SType = VkConst.StPhysicalDeviceShaderFloat16Int8Features, ShaderFloat16 = 1,
@@ -262,7 +278,7 @@ internal unsafe sealed class VkDevice : IDisposable
             SType = VkConst.StPhysicalDeviceSubgroupSizeControlFeaturesEXT, SubgroupSizeControl = 1,
             ComputeFullSubgroups = sgcQ.ComputeFullSubgroups,
         };
-        if (pinSg32) vmmEn.PNext = &sgcEn;
+        if (pinSg) vmmEn.PNext = &sgcEn;
         coopEn.PNext = &vmmEn;
         f16en.PNext = &coopEn;
         feat16.PNext = wantCm ? &f16en : null;
@@ -286,9 +302,10 @@ internal unsafe sealed class VkDevice : IDisposable
         };
         Vk.Check(Vk.vkCreateDevice(d.PhysDevice, &dci, null, out d.Device), "vkCreateDevice");
         d.CoopMat16 = wantCm;
-        d.CoopSubgroupSize = pinSg32 ? 32u : 0u;
-        d._fullSubgroups = pinSg32 && sgcQ.ComputeFullSubgroups != 0;
-        d.CoopLite = wantCm && ((hasSgc ? d.SubgroupMax : d.SubgroupSize) >= 64 || d.MaxSharedMemory < 48 * 1024)
+        d.CoopM8 = pinSg16;
+        d.CoopSubgroupSize = pinSg32 ? 32u : pinSg16 ? 16u : 0u;
+        d._fullSubgroups = pinSg && sgcQ.ComputeFullSubgroups != 0;
+        d.CoopLite = wantCm && !pinSg16 && ((hasSgc ? d.SubgroupMax : d.SubgroupSize) >= 64 || d.MaxSharedMemory < 48 * 1024)
             && Environment.GetEnvironmentVariable("GCDRNET_VK_LITE") != "0";
         Vk.vkGetDeviceQueue(d.Device, d.QueueFamily, 0, out d.Queue);
 
@@ -342,10 +359,11 @@ internal unsafe sealed class VkDevice : IDisposable
         Vk.Check(Vk.vkCreateDescriptorPool(d.Device, &dpci, null, out d._descPool), "vkCreateDescriptorPool");
 
         // never trust a pinned subgroup size blindly: the coopmat lane mapping is hard-wired to
-        // 32 lanes, so anything else would silently compute garbage
-        if (pinSg32 && !d.ProbeSubgroup32())
+        // the pinned width (32, or 16 for SG16), so anything else would silently compute garbage
+        if (pinSg && !d.ProbeSubgroup(d.CoopSubgroupSize))
         {
             d.CoopMat16 = false;
+            d.CoopM8 = false;
             d.CoopLite = false;
             d.CoopSubgroupSize = 0;
         }
@@ -354,7 +372,13 @@ internal unsafe sealed class VkDevice : IDisposable
             Console.Error.WriteLine($"[vk] device={d.DeviceName} type={props.DeviceType} vendor=0x{d.VendorId:x4} qfamily={d.QueueFamily} " +
                 $"sg={d.SubgroupSize} sgRange={d.SubgroupMin}-{d.SubgroupMax} sgcCompute={sgcCompute} push={d.PushDescriptors} " +
                 $"coopmat={d.CoopMat16} coopSg={(d.CoopSubgroupSize == 0 ? "default" : d.CoopSubgroupSize.ToString())} " +
-                $"fullSg={d._fullSubgroups} lite={d.CoopLite} vec4={d.Vec4Eltwise} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
+                $"m8={d.CoopM8} fullSg={d._fullSubgroups} lite={d.CoopLite} vec4={d.Vec4Eltwise} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
+            for (uint i = 0; i < nqf; i++)
+                Console.Error.WriteLine($"[vk] qf{i}: flags=0x{qf[i].QueueFlags:x} count={qf[i].QueueCount} tsbits={qf[i].TimestampValidBits}"
+                    + (i == d.QueueFamily ? " <- selected" : ""));
+            if (hasCoop)
+                foreach (var cp in CoopProps(d))
+                    Console.Error.WriteLine($"[vk] coopmat {cp.MSize}x{cp.NSize}x{cp.KSize} a={cp.AType} b={cp.BType} c={cp.CType} r={cp.ResultType} scope={cp.Scope}");
             for (int i = 0; i < (int)d.MemProps.MemoryHeapCount; i++)
             {
                 var hp = d.MemProps.HeapAt(i);
@@ -368,15 +392,16 @@ internal unsafe sealed class VkDevice : IDisposable
 
     private bool _fullSubgroups;
 
-    /// <summary>Runs sgprobe.comp (256 threads) with requiredSubgroupSize = 32 and checks every
-    /// invocation reports 32-lane subgroups, 8 per workgroup.</summary>
-    private bool ProbeSubgroup32()
+    /// <summary>Runs sgprobe.comp (256 threads) with requiredSubgroupSize = <paramref name="lanes"/> and
+    /// checks every invocation reports <paramref name="lanes"/>-lane subgroups, 256 / lanes per workgroup.</summary>
+    private bool ProbeSubgroup(uint lanes)
     {
         VkPipeline? pipe = null;
         VkBuffer? buf = null;
+        uint count = 256 / lanes;
         try
         {
-            pipe = NewPipeline(NewShaderModule(VkShaders.Load("sgprobe")), 1, 0, PushDescriptors, 32);
+            pipe = NewPipeline(NewShaderModule(VkShaders.Load("sgprobe")), 1, 0, PushDescriptors, lanes);
             buf = NewStorageBuffer(256 * 4, hostVisible: true, preferHost: true);
             IntPtr set = IntPtr.Zero, pool = IntPtr.Zero;
             lock (Sync)
@@ -412,7 +437,7 @@ internal unsafe sealed class VkDevice : IDisposable
             buf.Invalidate(0, 256 * 4);
             bool ok = true;
             for (int i = 0; i < 256; i++)
-                ok &= (r[i] & 0xff) == 32 && ((r[i] >> 8) & 0xff) == 8 && ((r[i] >> 16) & 0xff) < 8 && (r[i] >> 24) < 32;
+                ok &= (r[i] & 0xff) == lanes && ((r[i] >> 8) & 0xff) == count && ((r[i] >> 16) & 0xff) < count && (r[i] >> 24) < lanes;
             buf.Unmap();
             return ok;
         }
@@ -429,25 +454,36 @@ internal unsafe sealed class VkDevice : IDisposable
         }
     }
 
-    /// <summary>True when the device offers a 16x16x16 fp16 x fp16 -> fp32 (C and result) subgroup coopmat.</summary>
-    private static bool Coop16(VkDevice d)
+    /// <summary>Which fp16 x fp16 -> fp32 (C and result) subgroup coopmat shapes the device offers:
+    /// 16x16x16 (the default conv_cm builds) and 8x16x16 (SG16).</summary>
+    private static void CoopShapes(VkDevice d, out bool m16, out bool m8)
+    {
+        m16 = m8 = false;
+        // component types: 0 = float16, 1 = float32; scope 3 = subgroup
+        foreach (var p in CoopProps(d))
+            if (p.NSize == 16 && p.KSize == 16 && p.AType == 0 && p.BType == 0
+                && p.CType == 1 && p.ResultType == 1 && p.Scope == 3)
+            {
+                m16 |= p.MSize == 16;
+                m8 |= p.MSize == 8;
+            }
+    }
+
+    /// <summary>vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR (empty when unavailable).</summary>
+    private static Vk.VkCooperativeMatrixPropertiesKHR[] CoopProps(VkDevice d)
     {
         byte[] name = System.Text.Encoding.ASCII.GetBytes("vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR\0");
         IntPtr fn;
         fixed (byte* pn = name) fn = Vk.vkGetInstanceProcAddr(d.Instance, pn);
-        if (fn == IntPtr.Zero) return false;
+        if (fn == IntPtr.Zero) return [];
         var query = (delegate* unmanaged[Cdecl]<IntPtr, uint*, Vk.VkCooperativeMatrixPropertiesKHR*, VkResult>)fn;
         uint np = 0;
-        if (query(d.PhysDevice, &np, null) != VkResult.Success || np == 0) return false;
+        if (query(d.PhysDevice, &np, null) != VkResult.Success || np == 0) return [];
         var props = new Vk.VkCooperativeMatrixPropertiesKHR[np];
         for (int i = 0; i < props.Length; i++) props[i].SType = VkConst.StCooperativeMatrixPropertiesKHR;
         fixed (Vk.VkCooperativeMatrixPropertiesKHR* pp = props)
-            if (query(d.PhysDevice, &np, pp) != VkResult.Success) return false;
-        // component types: 0 = float16, 1 = float32; scope 3 = subgroup
-        foreach (var p in props)
-            if (p.MSize == 16 && p.NSize == 16 && p.KSize == 16 && p.AType == 0 && p.BType == 0
-                && p.CType == 1 && p.ResultType == 1 && p.Scope == 3) return true;
-        return false;
+            if (query(d.PhysDevice, &np, pp) != VkResult.Success) return [];
+        return props;
     }
 
     /// <summary>Allocate a storage buffer. hostVisible=false prefers DEVICE_LOCAL;
