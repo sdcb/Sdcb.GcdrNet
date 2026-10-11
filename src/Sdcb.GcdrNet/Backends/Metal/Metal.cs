@@ -84,11 +84,15 @@ internal sealed class MtlDevice : IDisposable
         {
             if (!_pipes.TryGetValue(name, out MtlPipeline? p))
             {
-                _pipes[name] = p = NewPipeline(ShaderLibrary(), name);
+                p = NewPipeline(ShaderLibrary(), name);
                 // every kernel is dispatched at 256 threads/threadgroup
                 if (p.MaxTotalThreadsPerThreadgroup < 256)
+                {
+                    p.Dispose();
                     throw new NotSupportedException(
                         $"Metal: {name} pso supports {p.MaxTotalThreadsPerThreadgroup} threads/group");
+                }
+                _pipes[name] = p;
             }
             return p;
         }

@@ -64,7 +64,7 @@ $exe --mtlprof        # 逐 shader 剖析（每条 dispatch 单独 CommitAndWait
   - `uphead`/`uphead_sc`：融合 resize+relu、skip conv、skip relu、act 的单次输出头；
   - `layernorm`：simdgroup-per-row（32 lanes/行，8 行/threadgroup，零 barrier）；
   - 其余 elementwise/gemm/resize/transpose/concat 均为逐元素或 tiled kernel。
-- `GcdrBackend.Auto`：仅在 macOS arm64 且 `SupportsApple7`（simdgroup-MMA）时选 Metal；
+- `GcdrBackend.Auto`：仅在 macOS 且 `SupportsApple7`（simdgroup-MMA，M1+；Rosetta x64 进程亦可）时选 Metal；
   `GcdrBackend.Metal` 显式选择不做能力门控（缺 Apple7 会在 PSO 编译期报错）。
 
 ## 调试工具（bench 内）
