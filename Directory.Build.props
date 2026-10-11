@@ -2,11 +2,11 @@
   <!--
     Independent NuGet versions. Edit here and keep build/00-common.linq in sync.
     Pack with these properties, not -p:Version= (a global Version would also become the
-    Sdcb.GcdrNet dependency version of the models package).
+    Sdcb.SimdGcdrNet dependency version of the models package).
   -->
   <PropertyGroup>
-    <SdcbGcdrNetVersion Condition="'$(SdcbGcdrNetVersion)' == ''">0.1.0</SdcbGcdrNetVersion>
-    <SdcbGcdrNetModelsVersion Condition="'$(SdcbGcdrNetModelsVersion)' == ''">1.0.0</SdcbGcdrNetModelsVersion>
+    <SdcbSimdGcdrNetVersion Condition="'$(SdcbSimdGcdrNetVersion)' == ''">0.1.0</SdcbSimdGcdrNetVersion>
+    <SdcbSimdGcdrNetModelsVersion Condition="'$(SdcbSimdGcdrNetModelsVersion)' == ''">1.0.0</SdcbSimdGcdrNetModelsVersion>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -23,8 +23,8 @@
     <PackageId>Sdcb.$(MSBuildProjectName)</PackageId>
     <Authors>sdcb</Authors>
     <Company>Sdcb</Company>
-    <PackageProjectUrl>https://github.com/sdcb/Sdcb.GcdrNet</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/sdcb/Sdcb.GcdrNet.git</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/sdcb/SimdGcdrNet</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/sdcb/SimdGcdrNet.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageTags>Sdcb;GCDRNet;document;shadow-removal;image-enhancement;SIMD</PackageTags>
@@ -36,18 +36,18 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.GcdrNet'">
-    <PackageId>Sdcb.GcdrNet</PackageId>
-    <Version>$(SdcbGcdrNetVersion)</Version>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdGcdrNet'">
+    <PackageId>Sdcb.SimdGcdrNet</PackageId>
+    <Version>$(SdcbSimdGcdrNetVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX-512/AVX2/NEON/Vector) and GPU (Vulkan, Metal) backends; no onnxruntime dependency. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32. Models ship separately in Sdcb.GcdrNet.Models.</Description>
+    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX-512/AVX2/NEON/Vector) and GPU (Vulkan, Metal) backends; no onnxruntime dependency. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32. Models ship separately in Sdcb.SimdGcdrNet.Models.</Description>
     <PackageTags>Sdcb;GCDRNet;document;shadow-removal;image-enhancement;SIMD;Vulkan;Metal;linqpad-samples</PackageTags>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.GcdrNet.Models'">
-    <PackageId>Sdcb.GcdrNet.Models</PackageId>
-    <Version>$(SdcbGcdrNetModelsVersion)</Version>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdGcdrNet.Models'">
+    <PackageId>Sdcb.SimdGcdrNet.Models</PackageId>
+    <Version>$(SdcbSimdGcdrNetModelsVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Embedded GCDRNet ONNX models (GC-Net + DR-Net) for Sdcb.GcdrNet: GcdrModels.CreateEnhancer() with no model files to deploy.</Description>
+    <Description>Embedded GCDRNet ONNX models (GC-Net + DR-Net) for Sdcb.SimdGcdrNet: GcdrModels.CreateEnhancer() with no model files to deploy.</Description>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">

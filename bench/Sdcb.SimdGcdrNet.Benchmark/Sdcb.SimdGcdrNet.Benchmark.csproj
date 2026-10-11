@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Sdcb.SimdGcdrNet.Benchmark</AssemblyName>
+    <RootNamespace>Sdcb.SimdGcdrNet.Benchmark</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="SkiaSharp" Version="2.88.9" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="2.88.9" />
+    <ProjectReference Include="..\..\src\Sdcb.SimdGcdrNet\Sdcb.SimdGcdrNet.csproj" />
+  </ItemGroup>
+</Project>

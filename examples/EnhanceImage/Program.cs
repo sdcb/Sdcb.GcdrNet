@@ -1,4 +1,4 @@
-using Sdcb.GcdrNet;
+using Sdcb.SimdGcdrNet;
 using System.Buffers.Binary;
 using System.Text;
 

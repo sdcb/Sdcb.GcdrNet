@@ -21,10 +21,10 @@
 
 ### 宿主
 
-新增 [`bench/Sdcb.GcdrNet.AndroidBench`](../bench/Sdcb.GcdrNet.AndroidBench)：`net10.0-android` 的 APK，链接桌面 `bench/Sdcb.GcdrNet.Benchmark/Program.cs`，所有模式（`--corpus`、`--bench*`、`--vkprof`、`--node` …）都一样。图片在手机上用 `BitmapFactory` 解码（SkiaSharp 2.88 的 android 库过不了 CoreCLR 的程序集改写，`XALNS7015`）。`run.ps1` 负责编译 → `adb install` → 推 `tests/testdata` → 启动 → 等结束 → 拉回日志：
+新增 [`bench/Sdcb.SimdGcdrNet.AndroidBench`](../bench/Sdcb.SimdGcdrNet.AndroidBench)：`net10.0-android` 的 APK，链接桌面 `bench/Sdcb.SimdGcdrNet.Benchmark/Program.cs`，所有模式（`--corpus`、`--bench*`、`--vkprof`、`--node` …）都一样。图片在手机上用 `BitmapFactory` 解码（SkiaSharp 2.88 的 android 库过不了 CoreCLR 的程序集改写，`XALNS7015`）。`run.ps1` 负责编译 → `adb install` → 推 `tests/testdata` → 启动 → 等结束 → 拉回日志：
 
 ```powershell
-cd bench/Sdcb.GcdrNet.AndroidBench
+cd bench/Sdcb.SimdGcdrNet.AndroidBench
 .\run.ps1 -Build -Install -Push -Bench "--corpus vulkan"
 .\run.ps1 -Bench "--vkprof 1152 1600" -Env "GCDRNET_VK_VERBOSE=1"
 .\run.ps1 -Build -Install -GcdrEnv "DOTNET_EnableHWIntrinsic=0" -Bench "--bench 512 512 1"   # Scalar

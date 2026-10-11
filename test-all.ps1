@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
-$proj = 'tests/Sdcb.GcdrNet.Tests'
+$proj = 'tests/Sdcb.SimdGcdrNet.Tests'
 $run = { param($name, $env)
     Write-Host "=== $name ===" -ForegroundColor Cyan
     $env.GetEnumerator() | ForEach-Object { Set-Item "env:$($_.Key)" $_.Value }

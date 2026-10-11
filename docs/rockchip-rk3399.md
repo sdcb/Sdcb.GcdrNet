@@ -33,11 +33,11 @@
 
 ```bash
 # Windows 上编译，拷贝 bin/Release/net10.0 和 tests/testdata（含 realdae/）到板子
-dotnet bench/Sdcb.GcdrNet.Benchmark.dll --corpus cpu                 # NEON（默认）
+dotnet bench/Sdcb.SimdGcdrNet.Benchmark.dll --corpus cpu                 # NEON（默认）
 DOTNET_EnableHWIntrinsic=0 dotnet ... --corpus cpu                   # Scalar
-dotnet bench/Sdcb.GcdrNet.Benchmark.dll --benchcpu 1152 1600 3       # 单尺寸 e2e（真实 Enhance 路径）
-dotnet bench/Sdcb.GcdrNet.Benchmark.dll --bench 512 512 3            # gc+dr 推理（GCDRNET_PROF=1 GCDRNET_PROF_NODES=1 逐节点）
-dotnet bench/Sdcb.GcdrNet.Benchmark.dll --node dr 1152 1600 49 3     # 单节点隔离计时（新增）
+dotnet bench/Sdcb.SimdGcdrNet.Benchmark.dll --benchcpu 1152 1600 3       # 单尺寸 e2e（真实 Enhance 路径）
+dotnet bench/Sdcb.SimdGcdrNet.Benchmark.dll --bench 512 512 3            # gc+dr 推理（GCDRNET_PROF=1 GCDRNET_PROF_NODES=1 逐节点）
+dotnet bench/Sdcb.SimdGcdrNet.Benchmark.dll --node dr 1152 1600 49 3     # 单节点隔离计时（新增）
 
 # 锁频与温度 / 频率采样
 for p in /sys/devices/system/cpu/cpufreq/policy*; do echo 1008000 > $p/scaling_max_freq; done

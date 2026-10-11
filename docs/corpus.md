@@ -12,7 +12,7 @@
 
 ## 怎么读（计时口径）
 
-`dotnet run --project bench/Sdcb.GcdrNet.Benchmark -c Release -- --corpus vulkan`
+`dotnet run --project bench/Sdcb.SimdGcdrNet.Benchmark -c Release -- --corpus vulkan`
 
 - **按 manifest 序号 01→50 处理**（不按尺寸排序）：大小图交错，池驱逐/重建
   被真实负载放大，更接近生产环境；**01_color 仅作全局 warmup 不计时**，

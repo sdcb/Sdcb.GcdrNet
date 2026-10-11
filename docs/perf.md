@@ -18,8 +18,8 @@ pass1 含每尺寸的冷启动开销（plan 编译、arena 增长），pass2 为
 ## 命令
 
 ```powershell
-dotnet build bench/Sdcb.GcdrNet.Benchmark -c Release
-$exe = 'bench/Sdcb.GcdrNet.Benchmark/bin/Release/net10.0/Sdcb.GcdrNet.Benchmark.exe'
+dotnet build bench/Sdcb.SimdGcdrNet.Benchmark -c Release
+$exe = 'bench/Sdcb.SimdGcdrNet.Benchmark/bin/Release/net10.0/Sdcb.SimdGcdrNet.Benchmark.exe'
 
 & $exe --corpus vulkan                                    # Vulkan
 & $exe --corpus cpu                                       # CPU AVX2+FMA（默认）

@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Dev/bench host only: runs the library's net10.0 build (NEON CPU kernels +
+    Vulkan backend) inside an Android process, with the same modes as
+    bench/Sdcb.SimdGcdrNet.Benchmark (Program.cs is linked). Driven by run.ps1 over adb;
+    testdata is pushed to the app's external files dir, not packaged.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-android</TargetFramework>
+    <SupportedOSPlatformVersion>29</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>Sdcb.SimdGcdrNet.AndroidBench</AssemblyName>
+    <RootNamespace>Sdcb.SimdGcdrNet.AndroidBench</RootNamespace>
+    <ApplicationId>com.sdcb.simdgcdrnet.bench</ApplicationId>
+    <ApplicationTitle>GcdrBench</ApplicationTitle>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <RuntimeIdentifier>android-arm64</RuntimeIdentifier>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+    <PublishTrimmed>false</PublishTrimmed>
+    <!-- SDK 11's crossgen rejects target OS 'android' (NETSDK1096) when the solution is built from the repo root -->
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <!-- a loose .pdb trips the CoreCLR packaging targets (MSB4096 DestinationSubPath) -->
+    <DebugType>embedded</DebugType>
+    <!-- CoreCLR (RyuJIT) like the desktop numbers; Mono's JIT has no AdvSimd. -->
+    <UseMonoRuntime Condition="'$(UseMonoRuntime)' == ''">false</UseMonoRuntime>
+    <NoWarn>$(NoWarn);SYSLIB5003;XA1040</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sdcb.SimdGcdrNet\Sdcb.SimdGcdrNet.csproj" />
+    <!-- images are decoded with Android's BitmapFactory (#if ANDROID in Program.cs):
+         SkiaSharp 2.88's android lib fails the CoreCLR assembly rewrite (XALNS7015) -->
+    <Compile Include="..\Sdcb.SimdGcdrNet.Benchmark\Program.cs" Link="Program.cs" />
+  </ItemGroup>
+  <!-- Runtime switches (DOTNET_EnableHWIntrinsic=0, ...) are read before managed code
+       runs, so they are baked into the APK: -p:GcdrEnv="K=V;K=V" -->
+  <Target Name="GcdrWriteEnv" BeforeTargets="_GeneratePackageManagerJava;_GenerateEnvironmentFiles;PrepareForBuild">
+    <PropertyGroup>
+      <_GcdrEnvFile>$(IntermediateOutputPath)gcdr-env.txt</_GcdrEnvFile>
+    </PropertyGroup>
+    <ItemGroup>
+      <_GcdrEnvLine Include="$(GcdrEnv)" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(_GcdrEnvFile)" Lines="@(_GcdrEnvLine);GCDR_APK_ENV=$(GcdrEnv.Replace(';', ','))" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <AndroidEnvironment Include="$(_GcdrEnvFile)" />
+    </ItemGroup>
+  </Target>
+</Project>

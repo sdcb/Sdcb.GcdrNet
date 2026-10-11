@@ -1,4 +1,4 @@
-# Sdcb.GcdrNet
+# Sdcb.SimdGcdrNet
 
 [English](#english) | [中文](#中文)
 
@@ -6,7 +6,7 @@
 
 ## English
 
-**Sdcb.GcdrNet** is a pure C# implementation of [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)
+**Sdcb.SimdGcdrNet** is a pure C# implementation of [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)
 (*Appearance Enhancement for Camera-captured Document Images in the Wild*, IEEE TAI 2023) —
 document-image shadow removal and appearance enhancement **without onnxruntime or any other
 third-party inference engine**. It ships its own compiled-model inference engine, inspired by
@@ -57,12 +57,12 @@ Snapdragon 8 Gen 3 (realme GT5 Pro, Android 16; Adreno 750 without coopmat, 64/1
 
 | Package | Contents |
 |---|---|
-| `Sdcb.GcdrNet` | the engine (CPU / Vulkan / Metal); ships LINQPad samples (System.Drawing, ImageSharp, OpenCvSharp, SkiaSharp + SimdPaddleOCR) |
-| `Sdcb.GcdrNet.Models` | the GC-Net + DR-Net ONNX models (~21 MB) as embedded resources |
+| `Sdcb.SimdGcdrNet` | the engine (CPU / Vulkan / Metal); ships LINQPad samples (System.Drawing, ImageSharp, OpenCvSharp, SkiaSharp + SimdPaddleOCR) |
+| `Sdcb.SimdGcdrNet.Models` | the GC-Net + DR-Net ONNX models (~21 MB) as embedded resources |
 
 ```csharp
-using Sdcb.GcdrNet;
-using Sdcb.GcdrNet.Models;
+using Sdcb.SimdGcdrNet;
+using Sdcb.SimdGcdrNet.Models;
 
 // Auto: Metal on macOS Apple Silicon, else Vulkan, else CPU. Also: Cpu (default) / Vulkan / Metal.
 using GcdrEnhancer enh = GcdrModels.CreateEnhancer(GcdrBackend.Auto);
@@ -82,33 +82,33 @@ matching the reference Python implementation.
 
 ### Layout
 
-- `src/Sdcb.GcdrNet/Onnx` — minimal protobuf reader + ONNX model/graph objects
-- `src/Sdcb.GcdrNet/Engine` — `GraphCompiler` (specialize → fold → fuse → arena-plan),
+- `src/Sdcb.SimdGcdrNet/Onnx` — minimal protobuf reader + ONNX model/graph objects
+- `src/Sdcb.SimdGcdrNet/Engine` — `GraphCompiler` (specialize → fold → fuse → arena-plan),
   `InferenceSession`
-- `src/Sdcb.GcdrNet/Kernels` — Scalar / `Vector<float>` / AVX2 / AVX-512 kernels (`Ops`, `Avx2Kernels`, `Nhwc`,
+- `src/Sdcb.SimdGcdrNet/Kernels` — Scalar / `Vector<float>` / AVX2 / AVX-512 kernels (`Ops`, `Avx2Kernels`, `Nhwc`,
   `PixelOps`, `SimdMath`)
-- `src/Sdcb.GcdrNet/Backends/Vulkan` — `Vk` P/Invoke layer, `VkDevice`, `VkShaders` (embedded
+- `src/Sdcb.SimdGcdrNet/Backends/Vulkan` — `Vk` P/Invoke layer, `VkDevice`, `VkShaders` (embedded
   SPIR-V), `VkGraph` dispatch lowering, `VkSession`, `VkPipeline2` (fused pipeline), `VkBackend`
-- `src/Sdcb.GcdrNet/Backends/Vulkan/Shaders` — GLSL sources; `tools/build-shaders.bat`
+- `src/Sdcb.SimdGcdrNet/Backends/Vulkan/Shaders` — GLSL sources; `tools/build-shaders.bat`
   recompiles `.comp` → `.spv` (committed; dev-time only, not part of `dotnet build`)
-- `src/Sdcb.GcdrNet/Backends/Metal` — `ObjC`/`Metal` P/Invoke layer, `MtlGraph` dispatch
+- `src/Sdcb.SimdGcdrNet/Backends/Metal` — `ObjC`/`Metal` P/Invoke layer, `MtlGraph` dispatch
   lowering, `MtlSession`, `MtlPipeline` (fused pipeline), `MetalBackend`
-- `src/Sdcb.GcdrNet/Backends/Metal/Shaders` — MSL sources (`.metal`, embedded resources,
+- `src/Sdcb.SimdGcdrNet/Backends/Metal/Shaders` — MSL sources (`.metal`, embedded resources,
   compiled to PSOs at run time — no pre-build step)
-- `bench/Sdcb.GcdrNet.Benchmark` — `--check`, `--bench` (CPU), `--benchvk` (Vulkan e2e),
+- `bench/Sdcb.SimdGcdrNet.Benchmark` — `--check`, `--bench` (CPU), `--benchvk` (Vulkan e2e),
   `--benchmtl` / `--checkgpu` / `--mtlprof` / `--mtrace` (Metal e2e, diff check, per-shader
   profile, CPU-vs-Metal per-node trace), `--vkprof` (per-shader/per-dispatch GPU timing), `--vkcheck` / `--vknodes`
   (Vulkan vs CPU, whole graph / per node)
-- `bench/Sdcb.GcdrNet.AndroidBench` — the same modes inside an Android APK (`run.ps1`: build → adb install → push testdata → run → pull logs)
-- `src/Sdcb.GcdrNet.Models` — `GcdrModels` over the embedded ONNX files (taken from `tests/testdata/models`)
-- `src/Sdcb.GcdrNet/linqpad-samples` — LINQPad samples packed into `Sdcb.GcdrNet` (tag `linqpad-samples`)
+- `bench/Sdcb.SimdGcdrNet.AndroidBench` — the same modes inside an Android APK (`run.ps1`: build → adb install → push testdata → run → pull logs)
+- `src/Sdcb.SimdGcdrNet.Models` — `GcdrModels` over the embedded ONNX files (taken from `tests/testdata/models`)
+- `src/Sdcb.SimdGcdrNet/linqpad-samples` — LINQPad samples packed into `Sdcb.SimdGcdrNet` (tag `linqpad-samples`)
 - `build/` — LINQPad scripts to pack (`01-build-packages`) and publish (`02-publish-proget-nuget`) the
   packages; versions live in `00-common.linq` and `Directory.Build.props`
 
 ### Tests
 
 ```bash
-dotnet test tests/Sdcb.GcdrNet.Tests -c Release
+dotnet test tests/Sdcb.SimdGcdrNet.Tests -c Release
 ```
 
 Golden outputs come from onnxruntime runs of the simplified models (CPU ≤ 1e-4 /
@@ -148,7 +148,7 @@ Kernel dispatch follows the runtime's
 
 ## 中文
 
-**Sdcb.GcdrNet** 是 [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)（相机拍摄文档去阴影/外观增强，
+**Sdcb.SimdGcdrNet** 是 [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)（相机拍摄文档去阴影/外观增强，
 IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方推理引擎，像 `Sdcb.SimdPaddleOCR`
 一样自带 CompiledModel 推理引擎。
 
@@ -188,12 +188,12 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 
 | 包 | 内容 |
 |---|---|
-| `Sdcb.GcdrNet` | 推理引擎（CPU / Vulkan / Metal）；附带 LINQPad 示例（System.Drawing、ImageSharp、OpenCvSharp、SkiaSharp + SimdPaddleOCR） |
-| `Sdcb.GcdrNet.Models` | GC-Net + DR-Net 两个 ONNX 模型（约 21 MB），以嵌入资源形式提供 |
+| `Sdcb.SimdGcdrNet` | 推理引擎（CPU / Vulkan / Metal）；附带 LINQPad 示例（System.Drawing、ImageSharp、OpenCvSharp、SkiaSharp + SimdPaddleOCR） |
+| `Sdcb.SimdGcdrNet.Models` | GC-Net + DR-Net 两个 ONNX 模型（约 21 MB），以嵌入资源形式提供 |
 
 ```csharp
-using Sdcb.GcdrNet;
-using Sdcb.GcdrNet.Models;
+using Sdcb.SimdGcdrNet;
+using Sdcb.SimdGcdrNet.Models;
 
 // Auto：macOS Apple Silicon 优先 Metal，否则 Vulkan，最后 CPU；也可显式 Cpu（默认）/ Vulkan / Metal
 using GcdrEnhancer enh = GcdrModels.CreateEnhancer(GcdrBackend.Auto);
@@ -212,13 +212,13 @@ enh.Enhance(src, w, h, srcStride, dst, dstStride, GcdrPixelFormat.Rgba32);
 
 ### 构建 shader
 
-`src/Sdcb.GcdrNet/Backends/Vulkan/Shaders/*.spv` 已随源码提交（嵌入资源）；
+`src/Sdcb.SimdGcdrNet/Backends/Vulkan/Shaders/*.spv` 已随源码提交（嵌入资源）；
 改动 `.comp` 后运行 `tools/build-shaders.bat`（需要 glslc / Vulkan SDK）重新生成。
 
 ### 测试
 
 ```bash
-dotnet test tests/Sdcb.GcdrNet.Tests -c Release
+dotnet test tests/Sdcb.SimdGcdrNet.Tests -c Release
 ```
 
 golden 由 onnxruntime 对简化模型跑出（CPU 阈值 ≤1e-4 / Vulkan ≤5e-4）；

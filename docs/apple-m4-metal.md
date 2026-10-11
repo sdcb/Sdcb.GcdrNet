@@ -20,8 +20,8 @@ pass1 含每尺寸冷启动（plan 编译、PSO 创建、arena 增长），pass2
 ## 命令
 
 ```bash
-dotnet build bench/Sdcb.GcdrNet.Benchmark -c Release
-exe=bench/Sdcb.GcdrNet.Benchmark/bin/Release/net10.0/Sdcb.GcdrNet.Benchmark
+dotnet build bench/Sdcb.SimdGcdrNet.Benchmark -c Release
+exe=bench/Sdcb.SimdGcdrNet.Benchmark/bin/Release/net10.0/Sdcb.SimdGcdrNet.Benchmark
 
 $exe --corpus metal   # Metal（Apple7+ 默认 Auto 也走这里）
 $exe --corpus cpu     # CPU（本机 arm64 → Vector<float> 走 AdvSimd 128 位）

@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/Sdcb.SimdGcdrNet/Sdcb.SimdGcdrNet.csproj" />
+  <Project Path="src/Sdcb.SimdGcdrNet.Models/Sdcb.SimdGcdrNet.Models.csproj" />
+  <Project Path="bench/Sdcb.SimdGcdrNet.Benchmark/Sdcb.SimdGcdrNet.Benchmark.csproj" />
+  <Project Path="tests/Sdcb.SimdGcdrNet.Tests/Sdcb.SimdGcdrNet.Tests.csproj" />
+  <Project Path="examples/EnhanceImage/EnhanceImage.csproj" />
+</Solution>
