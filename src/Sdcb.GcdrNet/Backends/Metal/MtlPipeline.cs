@@ -143,13 +143,38 @@ internal sealed unsafe class MtlGcdrPipeline : IDisposable
     }
 
     /// <summary>Enhance one image of any size (re-binds first when the size changed).</summary>
-    public void Enhance(ReadOnlySpan<byte> bgrSrc, int ih, int iw, int srcStride, Span<byte> bgrDst, int dstStride)
+    /// <remarks>Non-BGR24 formats are converted to/from BGR24 on the CPU while copying
+    /// through the (unified-memory) staging buffers; the shaders only see BGR24.</remarks>
+    public void Enhance(ReadOnlySpan<byte> bgrSrc, int ih, int iw, int srcStride, Span<byte> bgrDst, int dstStride,
+        GcdrPixelFormat fmt = GcdrPixelFormat.Bgr24)
     {
         Bind(ih, iw);
-        Enhance(bgrSrc, srcStride, bgrDst, dstStride);
+        if (fmt == GcdrPixelFormat.Bgr24)
+        {
+            Enhance(bgrSrc, srcStride, bgrDst, dstStride);
+            return;
+        }
+        int row = iw * 3;
+        byte* srcMap = (byte*)_bgrIn!.Contents;
+        for (int y = 0; y < ih; y++)
+            Kernels.PixelOps.RowToBgr24(bgrSrc.Slice(y * srcStride), new Span<byte>(srcMap + y * row, row), iw, fmt);
+        Run();
+        byte* dstMap = (byte*)_bgrOut!.Contents;
+        for (int y = 0; y < ih; y++)
+            Kernels.PixelOps.RowFromBgr24(new ReadOnlySpan<byte>(dstMap + y * row, row), bgrDst.Slice(y * dstStride),
+                iw, fmt, bgrSrc.Slice(y * srcStride));
     }
 
-    /// <summary>Enhance one image of the currently bound size.</summary>
+    private void Run()
+    {
+        using var pool = AutoReleasePool.Create();
+        var enc = _dev.BeginCommands();
+        RecordAll(enc, _iw * 3); // staging is always tightly packed
+        enc.End();
+        enc.CommitAndWait();
+    }
+
+    /// <summary>Enhance one BGR24 image of the currently bound size.</summary>
     public void Enhance(ReadOnlySpan<byte> bgrSrc, int srcStride, Span<byte> bgrDst, int dstStride)
     {
         if (!_bound) throw new InvalidOperationException("worker not bound to a size");
@@ -162,13 +187,7 @@ internal sealed unsafe class MtlGcdrPipeline : IDisposable
                 bgrSrc.Slice(y * srcStride, _iw * 3).CopyTo(
                     new Span<byte>(srcMap + y * _iw * 3, _iw * 3));
 
-        using (var pool = AutoReleasePool.Create())
-        {
-            var enc = _dev.BeginCommands();
-            RecordAll(enc, _iw * 3); // staging is always tightly packed
-            enc.End();
-            enc.CommitAndWait();
-        }
+        Run();
 
         byte* dstMap = (byte*)_bgrOut!.Contents;
         ulong outBytes = (ulong)_iw * 3;

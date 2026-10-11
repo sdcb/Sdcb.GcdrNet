@@ -1,7 +1,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "et.glsl"
-// BGR u8 HWC -> NHWC [h][w][3] /255 with top/left replicate padding.
+// Interleaved u8 HWC (BGR24 / RGB24 / BGRA32 / RGBA32) -> NHWC [h][w][3] (B,G,R) /255
+// with top/left replicate padding.
 // 2D grid: x = ox, y = oy; one thread writes the 3 channels of one pixel.
 layout(local_size_x = 256) in;
 
@@ -13,6 +14,8 @@ layout(push_constant) uniform PC {
     uint ih, iw;        // src image dims
     uint pt, pl;        // pad top/left
     uint stride;        // src row stride in bytes
+    uint bpp;           // 3 or 4 bytes per pixel
+    uint swap;          // 1: R,G,B byte order
 } p;
 
 float fetchByte(uint byteIdx) { return float((bgr[byteIdx >> 2] >> ((byteIdx & 3u) * 8u)) & 0xFFu); }
@@ -24,6 +27,9 @@ void main()
     uint oy = gl_GlobalInvocationID.y;
     uint sy = uint(clamp(int(oy) - int(p.pt), 0, int(p.ih) - 1));
     uint sx = uint(clamp(int(ox) - int(p.pl), 0, int(p.iw) - 1));
-    uint s = sy * p.stride + sx * 3u, d = (oy * p.ow + ox) * 3u;
-    for (uint c = 0u; c < 3u; c++) o[d + c] = ET(fetchByte(s + c) / 255.0);
+    uint s = sy * p.stride + sx * p.bpp, d = (oy * p.ow + ox) * 3u;
+    uint ob = p.swap * 2u;
+    o[d] = ET(fetchByte(s + ob) / 255.0);
+    o[d + 1u] = ET(fetchByte(s + 1u) / 255.0);
+    o[d + 2u] = ET(fetchByte(s + 2u - ob) / 255.0);
 }

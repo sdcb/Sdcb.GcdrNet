@@ -31,6 +31,8 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     private int _h, _w;                    // padded dims
     private int _ih, _iw;                  // source dims
     private int _pt, _pl;
+    private GcdrPixelFormat _fmt;
+    private int Bpp => _fmt.BytesPerPixel();
     private bool _recorded;
     private readonly bool _f16;
     private readonly VkPipeline _pPre, _pDiv6, _pPost;
@@ -43,9 +45,9 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         _drModel = dr;
         _f16 = be.F16;
         string sfx = _f16 ? "_h" : "";
-        _pPre = _dev.GetPipeline("bgr2nhwc" + sfx, 2, 7 * 4);
+        _pPre = _dev.GetPipeline("bgr2nhwc" + sfx, 2, 9 * 4);
         _pDiv6 = _dev.GetPipeline("div6" + sfx, 3, 4);
-        _pPost = _dev.GetPipeline("nhwc2bgr" + sfx, 2, 7 * 4);
+        _pPost = _dev.GetPipeline("nhwc2bgr" + sfx, 3, 9 * 4);
         _cmdPool = _dev.NewCommandPool();
         try
         {
@@ -69,9 +71,9 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
 
     /// <summary>Bind the worker to a source size: fetch (cached) graphs for its padded
     /// size, grow buffers as needed, re-record when anything changed.</summary>
-    internal void Bind(int ih, int iw)
+    internal void Bind(int ih, int iw, GcdrPixelFormat fmt = GcdrPixelFormat.Bgr24)
     {
-        if (_recorded && ih == _ih && iw == _iw) return;
+        if (_recorded && ih == _ih && iw == _iw && fmt == _fmt) return;
         _recorded = false;   // stays false if anything below throws (buffers may be gone)
         int pt = (-ih) & 31, pl = (-iw) & 31;
         int h = ih + pt, w = iw + pl;
@@ -94,7 +96,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
             _gcG = gg; _drG = gd;
             _h = h; _w = w;
         }
-        _ih = ih; _iw = iw; _pt = pt; _pl = pl;
+        _ih = ih; _iw = iw; _pt = pt; _pl = pl; _fmt = fmt;
 
         ulong es = (ulong)Es;
         // gc base aligned to 256 B (any minStorageBufferOffsetAlignment)
@@ -109,10 +111,10 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         ulong div = _arena is null ? 8UL : 4UL;
         ulong head = need / div * (div + 1) <= ArenaBudget ? div : 0UL;
         Arena(ref _arena, need, shrink, head);
-        ulong bgrBytes = (ulong)ih * (ulong)iw * 3 + 4;
+        ulong bgrBytes = (ulong)ih * (ulong)iw * (ulong)Bpp + 4;
         Staging(ref _bgrIn, ref _bgrInMap, bgrBytes, preferHost: false);
         Staging(ref _bgrOut, ref _bgrOutMap, bgrBytes, preferHost: true);
-        Record((uint)(_iw * 3));   // _bgrIn is always tightly packed (we de-stride on upload)
+        Record((uint)(_iw * Bpp));   // _bgrIn is always tightly packed (we de-stride on upload)
         _recorded = true;
     }
 
@@ -171,6 +173,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         }
 
         uint h = (uint)_h, w = (uint)_w;
+        uint bpp = (uint)Bpp, swap = _fmt.SwapRB() ? 1u : 0u;
         Vk.Check(Vk.vkResetCommandBuffer(_cmd, 0), "vkResetCommandBuffer");
         var begin = new Vk.VkCommandBufferBeginInfo { SType = VkConst.StCommandBufferBeginInfo };
         Vk.Check(Vk.vkBeginCommandBuffer(_cmd, &begin), "vkBeginCommandBuffer");
@@ -190,7 +193,7 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         // bgr2nhwc -> gc arena input
         Dispatch(_pPre,
             [(_bgrIn!, 0UL, _bgrIn!.Size), (_arena!, _gcBase + InOff(gcPlan), InBytes(gcPlan))],
-            Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, srcStride),
+            Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, srcStride, bpp, swap),
             (w + 255) / 256, h, 1);
         _dev.CmdComputeBarrier(_cmd);
         RecordGraph(gcG, _arena!, _gcBase);
@@ -209,10 +212,10 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
 
         // nhwc2bgr -> bgrOut
         _dev.CmdComputeBarrier(_cmd);
-        uint nwords = ((uint)_ih * (uint)_iw * 3u + 3u) / 4u;
+        uint nwords = bpp == 4 ? (uint)_ih * (uint)_iw : ((uint)_ih * (uint)_iw * 3u + 3u) / 4u;
         Dispatch(_pPost,
-            [(_arena!, OutOff(drPlan), OutBytes(drPlan)), (_bgrOut!, 0UL, _bgrOut!.Size)],
-            Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, nwords),   // PC layout must match nhwc2bgr.comp
+            [(_arena!, OutOff(drPlan), OutBytes(drPlan)), (_bgrOut!, 0UL, _bgrOut!.Size), (_bgrIn!, 0UL, _bgrIn!.Size)],
+            Pc(h, w, (uint)_ih, (uint)_iw, (uint)_pt, (uint)_pl, nwords, bpp, swap),   // PC layout must match nhwc2bgr.comp
             (nwords + 255) / 256, 1, 1);
         Vk.Check(Vk.vkEndCommandBuffer(_cmd), "vkEndCommandBuffer");
     }
@@ -277,34 +280,36 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     }
 
     /// <summary>Enhance one image of any size (binds/re-records first when the size changed).</summary>
-    public void Enhance(ReadOnlySpan<byte> bgrSrc, int ih, int iw, int srcStride, Span<byte> bgrDst, int dstStride)
+    public void Enhance(ReadOnlySpan<byte> bgrSrc, int ih, int iw, int srcStride, Span<byte> bgrDst, int dstStride,
+        GcdrPixelFormat fmt = GcdrPixelFormat.Bgr24)
     {
-        Bind(ih, iw);
+        Bind(ih, iw, fmt);
         Enhance(bgrSrc, srcStride, bgrDst, dstStride);
     }
 
-    /// <summary>Enhance one image of the currently bound size.</summary>
+    /// <summary>Enhance one image of the currently bound size and pixel format.</summary>
     public void Enhance(ReadOnlySpan<byte> bgrSrc, int srcStride, Span<byte> bgrDst, int dstStride)
     {
         if (!_recorded) throw new InvalidOperationException("worker not bound to a size");
-        ulong inBytes = (ulong)_ih * (ulong)_iw * 3;
-        if (srcStride == _iw * 3)
+        int row = _iw * Bpp;
+        ulong inBytes = (ulong)_ih * (ulong)row;
+        if (srcStride == row)
             bgrSrc.Slice(0, (int)inBytes).CopyTo(new Span<byte>(_bgrInMap, (int)inBytes));
         else
             for (int y = 0; y < _ih; y++)
-                bgrSrc.Slice(y * srcStride, _iw * 3).CopyTo(
-                    new Span<byte>(_bgrInMap + y * _iw * 3, _iw * 3));
+                bgrSrc.Slice(y * srcStride, row).CopyTo(
+                    new Span<byte>(_bgrInMap + y * row, row));
         _bgrIn!.Flush(0, inBytes);
 
         _dev.Submit(_cmd, _fence);
         _dev.WaitFence(_fence);
         _bgrOut!.Invalidate(0, inBytes);
 
-        if (dstStride == _iw * 3)
+        if (dstStride == row)
             new ReadOnlySpan<byte>(_bgrOutMap, (int)inBytes).CopyTo(bgrDst);
         else
             for (int y = 0; y < _ih; y++)
-                new ReadOnlySpan<byte>(_bgrOutMap + y * _iw * 3, _iw * 3)
+                new ReadOnlySpan<byte>(_bgrOutMap + y * row, row)
                     .CopyTo(bgrDst.Slice(y * dstStride));
     }
 

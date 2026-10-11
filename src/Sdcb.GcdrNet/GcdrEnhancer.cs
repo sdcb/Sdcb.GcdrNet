@@ -21,7 +21,8 @@ public enum GcdrBackend
 
 /// <summary>
 /// GCDRNet two-stage document enhancer: GC-Net shading estimation → division
-/// correction → DR-Net detail restoration. BGR uint8 in, BGR uint8 out.
+/// correction → DR-Net detail restoration. Interleaved uint8 in (BGR24 / RGB24 /
+/// BGRA32 / RGBA32, see <see cref="GcdrPixelFormat"/>), same format out.
 /// Thread-safe: size-agnostic workers (CPU arenas / Vulkan pipelines) are pooled
 /// and rented per call; per-size plans are cached and share packed weights.
 /// </summary>
@@ -73,6 +74,16 @@ public sealed class GcdrEnhancer : IDisposable
     public static GcdrEnhancer FromBytes(ReadOnlySpan<byte> gcnetOnnx, ReadOnlySpan<byte> drnetOnnx,
         GcdrBackend backend = GcdrBackend.Cpu) =>
         new(OnnxModel.Load(gcnetOnnx.ToArray()), OnnxModel.Load(drnetOnnx.ToArray()), backend);
+
+    /// <summary>Loads both ONNX models from streams (read to the end, not disposed). Avoids a
+    /// full in-memory copy, e.g. for embedded resources.</summary>
+    public static GcdrEnhancer FromStreams(Stream gcnetOnnx, Stream drnetOnnx,
+        GcdrBackend backend = GcdrBackend.Cpu)
+    {
+        ArgumentNullException.ThrowIfNull(gcnetOnnx);
+        ArgumentNullException.ThrowIfNull(drnetOnnx);
+        return new(OnnxModel.Load(gcnetOnnx), OnnxModel.Load(drnetOnnx), backend);
+    }
 
     // pipeline sessions keep I/O in plan layout: the glue kernels below read/write
     // channels-last directly, so the plan has no boundary relayouts
@@ -144,20 +155,34 @@ public sealed class GcdrEnhancer : IDisposable
 
 
     /// <summary>
-    /// Enhances a BGR uint8 HWC image: reads <paramref name="bgrSrc"/>
-    /// (height×width×3, stride <paramref name="srcStride"/>) and writes
-    /// <paramref name="bgrDst"/> (same dims).
+    /// Enhances an interleaved uint8 HWC image: reads <paramref name="src"/>
+    /// (height rows of width pixels in <paramref name="format"/>, row stride
+    /// <paramref name="srcStride"/> bytes) and writes <paramref name="dst"/> in the same
+    /// format and dimensions (row stride <paramref name="dstStride"/> bytes). 4-byte formats
+    /// copy alpha through unchanged. <paramref name="dst"/> may be the same memory as
+    /// <paramref name="src"/> when the strides are equal.
     /// </summary>
-    public void Enhance(ReadOnlySpan<byte> bgrSrc, int width, int height, int srcStride,
-        Span<byte> bgrDst, int dstStride)
+    public void Enhance(ReadOnlySpan<byte> src, int width, int height, int srcStride,
+        Span<byte> dst, int dstStride, GcdrPixelFormat format = GcdrPixelFormat.Bgr24)
     {
+        int bpp = format.BytesPerPixel();
+        bool swap = format.SwapRB();
+        ArgumentOutOfRangeException.ThrowIfLessThan(width, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(srcStride, width * bpp);
+        ArgumentOutOfRangeException.ThrowIfLessThan(dstStride, width * bpp);
+        if (src.Length < (long)(height - 1) * srcStride + width * bpp)
+            throw new ArgumentException($"src holds {src.Length} bytes, {height} rows of stride {srcStride} need more.", nameof(src));
+        if (dst.Length < (long)(height - 1) * dstStride + width * bpp)
+            throw new ArgumentException($"dst holds {dst.Length} bytes, {height} rows of stride {dstStride} need more.", nameof(dst));
+
         bool useMtl = _backend == GcdrBackend.Metal
             || (_backend == GcdrBackend.Auto && s_metalOk.Value);
         if (useMtl)
         {
             var pool = MtlPool();
             var pipe = pool.Rent();
-            try { pipe.Enhance(bgrSrc, height, width, srcStride, bgrDst, dstStride); }
+            try { pipe.Enhance(src, height, width, srcStride, dst, dstStride, format); }
             finally { pool.Return(pipe); }
             return;
         }
@@ -169,7 +194,7 @@ public sealed class GcdrEnhancer : IDisposable
             var pipe = pool.Rent();
             try
             {
-                pipe.Enhance(bgrSrc, height, width, srcStride, bgrDst, dstStride);
+                pipe.Enhance(src, height, width, srcStride, dst, dstStride, format);
                 DebugAfterEnhance?.Invoke(pipe);
             }
             finally { pool.Return(pipe); }
@@ -190,8 +215,8 @@ public sealed class GcdrEnhancer : IDisposable
 
             // stage 0: fill GC input — BGR u8 → float /255, top/left replicate pad
             Span<float> x = gc.Input;
-            if (CpuNhwc) PixelOps.BgrToNhwcPad(bgrSrc, width, height, srcStride, x, h, w, ph, pw);
-            else PixelOps.BgrToNchwPad(bgrSrc, width, height, srcStride, x, h, w, ph, pw);
+            if (CpuNhwc) PixelOps.BgrToNhwcPad(src, width, height, srcStride, x, h, w, ph, pw, bpp, swap);
+            else PixelOps.BgrToNchwPad(src, width, height, srcStride, x, h, w, ph, pw, bpp, swap);
 
             // stage 1: GC-Net → shading map
             gc.Run();
@@ -213,9 +238,11 @@ public sealed class GcdrEnhancer : IDisposable
             // stage 3: DR-Net
             dr.Run();
 
-            // stage 4: crop pad → u8 BGR
-            if (CpuNhwc) PixelOps.NhwcToBgrCrop(dr.Output, h, w, ph, pw, bgrDst, width, height, dstStride);
-            else PixelOps.NchwToBgrCrop(dr.Output, h, w, ph, pw, bgrDst, width, height, dstStride);
+            // stage 4: crop pad → u8 in the caller's format (alpha from src)
+            if (CpuNhwc)
+                PixelOps.NhwcToBgrCrop(dr.Output, h, w, ph, pw, dst, width, height, dstStride, bpp, swap, src, srcStride);
+            else
+                PixelOps.NchwToBgrCrop(dr.Output, h, w, ph, pw, dst, width, height, dstStride, bpp, swap, src, srcStride);
         }
         finally { cpuPool.Return(worker); }
     }
@@ -252,11 +279,12 @@ public sealed class GcdrEnhancer : IDisposable
         catch { return false; }
     }
 
-    /// <summary>Convenience: enhance a tightly-packed BGR HWC image, returns new array.</summary>
-    public byte[] Enhance(byte[] bgrSrc, int width, int height)
+    /// <summary>Convenience: enhance a tightly packed image in <paramref name="format"/>, returns a new array in the same format.</summary>
+    public byte[] Enhance(byte[] src, int width, int height, GcdrPixelFormat format = GcdrPixelFormat.Bgr24)
     {
-        byte[] dst = new byte[width * height * 3];
-        Enhance(bgrSrc, width, height, width * 3, dst, width * 3);
+        int stride = width * format.BytesPerPixel();
+        byte[] dst = new byte[stride * height];
+        Enhance(src, width, height, stride, dst, stride, format);
         return dst;
     }
 
