@@ -32,6 +32,13 @@ public static class Program
             int reps = args.Length > 3 ? int.Parse(args[3]) : 10;
             return BenchVk(gcPath, drPath, h, w, reps);
         }
+        if (args.Length > 0 && args[0] == "--benchcpu")
+        {
+            int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
+            int w = args.Length > 2 ? int.Parse(args[2]) : 1600;
+            int reps = args.Length > 3 ? int.Parse(args[3]) : 10;
+            return BenchE2e(gcPath, drPath, h, w, reps, GcdrBackend.Cpu, "cpu");
+        }
         if (args.Length > 0 && args[0] == "--trace")
         {
             int h = args.Length > 1 ? int.Parse(args[1]) : 96;
@@ -695,10 +702,13 @@ public static class Program
         return 0;
     }
 
-    private static int BenchVk(string gcPath, string drPath, int h, int w, int reps)
+    private static int BenchVk(string gcPath, string drPath, int h, int w, int reps) =>
+        BenchE2e(gcPath, drPath, h, w, reps, GcdrBackend.Vulkan, "vulkan");
+
+    private static int BenchE2e(string gcPath, string drPath, int h, int w, int reps, GcdrBackend backend, string tag)
     {
-        // full pipeline: BGR u8 -> enhance -> BGR u8, everything on GPU
-        using var enh = GcdrEnhancer.FromFiles(gcPath, drPath, GcdrBackend.Vulkan);
+        // full pipeline: BGR u8 -> enhance -> BGR u8 (Vulkan: everything on GPU)
+        using var enh = GcdrEnhancer.FromFiles(gcPath, drPath, backend);
         byte[] src = new byte[w * h * 3];
         new Random(0).NextBytes(src);
         byte[] dst = new byte[w * h * 3];
@@ -710,7 +720,7 @@ public static class Program
             enh.Enhance(src, w, h, w * 3, dst, w * 3);
             best = Math.Min(best, Stopwatch.GetTimestamp() - t);
         }
-        Console.WriteLine($"vulkan e2e {w}x{h}: {best / Stopwatch.Frequency * 1000:F1} ms (incl. upload/download)");
+        Console.WriteLine($"{tag} e2e {w}x{h}: {best / Stopwatch.Frequency * 1000:F1} ms" + (backend == GcdrBackend.Vulkan ? " (incl. upload/download)" : ""));
         return 0;
     }
 
