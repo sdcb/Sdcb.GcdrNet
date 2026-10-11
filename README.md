@@ -41,6 +41,9 @@ The model is a two-stage pipeline:
 Ryzen AI 9 H 365 (AVX-512) + Radeon 880M (RDNA 3.5 iGPU): see [docs/amd-h365-880m.md](docs/amd-h365-880m.md)
 (Vulkan ~100 ms/img, CPU AVX-512 ~285 ms/img on the same corpus).
 
+Ryzen 9 5950X (AVX2, 16C/32T) + Intel Arc B580 (Xe2, XMX via 8x16x16 coopmat): see [docs/amd-5950x-b580.md](docs/amd-5950x-b580.md)
+(Vulkan ~36 ms/img, CPU AVX2 ~414 ms/img on the same corpus).
+
 ### Quick start
 
 ```csharp
@@ -127,6 +130,9 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 
 锐龙 AI 9 H 365（AVX-512）+ Radeon 880M（RDNA 3.5 核显）见 [docs/amd-h365-880m.md](docs/amd-h365-880m.md)
 （同一语料 Vulkan ~100 ms/张，CPU AVX-512 ~285 ms/张）。
+
+锐龙 9 5950X（AVX2，16C/32T）+ Intel Arc B580（Xe2，8x16x16 coopmat 走 XMX）见 [docs/amd-5950x-b580.md](docs/amd-5950x-b580.md)
+（同一语料 Vulkan ~36 ms/张，CPU AVX2 ~414 ms/张）。
 
 ### 快速上手
 
