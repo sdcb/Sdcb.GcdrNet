@@ -129,4 +129,97 @@ public class Avx512KernelTests
         var p = new UpHeadP { Scales = [1, 1, 2, 2], ResizeRelu = resizeRelu, SkipRelu = skipRelu, Act = (ActivationKind)act };
         Both(dst => Nhwc.UpHead(x, h, w, c, skip, dst, oh, ow, 2, 2, p, kp), oh * ow * oc);
     }
+
+    [SkippableTheory]
+    [InlineData(3, 16, false, 1, 0, 1)]    // gc stem: 16-wide tail kernel, reflect, row runs
+    [InlineData(6, 32, false, 1, 0, 1)]    // dr stem: one block pair
+    [InlineData(16, 48, false, 0, 0.25f, 0)] // odd block count, pad value
+    [InlineData(32, 64, true, 1, 0, 1)]    // Winograd bands
+    [InlineData(24, 20, true, 0, 0, 3)]    // Winograd, ic % 16 != 0, lane tail, gelu
+    public void ConvPool_MatchesAvx2(int ic, int oc, bool wino, int mode, float padValue, int act)
+    {
+        var rng = new Random(ic * 13 + oc);
+        int h = 22, w = 30;   // pooled 11 x 15: odd tile counts
+        float[] x = rng.Array(h * w * ic), wt = rng.Array(oc * ic * 9), b = rng.Array(oc);
+        var p = new ConvP
+        {
+            Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3],
+            PadMode = (PadMode)mode, PadValue = padValue, Act = (ActivationKind)act,
+            Pool = new PoolP { Kernel = [2, 2], Strides = [2, 2], Pads = [0, 0, 0, 0], FuseRelu = act == 0 },
+        };
+        NhwcConvPlan kp = Nhwc.Pack(wt, [oc, ic, 3, 3], b, 1, ic);
+        if (wino)
+        {
+            Skip.IfNot(Nhwc.WinogradEligible(p, [oc, ic, 3, 3], ic), "Winograd disabled");
+            kp.WinoU = Nhwc.PackWinograd(wt, oc, ic);
+        }
+        float[] fused = Both(dst => Nhwc.ConvPool(x, h, w, ic, dst, h / 2, w / 2, oc, p, kp), h / 2 * (w / 2) * oc);
+
+        // ... and equal to the separate conv -> maxpool on the AVX-512 tier
+        var conv = new ConvP
+        {
+            Pads = p.Pads, Strides = p.Strides, Dilations = p.Dilations, Kernel = p.Kernel,
+            PadMode = p.PadMode, PadValue = p.PadValue, Act = p.Act,
+        };
+        float[] full = new float[h * w * oc], pooled = new float[h / 2 * (w / 2) * oc];
+        Nhwc.Conv(x, h, w, ic, full, h, w, oc, conv, kp, default);
+        Nhwc.MaxPool(full, h, w, oc, pooled, h / 2, w / 2, p.Pool);
+        Assert.True(pooled.AsSpan().SequenceEqual(fused), "fused conv+pool differs from conv -> maxpool");
+    }
+
+    [SkippableTheory]
+    [InlineData(3, 16, 1, 2)]   // gc tail: skip = relu(conv3x3(3 -> 16)) recomputed, sigmoid
+    [InlineData(6, 32, 1, 2)]   // dr tail
+    [InlineData(8, 24, 0, 0)]   // c % 16 != 0
+    public void UpHead_SkipConv_MatchesAvx2(int skipC, int c, int skipAct, int act)
+    {
+        var rng = new Random(skipC * 31 + c);
+        int h = 11, w = 15, oh = 22, ow = 30, oc = 3;
+        float[] x = rng.Array(h * w * c), sx = rng.Array(oh * ow * skipC);
+        float[] cw = rng.Array(c * skipC * 9), cb = rng.Array(c), wt = rng.Array(oc * c), b = rng.Array(oc);
+        var sc = new ConvP
+        {
+            Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3],
+            PadMode = PadMode.Reflect, Act = (ActivationKind)skipAct,
+            KernelPlan = Nhwc.Pack(cw, [c, skipC, 3, 3], cb, 1, skipC),
+        };
+        UpHeadPlan kp = Nhwc.PackUpHead(wt, oc, c, b);
+        var p = new UpHeadP { Scales = [1, 1, 2, 2], ResizeRelu = true, SkipRelu = true, Act = (ActivationKind)act, SkipConv = sc };
+        float[] fused = Both(dst => Nhwc.UpHead(x, h, w, c, sx, dst, oh, ow, 2, 2, p, kp, oh, ow, skipC), oh * ow * oc);
+
+        // ... and equal to UpHead over the stored skip tensor on the AVX-512 tier
+        float[] skip = new float[oh * ow * c], want = new float[oh * ow * oc];
+        Nhwc.Conv(sx, oh, ow, skipC, skip, oh, ow, c, sc, (NhwcConvPlan)sc.KernelPlan!, default);
+        var plain = new UpHeadP { Scales = p.Scales, ResizeRelu = true, SkipRelu = true, Act = p.Act };
+        Nhwc.UpHead(x, h, w, c, skip, want, oh, ow, 2, 2, plain, kp);
+        Assert.True(want.AsSpan().SequenceEqual(fused), "skip recompute differs from the stored skip");
+    }
+
+    [SkippableTheory]
+    [InlineData("gc", 3)]
+    [InlineData("dr", 6)]
+    public void MemFusions_Avx512_MatchUnfusedAvx2(string net, int cin)
+    {
+        // whole net: memory-fused plan on the AVX-512 tier vs unfused plan on the AVX2 tier, bit for bit
+        Skip.IfNot(s_tier && Avx2.IsSupported && Fma.IsSupported, "AVX-512 tier not active");
+        var m = Sdcb.GcdrNet.Onnx.OnnxModel.Load(Path.Combine(AppContext.BaseDirectory, "testdata", "models",
+            net == "gc" ? "gcdrnet_gcnet_sim.onnx" : "gcdrnet_drnet_sim.onnx"));
+        int[] shape = [1, cin, 96, 128];
+        var rnd = new Random(7);
+        float[] input = Enumerable.Range(0, cin * 96 * 128).Select(_ => (float)rnd.NextDouble()).ToArray();
+        float[] Run(bool fuse, bool avx512)
+        {
+            ExecPlan p = GraphCompiler.Compile(m, shape, new CompileOptions(Nhwc: true, PhysicalIo: true, MemFuse: fuse));
+            try
+            {
+                Nhwc.UseAvx512 = avx512;
+                using var s = new InferenceSession(p);
+                input.CopyTo(s.Input); s.Run();
+                return s.Output.ToArray();
+            }
+            finally { Nhwc.UseAvx512 = s_tier; }
+        }
+        float[] fused512 = Run(true, true), unfused2 = Run(false, false);
+        Assert.True(fused512.AsSpan().SequenceEqual(unfused2), $"{net}: fused AVX-512 differs from unfused AVX2");
+    }
 }

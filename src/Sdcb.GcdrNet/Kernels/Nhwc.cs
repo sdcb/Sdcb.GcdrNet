@@ -460,9 +460,9 @@ internal static unsafe partial class Nhwc
             throw new NotSupportedException("ConvPool shape/kind mismatch.");
         bool relu = p.Pool!.FuseRelu, wino = kp.WinoU is not null;
         int band = wino ? 4 : 2, tasks = (oh + band - 1) / band;
-        float[] padVec = new float[ic + Ob];
-        Array.Fill(padVec, p.PadValue);
         int kh = p.Kernel[0], kw = p.Kernel[1];
+        float[] padVec = new float[ic * kw + Ob];   // one constant-pad kernel row (Dense512Row)
+        Array.Fill(padVec, p.PadValue);
         int[] rm = Map(oh, kh, p.Strides[0], p.Pads[0], ih, p.PadMode);
         int[] cm = Map(ow, kw, p.Strides[1], p.Pads[1], iw, p.PadMode);
         fixed (float* sp = src, dp0 = dst, wp = kp.W, up = kp.WinoU, bp = kp.Bias, pv = padVec)
@@ -482,8 +482,7 @@ internal static unsafe partial class Nhwc
                             WinoTiles(wa, t0, Math.Min(wa.T, te - t0), sb, null, y0);
                     else
                         for (int r = 0; r < rows; r++)
-                            for (int blk = 0; blk < da.Nb; blk++)
-                                DenseRow(da, y0 + r, blk, sb + (long)r * ow * oc, null);
+                            ConvRow(da, y0 + r, sb + (long)r * ow * oc, null);
                     PoolBand(sb, rows / 2, ow, oc, dp + (long)(y0 / 2) * pw * oc, pw, relu);
                 }
             });
@@ -687,7 +686,7 @@ internal static unsafe partial class Nhwc
         {
             rm = Map(oh, sc.Kernel[0], sc.Strides[0], sc.Pads[0], skipH, sc.PadMode);
             cm = Map(ow, sc.Kernel[1], sc.Strides[1], sc.Pads[1], skipW, sc.PadMode);
-            padVec = new float[skipC + Ob];
+            padVec = new float[skipC * sc.Kernel[1] + Ob];   // one constant-pad kernel row (Dense512Row)
             Array.Fill(padVec, sc.PadValue);
         }
         fixed (float* sp0 = src, dp0 = dst, kp0 = skip, wp0 = kp.W, bp0 = kp.Bias)
@@ -716,7 +715,7 @@ internal static unsafe partial class Nhwc
                     float* krow = kpp + (long)y * ow * c;
                     if (sc is not null)
                     {
-                        SkipRow(ca, y, sb);
+                        ConvRow(ca, y, sb, null);
                         krow = sb;
                     }
                     for (int x = 0; x < ow; x++)
@@ -748,12 +747,6 @@ internal static unsafe partial class Nhwc
                 }
             });
         }
-    }
-
-    /// <summary>Recomputes one output row (all oc blocks) of an UpHead skip conv into <paramref name="sb"/>.</summary>
-    private static void SkipRow(in DenseArgs ca, int y, float* sb)
-    {
-        for (int blk = 0; blk < ca.Nb; blk++) DenseRow(ca, y, blk, sb, null);
     }
 
     private static void ActRow(float* p, int n, ActivationKind act, bool avx)
