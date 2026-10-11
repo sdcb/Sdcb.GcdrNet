@@ -112,6 +112,9 @@ public sealed unsafe class InferenceSession : IDisposable
     internal IEnumerable<(int i, ExecNode n, TimeSpan t)> NodeProfile() =>
         _plan.Nodes.Select((n, i) => (i, n, TimeSpan.FromSeconds((double)_nodeTicks[i] / System.Diagnostics.Stopwatch.Frequency)));
 
+    /// <summary>Clears the GCDRNET_PROF counters (e.g. after a warmup run).</summary>
+    internal void ResetProfile() => Array.Clear(_nodeTicks);
+
     /// <summary>Debug/test: run a single node by index. Arena must be pre-initialized.</summary>
     internal void ExecNode(int i) => Exec(_plan.Nodes[i]);
 

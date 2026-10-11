@@ -9,6 +9,7 @@ namespace Sdcb.GcdrNet.Tests;
 /// kernels keep every output element's reduction order and epilogue math, so results must be
 /// bit-identical. Skipped on machines (or JIT settings) without AVX-512.
 /// </summary>
+[Collection(TierToggle.Name)]
 public class Avx512KernelTests
 {
     private static readonly bool s_tier = Nhwc.UseAvx512;
