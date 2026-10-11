@@ -27,7 +27,10 @@ The model is a two-stage pipeline:
 - **Vulkan compute backend** (Windows/Linux/Android `libvulkan`): push-descriptors, ReBAR-aware
   staging, single-recorded-command-buffer graph execution, fused `bgr2nchw → GC → div6 → DR →
   nchw2bgr` pipeline with arbitrary source/destination strides.
-- Backend abstraction (`GcdrBackend`) leaves room for a future Metal backend.
+- **Metal compute backend** (macOS arm64): pure C# ObjC P/Invoke (no Xamarin/Metal.NET),
+  fp16 storage + fp32 math, simdgroup-MMA implicit-GEMM convolutions — see
+  [docs/apple-m4-metal.md](docs/apple-m4-metal.md) (~7.5× CPU on M4).
+- A NEON kernel slot is reserved in the ISA hierarchy.
 
 ### Performance (RTX 3080 Ti, 1600×1152)
 
@@ -54,7 +57,7 @@ using Sdcb.GcdrNet;
 
 // gcnet/drnet simplified ONNX (see tests/testdata/models)
 using var enh = GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx",
-    GcdrBackend.Auto);   // Auto: Vulkan if available, else CPU. Also: Cpu / Vulkan.
+    GcdrBackend.Auto);   // Auto: Metal on macOS arm64, else Vulkan, else CPU. Also: Cpu / Vulkan / Metal.
 
 byte[] bgr = File.ReadAllBytes("input.bgr");          // tightly packed BGR, HWC
 byte[] dst = enh.Enhance(bgr, width: 1600, height: 1152);
@@ -75,8 +78,13 @@ matching the reference Python implementation.
   SPIR-V), `VkGraph` dispatch lowering, `VkSession`, `VkPipeline2` (fused pipeline), `VkBackend`
 - `src/Sdcb.GcdrNet/Backends/Vulkan/Shaders` — GLSL sources; `tools/build-shaders.bat`
   recompiles `.comp` → `.spv` (committed; dev-time only, not part of `dotnet build`)
+- `src/Sdcb.GcdrNet/Backends/Metal` — `ObjC`/`Metal` P/Invoke layer, `MtlGraph` dispatch
+  lowering, `MtlSession`, `MtlPipeline` (fused pipeline), `MetalBackend`
+- `src/Sdcb.GcdrNet/Backends/Metal/Shaders` — MSL sources (`.metal`, embedded resources,
+  compiled to PSOs at run time — no pre-build step)
 - `bench/Sdcb.GcdrNet.Benchmark` — `--check`, `--bench` (CPU), `--benchvk` (Vulkan e2e),
-  `--vkprof` (per-shader/per-dispatch GPU timing)
+  `--benchmtl` / `--checkgpu` / `--mtlprof` / `--mtrace` (Metal e2e, diff check, per-shader
+  profile, CPU-vs-Metal per-node trace), `--vkprof` (per-shader/per-dispatch GPU timing)
 
 ### Tests
 
@@ -99,9 +107,11 @@ Kernel dispatch follows the runtime's
 ### Notes
 
 - Vulkan path requires a compute-capable device; `GcdrBackend.Auto` falls back to CPU.
+- Metal path requires macOS arm64 with Apple7+ (simdgroup-MMA); `Auto` checks `SupportsApple7`
+  before choosing it, `GcdrBackend.Metal` selects it unconditionally.
 - Thread-safety: `GcdrEnhancer` is thread-safe (CPU: per-size session pools; Vulkan: size-agnostic worker pool); individual
   `InferenceSession`/`VkInferenceSession` objects are not.
-- Not covered: batched inference (N>1), fp16/int8, Metal (interface-ready).
+- Not covered: batched inference (N>1), fp16/int8.
 
 ---
 
@@ -146,7 +156,7 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 using Sdcb.GcdrNet;
 
 using var enh = GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx",
-    GcdrBackend.Auto);   // Auto：有 Vulkan 用 Vulkan，否则 CPU；也可显式 Cpu / Vulkan
+    GcdrBackend.Auto);   // Auto：macOS arm64 优先 Metal，否则 Vulkan，最后 CPU；也可显式 Cpu / Vulkan / Metal
 
 byte[] dst = enh.Enhance(bgrBytes, width: 1600, height: 1152);
 // 非紧密 stride：enh.Enhance(src, w, h, srcStride, dst, dstStride);

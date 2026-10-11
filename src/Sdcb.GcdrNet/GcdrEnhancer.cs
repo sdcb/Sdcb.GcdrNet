@@ -13,7 +13,9 @@ public enum GcdrBackend
     Cpu,
     /// <summary>Vulkan compute on a discrete GPU.</summary>
     Vulkan,
-    /// <summary>Vulkan if a compute-capable device exists, else CPU.</summary>
+    /// <summary>Metal compute on Apple Silicon (macOS arm64).</summary>
+    Metal,
+    /// <summary>GPU (Vulkan or Metal) if a compute-capable device exists, else CPU.</summary>
     Auto,
 }
 
@@ -43,6 +45,7 @@ public sealed class GcdrEnhancer : IDisposable
     // (3 GB; integrated GPUs: at most a quarter of the shared device-local heap)
     private static long VkIdleBudget => (long)Backends.Vulkan.VkGcdrPipeline.BudgetFor(Backends.Vulkan.VkBackend.Default.Dev);
     private SizePool<Backends.Vulkan.VkGcdrPipeline>? _vkPool;
+    private SizePool<Backends.Metal.MtlGcdrPipeline>? _mtlPool;
     private long _poolsCreated, _workersCreated, _poolsEvicted;
 
     /// <summary>Diagnostics: CPU size plans compiled (Vulkan: worker pools created), worker
@@ -125,6 +128,17 @@ public sealed class GcdrEnhancer : IDisposable
         return p;
     }
 
+    private SizePool<Backends.Metal.MtlGcdrPipeline> MtlPool()
+    {
+        if (_mtlPool is { } p) return p;
+        p = new SizePool<Backends.Metal.MtlGcdrPipeline>(MaxPerSize,
+            () => { Interlocked.Increment(ref _workersCreated); return Backends.Metal.MetalBackend.Default.NewWorker(_gcModel, _drModel); },
+            w => w.DeviceBytes, (long)Backends.Metal.MtlGcdrPipeline.ArenaBudget);
+        if (Interlocked.CompareExchange(ref _mtlPool, p, null) is { } won) { p.Dispose(); return won; }
+        Interlocked.Increment(ref _poolsCreated);
+        return p;
+    }
+
 
     /// <summary>
     /// Enhances a BGR uint8 HWC image: reads <paramref name="bgrSrc"/>
@@ -134,6 +148,18 @@ public sealed class GcdrEnhancer : IDisposable
     public void Enhance(ReadOnlySpan<byte> bgrSrc, int width, int height, int srcStride,
         Span<byte> bgrDst, int dstStride)
     {
+        bool useMtl = _backend == GcdrBackend.Metal
+            || (_backend == GcdrBackend.Auto && OperatingSystem.IsMacOS()
+                && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64
+                && MetalOk() && Backends.Metal.MetalBackend.Default.Dev.SupportsApple7);
+        if (useMtl)
+        {
+            var pool = MtlPool();
+            var pipe = pool.Rent();
+            try { pipe.Enhance(bgrSrc, height, width, srcStride, bgrDst, dstStride); }
+            finally { pool.Return(pipe); }
+            return;
+        }
         bool useVk = _backend == GcdrBackend.Vulkan
             || (_backend == GcdrBackend.Auto && VulkanOk());
         if (useVk)
@@ -213,6 +239,12 @@ public sealed class GcdrEnhancer : IDisposable
         catch { return false; }
     }
 
+    private static bool MetalOk()
+    {
+        try { return Backends.Metal.MetalBackend.Available(); }
+        catch { return false; }
+    }
+
     /// <summary>Convenience: enhance a tightly-packed BGR HWC image, returns new array.</summary>
     public byte[] Enhance(byte[] bgrSrc, int width, int height)
     {
@@ -225,6 +257,7 @@ public sealed class GcdrEnhancer : IDisposable
     {
         Interlocked.Exchange(ref _cpuPool, null)?.Dispose();
         Interlocked.Exchange(ref _vkPool, null)?.Dispose();
+        Interlocked.Exchange(ref _mtlPool, null)?.Dispose();
         _cpuPlans.Clear();
     }
 

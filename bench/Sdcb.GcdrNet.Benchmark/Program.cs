@@ -32,6 +32,137 @@ public static class Program
             int reps = args.Length > 3 ? int.Parse(args[3]) : 10;
             return BenchVk(gcPath, drPath, h, w, reps);
         }
+        if (args.Length > 0 && args[0] == "--mtrace")
+        {
+            // per-node CPU-vs-Metal bisect: first node whose output diverges
+            string which = args.Length > 1 ? args[1] : "gc";
+            int h = args.Length > 2 ? int.Parse(args[2]) : 96;
+            int w = args.Length > 3 ? int.Parse(args[3]) : 128;
+            string mpath = which == "gc" ? gcPath : drPath;
+            var m = OnnxModel.Load(mpath);
+            int c = which == "gc" ? 3 : 6;
+            // run the SAME (gpu-layout) plan on CPU and Metal so node indices align
+            var cpuPlan = GraphCompiler.Compile(m, [1, c, h, w], Sdcb.GcdrNet.Backends.Metal.MetalBackend.PlanOptions);
+            using var cpu = new InferenceSession(cpuPlan);
+            var rng = new Random(0);
+            if (args.Length > 4)
+            {
+                var gb = File.ReadAllBytes(args[4]);
+                var gf = new float[gb.Length / 4];
+                Buffer.BlockCopy(gb, 0, gf, 0, gb.Length);
+                gf.CopyTo(cpu.Input);
+            }
+            else
+                for (int i = 0; i < cpu.Input.Length; i++) cpu.Input[i] = rng.NextSingle();
+            var mbe = Sdcb.GcdrNet.Backends.Metal.MetalBackend.Default;
+            var mPlan = GraphCompiler.Compile(m, [1, c, h, w], Sdcb.GcdrNet.Backends.Metal.MetalBackend.PlanOptions);
+            using var mtl = mbe.NewSession(m, [1, c, h, w]);
+            cpu.Input.CopyTo(mtl.Input);
+            mtl.DebugUploadInput();
+            if (Environment.GetEnvironmentVariable("MTRACE_NODES") == "1")
+            {
+                for (int i = 0; i < Math.Max(cpuPlan.Nodes.Length, mPlan.Nodes.Length); i++)
+                {
+                    string cn = i < cpuPlan.Nodes.Length ? $"{cpuPlan.Nodes[i].Op} {cpuPlan.Nodes[i].Name}" : "-";
+                    string mn = i < mPlan.Nodes.Length ? $"{mPlan.Nodes[i].Op} {mPlan.Nodes[i].Name}" : "-";
+                    Console.WriteLine($"{i,3}  cpu: {cn,-46}  mtl: {mn}");
+                }
+                return 0;
+            }
+            int bad = -1;
+            for (int i = 0; i < cpuPlan.Nodes.Length; i++)
+            {
+                cpu.ExecNode(i);
+                mtl.DebugRunNode(i);
+                var want = cpu.ValueSpan(cpuPlan.Nodes[i].Out[0]);
+                var got = mtl.DebugValue(cpuPlan.Nodes[i].Out[0]);
+                if (got.Length != want.Length) Console.WriteLine($"    !! len got {got.Length} want {want.Length}");
+                double rmse = 0, mx = 0; int nd = 0, nan = 0, nanw = 0;
+                int nl = Math.Min(want.Length, got.Length);
+                for (int k = 0; k < nl; k++)
+                {
+                    if (!float.IsFinite(got[k])) nan++;
+                    if (!float.IsFinite(want[k])) nanw++;
+                    if (!float.IsFinite(got[k]) || !float.IsFinite(want[k])) continue;
+                    double d = Math.Abs(want[k] - got[k]);
+                    rmse += d * d;
+                    if (d > 1e-3) nd++;
+                    if (d > mx) mx = d;
+                }
+                rmse = Math.Sqrt(rmse / want.Length);
+                var nd_ = cpuPlan.Nodes[i];
+                string io = $"{nd_.Op} {nd_.Name}";
+                if (nd_.P is ConvP cpx)
+                    io += $" k{cpx.Kernel[0]}x{cpx.Kernel[1]} s{cpx.Strides[0]}x{cpx.Strides[1]} p[{string.Join(',',cpx.Pads)}] {cpx.PadMode} padv={cpx.PadValue} act={cpx.Act} g={cpx.Group} pool={(cpx.Pool!=null)} w={string.Join('x',mPlan.Values[nd_.In[1]].Shape)} in={string.Join('x',mPlan.Values[nd_.In[0]].PhysShape)} out={string.Join('x',mPlan.Values[nd_.Out[0]].PhysShape)}";
+                Console.WriteLine($"[{i,3}] {io,-46} rmse {rmse,10:E3} max {mx,10:E3} nd {nd} nan {nan} nanw {nanw}");
+                if (i <= 4 && nd_.P is ConvP)
+                {
+                    // weight packing check: expected PackConv [K][oc] vs metal const
+                    var wv = mPlan.Values[nd_.In[1]];
+                    var wsrc = wv.Floats!;
+                    int oc_ = wv.Shape[0], ic_ = wv.Shape[1], taps = wv.Shape[2] * wv.Shape[3];
+                    var exp = new float[wsrc.Length];
+                    for (int o2 = 0; o2 < oc_; o2++) for (int c2 = 0; c2 < ic_; c2++) for (int t = 0; t < taps; t++)
+                        exp[(t * ic_ + c2) * oc_ + o2] = wsrc[(o2 * ic_ + c2) * taps + t];
+                    var mw = mtl.DebugConst(nd_.In[1], 2, wsrc.Length);
+                    int wb = -1; for (int k = 0; k < exp.Length; k++) if (Math.Abs(mw[k] - exp[k]) > 1e-3) { wb = k; break; }
+                    Console.WriteLine($"    w-check: pack len {exp.Length} off {mtl.DebugConstOff(nd_.In[1], 2)} first-diff {wb} head {string.Join(' ', mw.Take(8).Select(x => $"{x:F3}"))} vs exp {string.Join(' ', exp.Take(8).Select(x => $"{x:F3}"))}");
+                    if (wb >= 0) Console.WriteLine($"      @{wb}: got {mw[wb]:F4} exp {exp[wb]:F4}; around got {string.Join(' ', mw.Skip(wb).Take(6).Select(x => $"{x:F3}"))} exp {string.Join(' ', exp.Skip(wb).Take(6).Select(x => $"{x:F3}"))}");
+                }
+                if (bad < 0 && (rmse > 1e-2 || nan > 0 || nanw > 0))
+                {
+                    bad = i;
+                    foreach (var dn in mtl.DebugNodeDispatches(i)) Console.WriteLine($"    disp: {dn}");
+                    var sb = new System.Text.StringBuilder();
+                    for (int k = 0; k < Math.Min(16, nl); k++) sb.Append($"{want[k]:F4}/{got[k]:F4}  ");
+                    Console.WriteLine($"    head: {sb}");
+                    // per-channel max diff (NHWC last-dim channels)
+                    int ch = mPlan.Values[nd_.Out[0]].PhysShape[^1];
+                    if (ch > 0)
+                    {
+                        var cd = new double[ch];
+                        for (int k = 0; k < nl; k++) cd[k % ch] = Math.Max(cd[k % ch], Math.Abs(want[k] - got[k]));
+                        Console.WriteLine($"    chmax: {string.Join(' ', cd.Take(Math.Min(ch,32)).Select(v => $"{v:F2}"))}");
+                        // worst index
+                        double bd = 0; int bi = -1;
+                        for (int k = 0; k < nl; k++) { double d = Math.Abs(want[k]-got[k]); if (d > bd) { bd = d; bi = k; } }
+                        if (bi >= 0) Console.WriteLine($"    worst@{bi} (pix {bi/ch} ch {bi%ch}): want {want[bi]:F4} got {got[bi]:F4}");
+                    }
+                }
+            }
+            Console.WriteLine(bad < 0 ? "all nodes match (rmse<1e-2)" : $"first bad node: {bad}");
+            return bad < 0 ? 0 : 1;
+        }
+        if (args.Length > 0 && args[0] == "--checkgpu")
+        {
+            // exactness vs CPU (vector<float> baseline): random src -> max |byte diff|
+            int h = args.Length > 1 ? int.Parse(args[1]) : 384;
+            int w = args.Length > 2 ? int.Parse(args[2]) : 512;
+            GcdrBackend be = (args.Length > 3 ? args[3] : "metal") == "metal" ? GcdrBackend.Metal : GcdrBackend.Vulkan;
+            using var enhC = GcdrEnhancer.FromFiles(gcPath, drPath, GcdrBackend.Cpu);
+            using var enhG = GcdrEnhancer.FromFiles(gcPath, drPath, be);
+            byte[] src = new byte[w * h * 3];
+            new Random(0).NextBytes(src);
+            byte[] dc = new byte[w * h * 3], dg = new byte[w * h * 3];
+            enhC.Enhance(src, w, h, w * 3, dc, w * 3);
+            enhG.Enhance(src, w, h, w * 3, dg, w * 3);
+            int dif = 0, maxd = 0; long sumd = 0;
+            for (int i = 0; i < dc.Length; i++)
+            {
+                int d = Math.Abs(dc[i] - dg[i]);
+                if (d > 0) { dif++; sumd += d; }
+                if (d > maxd) maxd = d;
+            }
+            Console.WriteLine($"{be} vs cpu {w}x{h}: diff {dif}/{dc.Length} px, maxd {maxd}, meand {(dif > 0 ? (double)sumd / dif : 0):F3}");
+            return maxd > 4 ? 1 : 0;
+        }
+        if (args.Length > 0 && args[0] == "--benchmtl")
+        {
+            int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
+            int w = args.Length > 2 ? int.Parse(args[2]) : 1600;
+            int reps = args.Length > 3 ? int.Parse(args[3]) : 10;
+            return BenchE2e(gcPath, drPath, h, w, reps, GcdrBackend.Metal, "metal");
+        }
         if (args.Length > 0 && args[0] == "--benchcpu")
         {
             int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
@@ -71,6 +202,22 @@ public static class Program
             int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
             int w = args.Length > 2 ? int.Parse(args[2]) : 1600;
             return VkProf(gcPath, drPath, h, w);
+        }
+        if (args.Length > 0 && args[0] == "--mtlprof")
+        {
+            int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
+            int w = args.Length > 2 ? int.Parse(args[2]) : 1600;
+            var be = Backends.Metal.MetalBackend.Default;
+            foreach ((string tag, string mp, int cin) in new[] { ("gc", gcPath, 3), ("dr", drPath, 6) })
+            {
+                var m = OnnxModel.Load(mp);
+                using var s = be.NewSession(m, [1, cin, h, w]);
+                s.Run(); // warm
+                var agg = s.DebugProfile();
+                Console.WriteLine($"--- {tag} metal per-shader (total {agg.Values.Sum():F1} ms) ---");
+                foreach (var kv in agg.OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-14} {kv.Value,8:F2} ms");
+            }
+            return 0;
         }
         if (args.Length > 0 && args[0] == "--corpus")
         {
@@ -405,6 +552,7 @@ public static class Program
         {
             "cpu" => GcdrBackend.Cpu,
             "vulkan" or "vk" => GcdrBackend.Vulkan,
+            "metal" or "mtl" => GcdrBackend.Metal,
             _ => GcdrBackend.Auto,
         };
         var manifest = System.Text.Json.JsonDocument.Parse(
