@@ -37,10 +37,37 @@ object LoadTable()
 	};
 }
 
+// Makes a re-published package (even with the same version) visible to the next restore:
+// clears NuGet's feed-metadata cache and removes only this repo's packages from the
+// global-packages folder; every other package stays.
 void ClearNuGetCache()
 {
 	DotNetRun("nuget locals http-cache --clear");
 	DotNetRun("nuget locals temp --clear");
+	string root = GlobalPackagesFolder();
+	foreach (ProjectVersion p in Projects)
+	{
+		string dir = Path.Combine(root, p.name.ToLowerInvariant());
+		if (!Directory.Exists(dir)) continue;
+		Directory.Delete(dir, recursive: true);
+		$"deleted {dir}".Dump();
+	}
+}
+
+// honours NUGET_PACKAGES / nuget.config overrides
+static string GlobalPackagesFolder()
+{
+	using Process p = Process.Start(new ProcessStartInfo("dotnet", "nuget locals global-packages --list")
+	{
+		RedirectStandardOutput = true,
+		UseShellExecute = false,
+	})!;
+	string output = p.StandardOutput.ReadToEnd();
+	p.WaitForExit();
+	const string prefix = "global-packages:";
+	string? line = output.Split('\n').Select(x => x.Trim()).FirstOrDefault(x => x.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+	if (line is null) throw new Exception($"Cannot locate the global-packages folder:{Environment.NewLine}{output}");
+	return line[prefix.Length..].Trim();
 }
 
 void Build(ProjectVersion p)
