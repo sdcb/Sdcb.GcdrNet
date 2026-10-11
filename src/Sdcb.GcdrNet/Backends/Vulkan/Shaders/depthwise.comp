@@ -43,14 +43,12 @@ void main()
         {
             int sx = int(ox * p.sw + kx) - int(p.pl);
             float wv = float(w[(ky * p.kw + kx) * p.c + ch]);
-            int yy = sy, xx = sx;
-            if (uint(sy) >= p.ih || uint(sx) >= p.iw)
-            {
-                if (!refl) { acc += wv * p.padVal; continue; }
-                if (uint(sy) >= p.ih) yy = mirror(sy, int(p.ih));
-                if (uint(sx) >= p.iw) xx = mirror(sx, int(p.iw));
-            }
-            acc += wv * float(x[(uint(yy) * p.iw + uint(xx)) * p.c + ch]);
+            // branch-free border: Adreno 750 mis-executed the former `acc += pad; continue;` form
+            bool oob = uint(sy) >= p.ih || uint(sx) >= p.iw;
+            int yy = refl ? mirror(sy, int(p.ih)) : clamp(sy, 0, int(p.ih) - 1);
+            int xx = refl ? mirror(sx, int(p.iw)) : clamp(sx, 0, int(p.iw) - 1);
+            float xv = float(x[(uint(yy) * p.iw + uint(xx)) * p.c + ch]);
+            acc += wv * (oob && !refl ? p.padVal : xv);
         }
     }
     if ((p.flags & 4u) != 0u) acc = max(acc, 0.0);
