@@ -488,7 +488,6 @@ public static class Program
         Run(p1, "p1-run1");
         Run(p1, "p1-run2");
         var churn = new List<Backends.Vulkan.VkGcdrPipeline>();
-        int k = 0;
         foreach (int px in churnPx)
         {
             int cw = Math.Max(64, (int)Math.Sqrt(px * 16.0 / 9) / 32 * 32);

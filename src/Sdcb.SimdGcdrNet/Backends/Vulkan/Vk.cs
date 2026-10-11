@@ -132,9 +132,13 @@ internal static unsafe partial class Vk
         }
         public VkMemoryHeap HeapAt(int i)
         {
-            fixed (byte* p = MemoryHeaps) return ((VkMemoryHeapNative*)p)[i].ToManaged();
+            // native VkMemoryHeap: { VkDeviceSize size; VkMemoryHeapFlags flags; } = 16 bytes
+            fixed (byte* p = MemoryHeaps)
+            {
+                byte* h = p + i * 16;
+                return new() { Size = *(ulong*)h, Flags = *(uint*)(h + 8) };
+            }
         }
-        private struct VkMemoryHeapNative { public ulong Size; public uint Flags; public uint Pad; public VkMemoryHeap ToManaged() => new() { Size = Size, Flags = Flags }; }
     }
 
     [StructLayout(LayoutKind.Sequential)]
