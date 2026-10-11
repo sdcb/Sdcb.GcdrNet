@@ -132,6 +132,17 @@ Kernel dispatch follows the runtime's
 - Thread-safety: `GcdrEnhancer` is thread-safe (CPU: per-size session pools; Vulkan: size-agnostic worker pool); individual
   `InferenceSession`/`VkInferenceSession` objects are not.
 - Not covered: batched inference (N>1), fp16/int8.
+- Native AOT works (`IsAotCompatible`, no trim/AOT warnings; CPU and Vulkan output verified identical to JIT). On **x64** the executable
+  project must set the instruction set, otherwise ILC compiles for the SSE baseline, folds
+  `Avx2.IsSupported` / `Avx512F.IsSupported` to `false` and the CPU backend silently runs the 128-bit
+  `Vector<float>` tier (~1.3× slower):
+
+  ```xml
+  <IlcInstructionSet>x86-64-v3</IlcInstructionSet>   <!-- AVX2+FMA; x86-64-v4 for AVX-512 -->
+  ```
+
+  The binary then refuses to start on CPUs without those extensions. arm64 needs nothing (NEON is in
+  the baseline); GPU backends are unaffected.
 
 ---
 
@@ -220,3 +231,15 @@ SkiaSharp 解码）。`tests/testdata/realdae/` 存 50 张 RealDAE 语料
 改 CPU 内核请用 `test-all.ps1` 跑 ISA 矩阵：
 `DOTNET_EnableAVX2=0`（128 位 Vector）、`DOTNET_EnableAVX=0`（SSE 无 FMA）、
 `DOTNET_EnableHWIntrinsic=0`（纯标量），以及 `DOTNET_EnableAVX512=0` / `DOTNET_EnableAVX512F=0`（AVX2）。
+
+### Native AOT
+
+支持 Native AOT（`IsAotCompatible`，裁剪 / AOT 无警告；CPU、Vulkan 输出与 JIT 逐字节一致）。**x64** 上可执行项目必须指定指令集，
+否则 ILC 按 SSE 基线编译，`Avx2.IsSupported` / `Avx512F.IsSupported` 被折成 `false`，CPU 后端会静默退到
+128 位 `Vector<float>` 档（慢约 1.3 倍）：
+
+```xml
+<IlcInstructionSet>x86-64-v3</IlcInstructionSet>   <!-- AVX2+FMA；x86-64-v4 才有 AVX-512 -->
+```
+
+这样编出的程序在不支持这些扩展的 CPU 上无法启动。arm64 不用设（NEON 在基线里）；GPU 后端不受影响。
