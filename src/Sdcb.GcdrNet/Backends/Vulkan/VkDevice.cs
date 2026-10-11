@@ -43,6 +43,9 @@ internal unsafe sealed class VkDevice : IDisposable
     /// GPUs (Arc B580: 10.4 -> 6.7 ms for the four; per-element index math is costly on SIMD16)
     /// (GCDRNET_VK_VEC4=0 disables; other discrete GPUs keep the per-element shaders).</summary>
     public bool Vec4Eltwise;
+    /// <summary>3x3 stem conv+pool uses convpool_k3 (input window rows in registers): Intel GPUs
+    /// (Arc B580: 7.5 -> 4.9 ms for the two stems) (GCDRNET_VK_CONVPOOL3=0 disables).</summary>
+    public bool ConvPoolK3;
     private const uint VendorIntel = 0x8086;
     /// <summary>Largest DEVICE_LOCAL heap (bytes).</summary>
     public ulong DeviceLocalHeap;
@@ -338,6 +341,7 @@ internal unsafe sealed class VkDevice : IDisposable
         }
         d.UnifiedMemory = props.DeviceType == VkConst.PhysDeviceIntegrated;
         d.Vec4Eltwise = (d.UnifiedMemory || d.VendorId == VendorIntel) && Environment.GetEnvironmentVariable("GCDRNET_VK_VEC4") != "0";
+        d.ConvPoolK3 = d.VendorId == VendorIntel && Environment.GetEnvironmentVariable("GCDRNET_VK_CONVPOOL3") != "0";
         for (int i = 0; i < (int)d.MemProps.MemoryHeapCount; i++)
         {
             var hp = d.MemProps.HeapAt(i);
@@ -374,7 +378,7 @@ internal unsafe sealed class VkDevice : IDisposable
             Console.Error.WriteLine($"[vk] device={d.DeviceName} type={props.DeviceType} vendor=0x{d.VendorId:x4} qfamily={d.QueueFamily} " +
                 $"sg={d.SubgroupSize} sgRange={d.SubgroupMin}-{d.SubgroupMax} sgcCompute={sgcCompute} push={d.PushDescriptors} " +
                 $"coopmat={d.CoopMat16} coopSg={(d.CoopSubgroupSize == 0 ? "default" : d.CoopSubgroupSize.ToString())} " +
-                $"m8={d.CoopM8} fullSg={d._fullSubgroups} lite={d.CoopLite} vec4={d.Vec4Eltwise} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
+                $"m8={d.CoopM8} fullSg={d._fullSubgroups} lite={d.CoopLite} vec4={d.Vec4Eltwise} cp3={d.ConvPoolK3} lds={d.MaxSharedMemory} sb16={d.StorageBuffer16}");
             for (uint i = 0; i < nqf; i++)
                 Console.Error.WriteLine($"[vk] qf{i}: flags=0x{qf[i].QueueFlags:x} count={qf[i].QueueCount} tsbits={qf[i].TimestampValidBits}"
                     + (i == d.QueueFamily ? " <- selected" : ""));

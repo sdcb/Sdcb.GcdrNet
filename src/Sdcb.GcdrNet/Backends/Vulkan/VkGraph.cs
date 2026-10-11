@@ -364,7 +364,8 @@ internal sealed class VkGraphModel : IDisposable
                         throw new NotSupportedException("Vulkan convpool: unsupported conv");
                     uint pf = (p.BiasValue >= 0 ? 1u : 0u) | (p.PadMode == PadMode.Reflect ? 2u : 0u)
                         | (p.Act == ActivationKind.Relu ? 4u : 0u) | (pool.FuseRelu ? 8u : 0u);
-                    yield return ND("convpool",
+                    bool k3 = _dev.ConvPoolK3 && p.Kernel[0] == 3 && p.Kernel[1] == 3;
+                    yield return ND(k3 ? "convpool_k3" : "convpool",
                         [Bind(n.In[0]), Bind(n.In[1], CK.ConvW), B(p.BiasValue, CK.F32), Bind(n.Out[0])],
                         PcOfF(U(ci[3], ci[1], ci[2], cw[0], co[1], co[2], p.Kernel[0], p.Kernel[1], p.Pads[0], p.Pads[1], (int)pf),
                             p.PadMode == PadMode.Constant ? p.PadValue : 0f),
