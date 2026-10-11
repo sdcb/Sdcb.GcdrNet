@@ -29,15 +29,16 @@ internal sealed class MetalBackend : IDisposable
     internal MetalBackend()
     {
         Dev = MtlDevice.Probe() ?? throw new PlatformNotSupportedException("Metal: no device");
-        Console.Error.WriteLine($"[metal] device: {Dev.Name}");
+        if (Environment.GetEnvironmentVariable("GCDRNET_MTL_VERBOSE") == "1")
+            Console.Error.WriteLine($"[metal] device: {Dev.Name}");
     }
 
     /// <summary>New inference session for a model and input shape (non-physical I/O plan).</summary>
     public MtlInferenceSession NewSession(OnnxModel m, int[] shape)
     {
         MtlGraphModel g = AcquireGraph(m, shape, physIo: false);   // caller ref: later evictions can't free it under us
-        ExecPlan plan = GraphCompiler.Compile(m, shape, PlanOptions);
-        return new MtlInferenceSession(Dev, plan, g);
+        try { return new MtlInferenceSession(Dev, g.Plan, g); }
+        finally { g.Release(); }
     }
 
     /// <summary>The cached graph for (model, shape); acquires a reference for the caller.</summary>
@@ -64,7 +65,7 @@ internal sealed class MetalBackend : IDisposable
             {
                 var victim = _graphs.Keys.First(k => !k.Equals(key));
                 _graphs.Remove(victim, out var old);
-                old.Release();
+                old?.Release();
             }
             g.Acquire();
             return g;

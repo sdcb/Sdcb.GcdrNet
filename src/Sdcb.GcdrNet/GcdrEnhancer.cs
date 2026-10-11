@@ -13,10 +13,10 @@ public enum GcdrBackend
     Cpu,
     /// <summary>Vulkan compute on a discrete GPU.</summary>
     Vulkan,
-    /// <summary>Metal compute on Apple Silicon (macOS arm64).</summary>
-    Metal,
     /// <summary>GPU (Vulkan or Metal) if a compute-capable device exists, else CPU.</summary>
     Auto,
+    /// <summary>Metal compute on Apple Silicon (macOS arm64).</summary>
+    Metal,
 }
 
 /// <summary>
@@ -38,6 +38,9 @@ public sealed class GcdrEnhancer : IDisposable
     private const long CpuArenaBudget = 4L << 30;
     private readonly ConcurrentDictionary<long, (ExecPlan gc, ExecPlan dr)> _cpuPlans = new();
     private readonly CpuKernels.Cache _gcKernels = new(), _drKernels = new();
+    // Cache Metal availability for the process: re-probing (incl. the MSL library
+    // compile) per Enhance would re-throw on init failure for every frame.
+    private static readonly Lazy<bool> s_metalOk = new(MetalOk);
     private SizePool<CpuWorker>? _cpuPool;
     // Vulkan workers are size-agnostic (budgeted grow-only arenas, re-record on size
     // change): one pool serves every size; idle workers beyond the first are kept
@@ -149,9 +152,7 @@ public sealed class GcdrEnhancer : IDisposable
         Span<byte> bgrDst, int dstStride)
     {
         bool useMtl = _backend == GcdrBackend.Metal
-            || (_backend == GcdrBackend.Auto && OperatingSystem.IsMacOS()
-                && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64
-                && MetalOk() && Backends.Metal.MetalBackend.Default.Dev.SupportsApple7);
+            || (_backend == GcdrBackend.Auto && s_metalOk.Value);
         if (useMtl)
         {
             var pool = MtlPool();
@@ -241,7 +242,13 @@ public sealed class GcdrEnhancer : IDisposable
 
     private static bool MetalOk()
     {
-        try { return Backends.Metal.MetalBackend.Available(); }
+        try
+        {
+            var dev = Backends.Metal.MetalBackend.Default.Dev;
+            // Apple7+ (M1+) for simdgroup matrix ops; Pipe() forces the embedded
+            // MSL library compile now rather than mid-Enhance on macOS 13.
+            return dev.SupportsApple7 && dev.Pipe("bgr2nhwc") is not null;
+        }
         catch { return false; }
     }
 

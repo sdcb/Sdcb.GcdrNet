@@ -165,7 +165,7 @@ internal sealed unsafe class MtlGcdrPipeline : IDisposable
         using (var pool = AutoReleasePool.Create())
         {
             var enc = _dev.BeginCommands();
-            RecordAll(enc, srcStride == _iw * 3 ? _iw * 3 : _iw * 3); // staging is always tightly packed
+            RecordAll(enc, _iw * 3); // staging is always tightly packed
             enc.End();
             enc.CommitAndWait();
         }

@@ -24,7 +24,7 @@ internal sealed class MtlDevice : IDisposable
     public readonly IntPtr H;
     private readonly IntPtr _queue;
     // shader library + PSO cache, shared by every MetalGraphModel on this
-    // device (each PaddleOcrAll carries det/cls/rec models — per-model
+    // device (each MtlGcdrPipeline carries gc+dr models — per-model
     // libraries would recompile ~2.5k lines of MSL three times and leak the
     // whole set on every release). Disposed with the device.
     private MtlLibrary? _lib;
@@ -83,7 +83,13 @@ internal sealed class MtlDevice : IDisposable
         lock (_pipes)
         {
             if (!_pipes.TryGetValue(name, out MtlPipeline? p))
+            {
                 _pipes[name] = p = NewPipeline(ShaderLibrary(), name);
+                // every kernel is dispatched at 256 threads/threadgroup
+                if (p.MaxTotalThreadsPerThreadgroup < 256)
+                    throw new NotSupportedException(
+                        $"Metal: {name} pso supports {p.MaxTotalThreadsPerThreadgroup} threads/group");
+            }
             return p;
         }
     }
