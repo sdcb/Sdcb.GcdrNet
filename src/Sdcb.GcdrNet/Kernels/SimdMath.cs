@@ -158,6 +158,51 @@ internal static class SimdMath
             Vector256.Add(Vector256<float>.One,
                 ErfCore(Vector256.Multiply(x, Vector256.Create(0.70710678118654752f)))));
 
+    // ---------- 128-bit cores (NEON tier fused epilogues; same formulas as the AVX2 cores) ----------
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> ExpCore(Vector128<float> x)
+    {
+        x = Vector128.Max(x, Vector128.Create(-87.3f));
+        x = Vector128.Min(x, Vector128.Create(88.7f));
+        var fx = Vector128.FusedMultiplyAdd(x, Vector128.Create(1.4426950408889634f), Vector128.Create(0.5f));
+        var nf = Vector128.Floor(fx);
+        var r = Vector128.FusedMultiplyAdd(nf, Vector128.Create(-0.693359375f), x);
+        r = Vector128.FusedMultiplyAdd(nf, Vector128.Create(0.00021219444005469058f), r);
+        var p = Vector128.Create(1.9875691500e-4f);
+        p = Vector128.FusedMultiplyAdd(p, r, Vector128.Create(1.3981999507e-3f));
+        p = Vector128.FusedMultiplyAdd(p, r, Vector128.Create(8.3334519073e-3f));
+        p = Vector128.FusedMultiplyAdd(p, r, Vector128.Create(4.1665795894e-2f));
+        p = Vector128.FusedMultiplyAdd(p, r, Vector128.Create(1.6666665459e-1f));
+        p = Vector128.FusedMultiplyAdd(p, r, Vector128.Create(5.0000001201e-1f));
+        var y = Vector128.FusedMultiplyAdd(p, r * r, r) + Vector128<float>.One;
+        var ni = Vector128.ConvertToInt32(nf) + Vector128.Create(127);
+        return y * Vector128.ShiftLeft(ni, 23).AsSingle();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> SigmoidCore(Vector128<float> x) =>
+        Vector128<float>.One / (Vector128<float>.One + ExpCore(-x));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> ErfCore(Vector128<float> x)
+    {
+        var signBit = Vector128.Create(-0f);
+        var sign = (x & signBit) | Vector128<float>.One;
+        var ax = Vector128.AndNot(x, signBit);
+        var t = Vector128<float>.One / (Vector128<float>.One + Vector128.Create(0.3275911f) * ax);
+        var p = Vector128.Create(1.061405429f);
+        p = Vector128.FusedMultiplyAdd(p, t, Vector128.Create(-1.453152027f));
+        p = Vector128.FusedMultiplyAdd(p, t, Vector128.Create(1.421413741f));
+        p = Vector128.FusedMultiplyAdd(p, t, Vector128.Create(-0.284496736f));
+        p = Vector128.FusedMultiplyAdd(p, t, Vector128.Create(0.254829592f));
+        var y = Vector128<float>.One - p * t * ExpCore(-(ax * ax));
+        return y * sign;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> GeluCore(Vector128<float> x) =>
+        Vector128.Create(0.5f) * x * (Vector128<float>.One + ErfCore(x * Vector128.Create(0.70710678118654752f)));
+
     internal static float ErfScalar(float x)
     {
         float ax = MathF.Abs(x);

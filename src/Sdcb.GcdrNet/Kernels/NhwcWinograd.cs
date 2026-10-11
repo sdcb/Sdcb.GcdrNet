@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using Sdcb.GcdrNet.Engine;
 using F32x8 = System.Runtime.Intrinsics.Vector256<float>;
@@ -81,8 +82,8 @@ internal static unsafe partial class Nhwc
             Tw = (ow + 3) / 4;
             Avx512 = UseAvx512;
             // V block ~256 KB (AVX2); the AVX-512 tier (Tile5-row x 32-oc GEMM tiles) measured
-            // best at ~64 KB on Zen 5
-            int tr = Avx512 ? Tile5 : Tile, vBudget = Avx512 ? 16384 : 65536;
+            // best at ~64 KB on Zen 5, NEON at ~16 KB (one Tile row for ic >= 32: four RK3399 A53s share 512 KB L2)
+            int tr = Avx512 ? Tile5 : Tile, vBudget = Avx512 ? 16384 : UseNeon ? 4096 : 65536;
             T = Math.Clamp(vBudget / (36 * ic) / tr * tr, tr, 60 / tr * tr);
             PadT = p.Pads[0]; PadL = p.Pads[1];
             Reflect = p.PadMode == PadMode.Reflect;
@@ -102,6 +103,11 @@ internal static unsafe partial class Nhwc
             var a = new WinoArgs(sp, up, bp, pv, ih, iw, ic, oh, ow, oc, kp.Blocks, p);
             int nt = (oh + 3) / 4 * a.Tw, chunks = (nt + a.T - 1) / a.T;
             float* dp = dp0, ap = hasAdd ? ap0 : null;
+            if (UseNeon && 36L * a.Nb * ic * Ob > NeonWinoUFloats)
+            {
+                WinogradGrouped(a, dp, ap);
+                return;
+            }
             For(chunks, (long)oh * ow * oc * ic, chunk =>
             {
                 int t0 = chunk * a.T;
@@ -158,9 +164,10 @@ internal static unsafe partial class Nhwc
                     {
                         int rows = Math.Min(tr, tn - r0);
                         for (int i = 0; i < tr; i++) ptrs[i] = vx + (long)(r0 + Math.Min(i, rows - 1)) * ic;
-                        // AVX2 writes all Tile rows into M (T is a multiple of Tile); rows past tn are never read
+                        // AVX2 / NEON write all Tile rows into M (T is a multiple of Tile); rows past tn are never read
                         if (avx512) Tile512(ptrs, nblk, 1, ic, wb, (long)ic * Ob, zero, mx + (long)r0 * mRow);
                         else if (avx) TileAvxK(ptrs, 1, ic, wb, zero, mx + (long)r0 * Ob, Ob);
+                        else if (UseNeon) TileNeonK(ptrs, 1, ic, wb, zero, mx + (long)r0 * Ob, Ob);
                         else TileVec(ptrs, rows, 1, ic, wb, zero, mx + (long)r0 * Ob, null, Ob, Ob, ActivationKind.None);
                     }
                 }
@@ -181,6 +188,7 @@ internal static unsafe partial class Nhwc
     {
         int lanes = Math.Min(Ob, oc - ocOff);
         bool fast512 = avx512 && lanes == Ob && act is ActivationKind.None or ActivationKind.Relu;
+        bool fastNeon = UseNeon && lanes == Ob;
         for (int t = 0; t < tn; t++)
         {
             int ty = (t0 + t) / tw, tx = (t0 + t) % tw;
@@ -203,6 +211,13 @@ internal static unsafe partial class Nhwc
                         if (act == ActivationKind.Relu) v = Avx512F.Max(v, Vector512<float>.Zero);
                         Avx512F.Store(dp + o, v);
                     }
+                    else if (fastNeon)
+                        for (int l = 0; l < Ob; l += 4)
+                        {
+                            var v = AdvSimd.Add(AdvSimd.LoadVector128(tp + l), AdvSimd.LoadVector128(bb + l));
+                            if (ap != null) v = AdvSimd.Add(v, AdvSimd.LoadVector128(ap + o + l));
+                            AdvSimd.Store(dp + o + l, Act4(v, act));
+                        }
                     else if (avx)
                         Store16(dp + o, ap != null ? ap + o : null,
                             Avx.Add(Avx.LoadVector256(tp), Avx.LoadVector256(bb)),

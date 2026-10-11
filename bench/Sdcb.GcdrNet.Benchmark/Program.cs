@@ -39,6 +39,27 @@ public static class Program
             int reps = args.Length > 3 ? int.Parse(args[3]) : 10;
             return BenchE2e(gcPath, drPath, h, w, reps, GcdrBackend.Cpu, "cpu");
         }
+        if (args.Length > 0 && args[0] == "--node")
+        {
+            // --node gc|dr h w idx reps : time one node in isolation (after a full warmup run)
+            bool isDr = args[1] == "dr";
+            int nh = int.Parse(args[2]), nw = int.Parse(args[3]), idx = int.Parse(args[4]), nreps = int.Parse(args[5]);
+            var cm = CompiledModel.Compile(OnnxModel.Load(isDr ? drPath : gcPath), [1, isDr ? 6 : 3, nh, nw]);
+            var ss = cm.CreateSession();
+            new Random(0).NextBytes(MemoryMarshal.AsBytes(ss.Input));
+            if (args.Length > 6 && args[6] == "u") { var rr = new Random(0); var inp = ss.Input; for (int i = 0; i < inp.Length; i++) inp[i] = rr.NextSingle(); }
+            ss.Run();
+            for (int i = 0; i < 3; i++) ss.ExecNode(idx);
+            double bestN = double.MaxValue;
+            for (int i = 0; i < nreps; i++)
+            {
+                long t0 = Stopwatch.GetTimestamp();
+                ss.ExecNode(idx);
+                bestN = Math.Min(bestN, Stopwatch.GetTimestamp() - t0);
+            }
+            Console.WriteLine($"node #{idx}: best {bestN / Stopwatch.Frequency * 1000:F2} ms");
+            return 0;
+        }
         if (args.Length > 0 && args[0] == "--trace")
         {
             int h = args.Length > 1 ? int.Parse(args[1]) : 96;
@@ -109,7 +130,7 @@ public static class Program
             string pimg = args.Length > 1 ? args[1] : "18_shadow.webp";
             return Bisect(gcPath, drPath, Path.Combine(dir, "realdae", pimg), args.Skip(2).Select(int.Parse).ToArray());
         }
-        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps] | --benchvk [h] [w] [reps] | --vkprof [h] [w] | --corpus [cpu|vulkan|auto] | --flip [img] | --analyze [h] [w] | --vkdup [h] [w] [dr] | --probe [img] [px...]");
+        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps] | --node gc|dr h w idx reps [u] | --benchvk [h] [w] [reps] | --vkprof [h] [w] | --corpus [cpu|vulkan|auto] | --flip [img] | --analyze [h] [w] | --vkdup [h] [w] [dr] | --probe [img] [px...]");
         return 1;
     }
 
@@ -673,7 +694,8 @@ public static class Program
         new Random(1).NextBytes(MemoryMarshal.AsBytes(s2.Input));
         // warmup
         s1.Run(); s2.Run();
-        double best1 = 1e9, best2 = 1e9;
+        s1.ResetProfile(); s2.ResetProfile();
+        double best1 = double.MaxValue, best2 = double.MaxValue;
         for (int i = 0; i < reps; i++)
         {
             long t = Stopwatch.GetTimestamp(); s1.Run();
@@ -685,9 +707,9 @@ public static class Program
         if (Environment.GetEnvironmentVariable("GCDRNET_PROF") == "1")
         {
             Console.WriteLine("--- gc profile ---");
-            foreach (var kv in s1.Profile().OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-16} {kv.Value.TotalMilliseconds,8:F1} ms");
+            foreach (var kv in s1.Profile().OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-16} {kv.Value.TotalMilliseconds / reps,8:F1} ms/run");
             Console.WriteLine("--- dr profile ---");
-            foreach (var kv in s2.Profile().OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-16} {kv.Value.TotalMilliseconds,8:F1} ms");
+            foreach (var kv in s2.Profile().OrderByDescending(k => k.Value)) Console.WriteLine($"  {kv.Key,-16} {kv.Value.TotalMilliseconds / reps,8:F1} ms/run");
             if (Environment.GetEnvironmentVariable("GCDRNET_PROF_NODES") == "1")
                 foreach (var (tag, ss) in new[] { ("gc", s1), ("dr", s2) })
                 {
@@ -695,7 +717,7 @@ public static class Program
                     foreach (var (i, n, t) in ss.NodeProfile().OrderByDescending(x => x.t).Take(int.TryParse(Environment.GetEnvironmentVariable("GCDRNET_PROF_TOP"), out int top) ? top : 14))
                     {
                         string extra = n.P is ConvP cp ? $" k{cp.Kernel[0]} s{cp.Strides[0]} g{cp.Group}" : "";
-                        Console.WriteLine($"  #{i,-3} {n.Op,-14}{extra,-12} {string.Join('x', ss.ShapeOf(n.In[0]))}->{string.Join('x', ss.ShapeOf(n.Out[0]))}  {t.TotalMilliseconds / (reps + 1),7:F2}");
+                        Console.WriteLine($"  #{i,-3} {n.Op,-14}{extra,-12} {string.Join('x', ss.ShapeOf(n.In[0]))}->{string.Join('x', ss.ShapeOf(n.Out[0]))}  {t.TotalMilliseconds / reps,7:F2}");
                     }
                 }
         }
@@ -713,7 +735,7 @@ public static class Program
         new Random(0).NextBytes(src);
         byte[] dst = new byte[w * h * 3];
         enh.Enhance(src, w, h, w * 3, dst, w * 3); // warmup + JIT + upload
-        double best = 1e9;
+        double best = double.MaxValue;
         for (int i = 0; i < reps; i++)
         {
             long t = Stopwatch.GetTimestamp();

@@ -1,10 +1,12 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using Sdcb.GcdrNet.Engine;
 
 using F32x8 = System.Runtime.Intrinsics.Vector256<float>;
+using V128 = System.Runtime.Intrinsics.Vector128<float>;
 using V256 = System.Runtime.Intrinsics.Vector256;
 
 namespace Sdcb.GcdrNet.Kernels;
@@ -211,6 +213,11 @@ internal static unsafe partial class Nhwc
     /// into <paramref name="orow"/> (the row's first pixel; addend row likewise).</summary>
     private static void DenseRow(in DenseArgs a, int y, int blk, float* orow, float* arow)
     {
+        if (UseNeon)
+        {
+            DenseRowNeon(a, y, blk, orow, arow);
+            return;
+        }
         int taps = a.Kh * a.Kw, ic = a.Ic, ow = a.Ow, oc = a.Oc, kw = a.Kw;
         float** ptrs = stackalloc float*[Tile * taps];
         float* wb = a.W + (long)blk * taps * ic * Ob;
@@ -305,6 +312,11 @@ internal static unsafe partial class Nhwc
     private static void TileVec(float** ptrs, int rows, int taps, int ic, float* wb, float* bb,
         float* outp, float* addp, int oc, int lanes, ActivationKind act)
     {
+        if (UseNeon)
+        {
+            TileNeon(ptrs, rows, taps, ic, wb, bb, outp, addp, oc, lanes, act);
+            return;
+        }
         int VL = Vector<float>.Count;
         // software Vector<T> (DOTNET_EnableHWIntrinsic=0) is far slower than plain scalar
         bool vec = Vector.IsHardwareAccelerated && Ob % VL == 0;
@@ -412,7 +424,18 @@ internal static unsafe partial class Nhwc
                     float* o = dp + ob;
                     float* ad = hasAdd ? ap + ob : null;
                     int ch = 0;
-                    if (avx)
+                    if (UseNeon)
+                    {
+                        for (; ch + 4 <= c; ch += 4)
+                        {
+                            V128 acc = AdvSimd.LoadVector128(bp + ch);
+                            for (int tap = 0; tap < taps; tap++)
+                                acc = AdvSimd.FusedMultiplyAdd(acc, AdvSimd.LoadVector128(ptrs[tap] + ch), AdvSimd.LoadVector128(wp + tap * c + ch));
+                            if (ad != null) acc = AdvSimd.Add(acc, AdvSimd.LoadVector128(ad + ch));
+                            AdvSimd.Store(o + ch, Act4(acc, act));
+                        }
+                    }
+                    else if (avx)
                     {
                         for (; ch + 8 <= c; ch += 8)
                         {
@@ -695,6 +718,7 @@ internal static unsafe partial class Nhwc
         ResizeAxis(ow, iw, sx, x0, x1, wx);
         bool relu = p.ResizeRelu, skipRelu = p.SkipRelu, avx = UseAvx;
         int oc = kp.Oc;
+        bool neonUp = UseNeon && c % 4 == 0 && oc <= 4;
         ActivationKind act = p.Act;
         int[] rm = [], cm = [];
         float[] padVec = [];
@@ -734,6 +758,13 @@ internal static unsafe partial class Nhwc
                         ConvRow(ca, y, sb, null);
                         krow = sb;
                     }
+                    if (neonUp)
+                    {
+                        fixed (int* xa = x0, xb = x1)
+                        fixed (float* wxp = wx)
+                            UpHeadRowNeon(r0, r1, xa, xb, wxp, wY, krow, c, ow, wp, bp, orow, oc, relu, skipRelu, act);
+                        return;
+                    }
                     for (int x = 0; x < ow; x++)
                     {
                         ResizePixel(r0 + (long)x0[x] * c, r0 + (long)x1[x] * c, r1 + (long)x0[x] * c, r1 + (long)x1[x] * c,
@@ -746,6 +777,18 @@ internal static unsafe partial class Nhwc
                             for (int ch = 0; ch < c; ch++, w += 8)
                                 a = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(s + ch), Avx.LoadVector256(w), a);
                             Avx.Store(acc, a);
+                        }
+                        else if (UseNeon)
+                        {
+                            V128 a = AdvSimd.LoadVector128(bp), b = AdvSimd.LoadVector128(bp + 4);
+                            float* w = wp;
+                            for (int ch = 0; ch < c; ch++, w += 8)
+                            {
+                                V128 v = AdvSimd.LoadAndReplicateToVector128(s + ch);
+                                a = AdvSimd.FusedMultiplyAdd(a, AdvSimd.LoadVector128(w), v);
+                                b = AdvSimd.FusedMultiplyAdd(b, AdvSimd.LoadVector128(w + 4), v);
+                            }
+                            AdvSimd.Store(acc, a); AdvSimd.Store(acc + 4, b);
                         }
                         else
                         {
@@ -770,6 +813,8 @@ internal static unsafe partial class Nhwc
         int i = 0;
         if (avx)
             for (; i + 8 <= n; i += 8) Avx.Store(p + i, Act8(Avx.LoadVector256(p + i), act));
+        else if (UseNeon)
+            for (; i + 4 <= n; i += 4) AdvSimd.Store(p + i, Act4(AdvSimd.LoadVector128(p + i), act));
         else if (act == ActivationKind.Sigmoid)
         {
             var row = new Span<float>(p + i, n - i);
