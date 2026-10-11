@@ -158,8 +158,9 @@ internal static unsafe partial class Nhwc
                     {
                         int rows = Math.Min(tr, tn - r0);
                         for (int i = 0; i < tr; i++) ptrs[i] = vx + (long)(r0 + Math.Min(i, rows - 1)) * ic;
+                        // AVX2 writes all Tile rows into M (T is a multiple of Tile); rows past tn are never read
                         if (avx512) Tile512(ptrs, nblk, 1, ic, wb, (long)ic * Ob, zero, mx + (long)r0 * mRow);
-                        else if (avx) TileAvx(ptrs, rows, 1, ic, wb, zero, mx + (long)r0 * Ob, null, Ob, Ob, ActivationKind.None);
+                        else if (avx) TileAvxK(ptrs, 1, ic, wb, zero, mx + (long)r0 * Ob, Ob);
                         else TileVec(ptrs, rows, 1, ic, wb, zero, mx + (long)r0 * Ob, null, Ob, Ob, ActivationKind.None);
                     }
                 }
