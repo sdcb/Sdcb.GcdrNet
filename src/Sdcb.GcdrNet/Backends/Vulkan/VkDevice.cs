@@ -39,9 +39,11 @@ internal unsafe sealed class VkDevice : IDisposable
     /// <summary>VK_EXT_subgroup_size_control range (1..128 when the extension is absent).</summary>
     public uint SubgroupMin = 1, SubgroupMax = 128;
     /// <summary>Memory-bound NHWC shaders (maxpool, bilinear, depthwise, shift) take 4 channels per
-    /// invocation when c % 4 == 0 — integrated GPUs, where they are bandwidth/issue bound
-    /// (GCDRNET_VK_VEC4=0 disables; discrete GPUs keep the per-element shaders).</summary>
+    /// invocation when c % 4 == 0 — integrated GPUs, where they are bandwidth/issue bound, and Intel
+    /// GPUs (Arc B580: 10.4 -> 6.7 ms for the four; per-element index math is costly on SIMD16)
+    /// (GCDRNET_VK_VEC4=0 disables; other discrete GPUs keep the per-element shaders).</summary>
     public bool Vec4Eltwise;
+    private const uint VendorIntel = 0x8086;
     /// <summary>Largest DEVICE_LOCAL heap (bytes).</summary>
     public ulong DeviceLocalHeap;
     /// <summary>Integrated GPU: "device-local" memory is system RAM shared with the CPU.</summary>
@@ -335,7 +337,7 @@ internal unsafe sealed class VkDevice : IDisposable
             }
         }
         d.UnifiedMemory = props.DeviceType == VkConst.PhysDeviceIntegrated;
-        d.Vec4Eltwise = d.UnifiedMemory && Environment.GetEnvironmentVariable("GCDRNET_VK_VEC4") != "0";
+        d.Vec4Eltwise = (d.UnifiedMemory || d.VendorId == VendorIntel) && Environment.GetEnvironmentVariable("GCDRNET_VK_VEC4") != "0";
         for (int i = 0; i < (int)d.MemProps.MemoryHeapCount; i++)
         {
             var hp = d.MemProps.HeapAt(i);
