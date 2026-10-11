@@ -236,9 +236,25 @@ internal static unsafe partial class Nhwc
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    /// <summary>6 × 16 tile: <see cref="TileAvxK"/> into a scratch tile, then the
+    /// residual / activation epilogue (<see cref="Store16"/>) per row.</summary>
     private static void TileAvx(float** ptrs, int rows, int taps, int ic, float* wb, float* bb,
         float* outp, float* addp, int oc, int lanes, ActivationKind act)
+    {
+        float* part = stackalloc float[Tile * Ob];
+        TileAvxK(ptrs, taps, ic, wb, bb, part, Ob);
+        for (int r = 0; r < rows; r++, part += Ob)
+            Store16(outp + (long)r * oc, addp == null ? null : addp + (long)r * oc,
+                Avx.LoadVector256(part), Avx.LoadVector256(part + 8), lanes, act);
+    }
+
+    /// <summary>
+    /// The 6 × 16 k loop: dst[r*ds + 0..15] = bias + Σ x·w for all <see cref="Tile"/> rows. It never
+    /// calls out — passing the accumulators to a helper (by reference under the x64 ABIs) makes
+    /// RyuJIT keep all twelve on the stack, a load + store around every FMA.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void TileAvxK(float** ptrs, int taps, int ic, float* wb, float* bb, float* dst, int ds)
     {
         F32x8 a0 = Avx.LoadVector256(bb), b0 = Avx.LoadVector256(bb + 8);
         F32x8 a1 = a0, a2 = a0, a3 = a0, a4 = a0, a5 = a0;
@@ -262,12 +278,12 @@ internal static unsafe partial class Nhwc
                 a5 = Fma.MultiplyAdd(v5, w0, a5); b5 = Fma.MultiplyAdd(v5, w1, b5);
             }
         }
-        Store16(outp, addp, a0, b0, lanes, act);
-        if (rows > 1) Store16(outp + oc, addp == null ? null : addp + oc, a1, b1, lanes, act);
-        if (rows > 2) Store16(outp + 2 * oc, addp == null ? null : addp + 2 * oc, a2, b2, lanes, act);
-        if (rows > 3) Store16(outp + 3 * oc, addp == null ? null : addp + 3 * oc, a3, b3, lanes, act);
-        if (rows > 4) Store16(outp + 4 * oc, addp == null ? null : addp + 4 * oc, a4, b4, lanes, act);
-        if (rows > 5) Store16(outp + 5 * oc, addp == null ? null : addp + 5 * oc, a5, b5, lanes, act);
+        Avx.Store(dst, a0); Avx.Store(dst + 8, b0); dst += ds;
+        Avx.Store(dst, a1); Avx.Store(dst + 8, b1); dst += ds;
+        Avx.Store(dst, a2); Avx.Store(dst + 8, b2); dst += ds;
+        Avx.Store(dst, a3); Avx.Store(dst + 8, b3); dst += ds;
+        Avx.Store(dst, a4); Avx.Store(dst + 8, b4); dst += ds;
+        Avx.Store(dst, a5); Avx.Store(dst + 8, b5);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
