@@ -191,6 +191,101 @@ public static class Program
             Console.WriteLine($"node #{idx}: best {bestN / Stopwatch.Frequency * 1000:F2} ms");
             return 0;
         }
+        if (args.Length > 0 && args[0] == "--vkcheck")
+        {
+            // Vulkan graph vs CPU graph on the same random input (u[0,1)): max |diff| and RMS
+            int ch = args.Length > 1 ? int.Parse(args[1]) : 256;
+            int cw = args.Length > 2 ? int.Parse(args[2]) : 384;
+            int bad = 0;
+            foreach ((string tag, string mp, int cin) in new[] { ("gc", gcPath, 3), ("dr", drPath, 6) })
+            {
+                var m = OnnxModel.Load(mp);
+                var cpu = CompiledModel.Compile(m, [1, cin, ch, cw]).CreateSession();
+                using var vk = Backends.Vulkan.VkBackend.Default.NewSession(m, [1, cin, ch, cw]);
+                var rng = new Random(7);
+                for (int i = 0; i < cpu.Input.Length; i++) cpu.Input[i] = vk.Input[i] = rng.NextSingle();
+                cpu.Run(); vk.Run();
+                double maxd = 0, se = 0, ss = 0;
+                var a = cpu.Output; var b = vk.Output;
+                for (int i = 0; i < a.Length; i++)
+                {
+                    double d = Math.Abs(a[i] - b[i]);
+                    maxd = Math.Max(maxd, d); se += d * d; ss += (double)a[i] * a[i];
+                }
+                double rel = Math.Sqrt(se / Math.Max(ss, 1e-30));
+                Console.WriteLine($"{tag} {cw}x{ch}: max|d| {maxd:E3}  rel-rms {rel:E3}");
+                if (rel > 5e-3 || double.IsNaN(rel)) bad++;
+            }
+            return bad == 0 ? 0 : 4;
+        }
+        if (args.Length > 0 && args[0] == "--vknodes")
+        {
+            // node-by-node GPU vs CPU on one plan (errors accumulate; a broken kernel shows as a jump)
+            bool isDr = args.Length > 1 && args[1] == "dr";
+            int nh = args.Length > 2 ? int.Parse(args[2]) : 128, nw = args.Length > 3 ? int.Parse(args[3]) : 192;
+            var m = OnnxModel.Load(isDr ? drPath : gcPath);
+            int[] shape = [1, isDr ? 6 : 3, nh, nw];
+            var plan = GraphCompiler.Compile(m, shape, Backends.Vulkan.VkBackend.PlanOptions);
+            using var cpu = new InferenceSession(plan);
+            using var gpu = Backends.Vulkan.VkBackend.Default.NewSession(m, shape);
+            var rng = new Random(7);
+            for (int i = 0; i < cpu.Input.Length; i++) cpu.Input[i] = gpu.Input[i] = rng.NextSingle();
+            gpu.DebugUploadInput();
+            var ranges = Backends.Vulkan.VkBackend.Default.GraphFor(m, shape).NodeRanges;
+            var gd = Backends.Vulkan.VkBackend.Default.GraphFor(m, shape).Dispatches;
+            for (int i = 0; i < plan.Nodes.Length; i++)
+            {
+                var nd = plan.Nodes[i];
+                cpu.ExecNode(i);
+                var (ds, dc) = ranges[i];
+                gpu.DebugRunRange(ds, dc);
+                int ov = nd.Out[0];
+                var v = plan.Values[ov];
+                float[] got = new float[v.ElementCount];
+                gpu.DebugDownload(ov, got);
+                var want = cpu.ValueSpan(ov);
+                double maxd = 0, se = 0, ss = 0;
+                for (int j = 0; j < got.Length; j++)
+                {
+                    double d = Math.Abs(got[j] - want[j]);
+                    maxd = Math.Max(maxd, d); se += d * d; ss += (double)want[j] * want[j];
+                }
+                string shaders = string.Join(",", Enumerable.Range(ds, dc).Select(k => gd[k].Name?.Split('(')[0]));
+                double relv = Math.Sqrt(se / Math.Max(ss, 1e-30));
+                Console.WriteLine($"[{i,3}] {nd.Op,-14} {string.Join('x', v.Shape),-16} rel {relv:E2} max {maxd:E2}  {shaders}");
+                if (relv > 0.01 && Environment.GetEnvironmentVariable("VKNODES_DUMP") == "1")
+                {
+                    int[] ps = v.PhysShape;
+                    int pc = ps[^1], pw = ps.Length >= 2 ? ps[^2] : 1;
+                    string pp = nd.P is ConvP cpp ? $"k{cpp.Kernel[0]} s{cpp.Strides[0]} g{cpp.Group} pads {string.Join(',', cpp.Pads)} mode {cpp.PadMode} act {cpp.Act} bias {cpp.BiasValue >= 0} add {cpp.AddValue >= 0}" : "";
+                    Console.WriteLine($"   phys {string.Join('x', ps)} {pp}");
+                    foreach (int iv in nd.In)
+                    {
+                        var vi = plan.Values[iv];
+                        if (vi.Buf < 0) { Console.WriteLine($"   in v{iv} const {string.Join('x', vi.Shape)}"); continue; }
+                        float[] gi = new float[vi.ElementCount];
+                        gpu.DebugDownload(iv, gi);
+                        var ci = cpu.ValueSpan(iv);
+                        double se2 = 0, ss2 = 0;
+                        for (int j = 0; j < gi.Length; j++) { double d = gi[j] - ci[j]; se2 += d * d; ss2 += (double)ci[j] * ci[j]; }
+                        Console.WriteLine($"   in v{iv} {string.Join('x', vi.PhysShape)} buf {vi.Buf} off {plan.BufOffset[vi.Buf]} rel {Math.Sqrt(se2 / Math.Max(ss2, 1e-30)):E2}");
+                    }
+                    Console.WriteLine($"   out v{ov} buf {v.Buf} off {plan.BufOffset[v.Buf]}");
+                    int shown = 0, badN = 0;
+                    var badC = new int[pc]; var badX = new int[pw];
+                    for (int j = 0; j < got.Length; j++)
+                        if (Math.Abs(got[j] - want[j]) > 0.05 + 0.05 * Math.Abs(want[j]))
+                        {
+                            badN++; badC[j % pc]++; badX[(j / pc) % pw]++;
+                            if (shown++ < 12) Console.WriteLine($"   y{j / pc / pw} x{(j / pc) % pw} c{j % pc}: gpu {got[j]:G5} cpu {want[j]:G5}");
+                        }
+                    Console.WriteLine($"   bad {badN}/{got.Length}; per c: {string.Join(' ', badC.Take(64))}");
+                    Console.WriteLine($"   per x: {string.Join(' ', badX.Take(96))}");
+                    break;
+                }
+            }
+            return 0;
+        }
         if (args.Length > 0 && args[0] == "--trace")
         {
             int h = args.Length > 1 ? int.Parse(args[1]) : 96;
@@ -277,7 +372,7 @@ public static class Program
             string pimg = args.Length > 1 ? args[1] : "18_shadow.webp";
             return Bisect(gcPath, drPath, Path.Combine(dir, "realdae", pimg), args.Skip(2).Select(int.Parse).ToArray());
         }
-        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps] | --node gc|dr h w idx reps [u] | --benchvk [h] [w] [reps] | --vkprof [h] [w] | --corpus [cpu|vulkan|auto] | --flip [img] | --analyze [h] [w] | --vkdup [h] [w] [dr] | --probe [img] [px...]");
+        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps] | --node gc|dr h w idx reps [u] | --benchvk [h] [w] [reps] | --vkprof [h] [w] | --vkcheck [h] [w] | --vknodes gc|dr [h] [w] | --corpus [cpu|vulkan|auto] | --flip [img] | --analyze [h] [w] | --vkdup [h] [w] [dr] | --probe [img] [px...]");
         return 1;
     }
 
@@ -364,7 +459,7 @@ public static class Program
         var be = Backends.Vulkan.VkBackend.Default;
         var gc = OnnxModel.Load(gcPath); var dr = OnnxModel.Load(drPath);
         int iw, ih; byte[] bgr;
-        using (var bmp = SkiaSharp.SKBitmap.Decode(imgPath)) { iw = bmp.Width; ih = bmp.Height; }
+        (iw, ih) = ImageSize(imgPath);
         bgr = DecodeBgr(imgPath);
         byte[] dst = new byte[bgr.Length];
         int pw = (iw + 31) / 32 * 32, ph = (ih + 31) / 32 * 32;
@@ -418,7 +513,7 @@ public static class Program
         var be = Backends.Vulkan.VkBackend.Default;
         var gc = OnnxModel.Load(gcPath); var dr = OnnxModel.Load(drPath);
         int iw, ih;
-        using (var bmp = SkiaSharp.SKBitmap.Decode(imgPath)) { iw = bmp.Width; ih = bmp.Height; }
+        (iw, ih) = ImageSize(imgPath);
         byte[] bgr = DecodeBgr(imgPath);
         byte[] dst = new byte[bgr.Length];
 
@@ -744,6 +839,23 @@ public static class Program
     /// <summary>Decodes into a grow-only buffer; returns the BGR byte count.</summary>
     private static int DecodeBgr(string path, ref byte[]? buf)
     {
+#if ANDROID
+        using var bmp = Android.Graphics.BitmapFactory.DecodeFile(path)
+            ?? throw new InvalidDataException($"cannot decode {path}");
+        int w = bmp.Width, h = bmp.Height;
+        var bgr = Grow(ref buf, w * h * 3);
+        int[] row = new int[w];
+        for (int y = 0; y < h; y++)
+        {
+            bmp.GetPixels(row, 0, w, 0, y, w, 1);
+            int d = y * w * 3;
+            foreach (int argb in row)
+            {
+                bgr[d++] = (byte)argb; bgr[d++] = (byte)(argb >> 8); bgr[d++] = (byte)(argb >> 16);
+            }
+        }
+        return w * h * 3;
+#else
         using var bmp = SkiaSharp.SKBitmap.Decode(path);
         int w = bmp.Width, h = bmp.Height;
         var bgr = Grow(ref buf, w * h * 3);
@@ -762,6 +874,19 @@ public static class Program
             }
         }
         return w * h * 3;
+#endif
+    }
+
+    private static (int W, int H) ImageSize(string path)
+    {
+#if ANDROID
+        var o = new Android.Graphics.BitmapFactory.Options { InJustDecodeBounds = true };
+        Android.Graphics.BitmapFactory.DecodeFile(path, o);
+        return (o.OutWidth, o.OutHeight);
+#else
+        using var codec = SkiaSharp.SKCodec.Create(path);
+        return (codec.Info.Width, codec.Info.Height);
+#endif
     }
 
     private static int Check(string dir, string gcPath, string drPath, string tag)
@@ -929,6 +1054,7 @@ public static class Program
 
     private static string FindTestdata()
     {
+        if (Environment.GetEnvironmentVariable("GCDRNET_TESTDATA") is { Length: > 0 } env) return env;
         var d = new DirectoryInfo(AppContext.BaseDirectory);
         while (d != null)
         {
