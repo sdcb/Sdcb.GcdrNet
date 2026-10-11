@@ -50,6 +50,9 @@ Ryzen 9 5950X (AVX2, 16C/32T) + Intel Arc B580 (Xe2, XMX via 8x16x16 coopmat): s
 Rockchip RK3399 (2× A72 + 4× A53, NEON, passively cooled): see [docs/rockchip-rk3399.md](docs/rockchip-rk3399.md)
 (CPU NEON ~9.0 s/img on the same corpus, 2.6× the generic `Vector<float>` path at a locked 1 GHz).
 
+Snapdragon 8 Gen 3 (realme GT5 Pro, Android 16; Adreno 750 without coopmat, 64/128-lane waves): see [docs/snapdragon-8gen3.md](docs/snapdragon-8gen3.md)
+(Vulkan ~486 ms/img with register-tiled conv/GEMM kernels, 2.6× the shared-memory path; CPU NEON ~1.03 s/img on the same corpus).
+
 ### Quick start
 
 ```csharp
@@ -84,7 +87,9 @@ matching the reference Python implementation.
   compiled to PSOs at run time — no pre-build step)
 - `bench/Sdcb.GcdrNet.Benchmark` — `--check`, `--bench` (CPU), `--benchvk` (Vulkan e2e),
   `--benchmtl` / `--checkgpu` / `--mtlprof` / `--mtrace` (Metal e2e, diff check, per-shader
-  profile, CPU-vs-Metal per-node trace), `--vkprof` (per-shader/per-dispatch GPU timing)
+  profile, CPU-vs-Metal per-node trace), `--vkprof` (per-shader/per-dispatch GPU timing), `--vkcheck` / `--vknodes`
+  (Vulkan vs CPU, whole graph / per node)
+- `bench/Sdcb.GcdrNet.AndroidBench` — the same modes inside an Android APK (`run.ps1`: build → adb install → push testdata → run → pull logs)
 
 ### Tests
 
@@ -150,6 +155,9 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 
 瑞芯微 RK3399（2× A72 + 4× A53，NEON，被动散热）见 [docs/rockchip-rk3399.md](docs/rockchip-rk3399.md)
 （同一语料 CPU NEON ~9.0 s/张；锁 1 GHz 时是通用 `Vector<float>` 路径的 2.6 倍）。
+
+骁龙 8 Gen 3（真我 GT5 Pro，Android 16；Adreno 750 无 coopmat，64/128 lane wave）见 [docs/snapdragon-8gen3.md](docs/snapdragon-8gen3.md)
+（同一语料 Vulkan ~486 ms/张，寄存器分块卷积/GEMM 内核比共享内存路径快 2.6 倍；CPU NEON ~1.03 s/张）。
 
 ### 快速上手
 
