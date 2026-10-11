@@ -584,7 +584,7 @@ public static class Program
         // GCDR_INTER=1: per-image intermediate hashes (gcIn/gcOut/drIn) to bisect
         // which stage diverges between pipeline instances.
         var inter = new Dictionary<string, (ulong gi, ulong go, ulong di)>();
-        string curName = ""; int curW = 0, curH = 0; byte[]? curBgr = null;
+        string curName = ""; int curW = 0, curH = 0;
         if (Environment.GetEnvironmentVariable("GCDR_INTER") == "1" && be != GcdrBackend.Cpu)
         {
             var ibuf = new float[12 * 2700 * 2700];

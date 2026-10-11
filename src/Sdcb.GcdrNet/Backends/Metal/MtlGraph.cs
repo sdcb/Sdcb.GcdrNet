@@ -26,63 +26,88 @@ internal sealed class MtlDispatch
     public string Name = "";
 }
 
-/// <summary>Shared per-model const store: one packed/uploaded copy of every
-/// const tensor, refcounted across graphs of different sizes on this device.</summary>
+/// <summary>
+/// Device-side const tensors (backend-packed weights) plus a 64B zero buffer,
+/// shared by every <see cref="MtlGraphModel"/> of one model: per-size plans copy
+/// the same initializers, so instead of re-packing and re-uploading the weights
+/// per input size, a new graph whose const list is element-for-element identical
+/// (same consumer packing, same contents) reuses the existing buffer. A graph
+/// whose consts differ gets a private, unshared store. Ref-counted; the
+/// buffers are freed when the last graph releases.
+/// </summary>
 internal sealed class MtlConstStore
 {
-    private readonly MtlDevice _dev;
-    internal readonly MtlBuffer Consts;
-    internal readonly MtlBuffer Dummy;
+    private static readonly Dictionary<(MtlDevice dev, object key), MtlConstStore> s_shared = new();
+
+    private readonly (MtlDevice, object)? _key;
+    private readonly float[][] _src;
+    private readonly int[] _kinds;
+    private int _refs = 1;
+    internal readonly MtlBuffer Consts, Dummy;
     internal readonly ulong[] Offsets;
     internal readonly ulong Bytes;
-    private int _refs = 1;
 
-    private MtlConstStore(MtlDevice dev, MtlBuffer consts, MtlBuffer dummy, ulong[] offs, ulong bytes)
-    { _dev = dev; Consts = consts; Dummy = dummy; Offsets = offs; Bytes = bytes; }
-
-    private static readonly ConditionalWeakTable<MtlDevice, Dictionary<string, WeakReference<MtlConstStore>>> _map = new();
-    private static readonly object s_lock = new();
-
-    /// <summary>Fetch (or build) the shared store for (dev, constKey). <paramref name="build"/>
-    /// is called at most once per live store and produces (offsets, host bytes).</summary>
-    internal static MtlConstStore Acquire(MtlDevice dev, object constKey, Func<(ulong[] offs, byte[] host)> build)
+    private MtlConstStore(MtlDevice dev, (MtlDevice, object)? key, float[][] src, int[] kinds,
+        ulong[] offsets, byte[] host)
     {
-        string key = constKey.GetHashCode().ToString("x") + ":" + constKey.GetType().Name;
-        // use the OnnxModel reference itself: graphs of one model share, but a
-        // WeakReference keyed on reference identity — two loads of the same file are two stores.
-        lock (s_lock)
+        _key = key;
+        _src = src;
+        _kinds = kinds;
+        Offsets = offsets;
+        Bytes = (ulong)host.LongLength;
+        unsafe
         {
-            var tbl = _map.GetOrCreateValue(dev);
-            string k = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(constKey).ToString("x");
-            if (tbl.TryGetValue(k, out var wr) && wr.TryGetTarget(out var live))
-            {
-                live._refs++;
-                return live;
-            }
-            var (offs, host) = build();
-            MtlBuffer consts;
-            unsafe
-            {
-                fixed (byte* hp = host)
-                    consts = dev.NewBuffer(hp, (nuint)host.Length);
-            }
-            MtlBuffer dummy;
-            unsafe
-            {
-                byte z = 0;
-                dummy = dev.NewBuffer(&z, 64);
-            }
-            var store = new MtlConstStore(dev, consts, dummy, offs, (ulong)host.Length);
-            tbl[k] = new WeakReference<MtlConstStore>(store);
-            return store;
+            fixed (byte* hp = host) Consts = dev.NewBuffer(hp, (nuint)host.Length);
+            byte* z = stackalloc byte[64];
+            new Span<byte>(z, 64).Clear();
+            Dummy = dev.NewBuffer(z, 64);
         }
+    }
+
+    /// <summary>
+    /// Returns a store holding <paramref name="src"/> (kinds = consumer packing ids),
+    /// shared under <paramref name="key"/> when an identical list was uploaded before.
+    /// <paramref name="pack"/> (offsets, host bytes) only runs when a new store is built.
+    /// </summary>
+    internal static MtlConstStore Acquire(MtlDevice dev, object? key, float[][] src, int[] kinds,
+        Func<(ulong[] offsets, byte[] host)> pack)
+    {
+        if (key is null)
+        {
+            var (o, h) = pack();
+            return new MtlConstStore(dev, null, src, kinds, o, h);
+        }
+        var k = (dev, key);
+        lock (s_shared)
+        {
+            if (s_shared.TryGetValue(k, out MtlConstStore? s) && s.Matches(src, kinds))
+            {
+                s._refs++;
+                return s;
+            }
+            var (offs, host) = pack();
+            bool share = s is null;   // keep the first registered store on a mismatch
+            var ns = new MtlConstStore(dev, share ? k : null, src, kinds, offs, host);
+            if (share) s_shared[k] = ns;
+            return ns;
+        }
+    }
+
+    private bool Matches(float[][] src, int[] kinds)
+    {
+        if (src.Length != _src.Length || !kinds.AsSpan().SequenceEqual(_kinds)) return false;
+        for (int i = 0; i < src.Length; i++)
+            if (!ReferenceEquals(src[i], _src[i]) && !src[i].AsSpan().SequenceEqual(_src[i])) return false;
+        return true;
     }
 
     internal void Release()
     {
-        lock (s_lock)
+        lock (s_shared)
         {
             if (--_refs > 0) return;
+            if (_key is { } k && s_shared.TryGetValue(k, out MtlConstStore? cur) && cur == this)
+                s_shared.Remove(k);
         }
         Consts.Dispose();
         Dummy.Dispose();
@@ -164,7 +189,8 @@ internal sealed class MtlGraphModel : IDisposable
                 throw new NotSupportedException($"Metal: const '{cv.Name}' with non-identity layout");
         }
         float[][] srcs = need.Select(x => plan.Values[x.v].Floats!).ToArray();
-        _store = MtlConstStore.Acquire(dev, constKey ?? this, () =>
+        int[] kinds = need.Select(x => (int)x.k).ToArray();
+        _store = MtlConstStore.Acquire(dev, constKey, srcs, kinds, () =>
         {
             ulong total = 0;
             var offs = new ulong[need.Count];

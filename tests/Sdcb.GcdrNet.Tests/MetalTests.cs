@@ -100,7 +100,7 @@ public class MetalTests
             for (int x = 0; x < ow * 3; x++)
                 maxd = Math.Max(maxd, Math.Abs(dst[y * ds + x] - expectU8[y * ow * 3 + x]));
         int u8tol = 8;
-        Assert.True(maxd <= u8tol, $"pipeline-vk-strided[{tag}] max u8 diff {maxd} (tol {u8tol})");
+        Assert.True(maxd <= u8tol, $"pipeline-mtl-strided[{tag}] max u8 diff {maxd} (tol {u8tol})");
     }
 
     [SkippableFact]

@@ -44,7 +44,7 @@ static inline void conv_mm_body(device const half* x,
             uint gm = wg.x * 64u + am;
             uint gk = kb + ak;
             half4 av = half4(0.0h);
-            if (gm < p.mDim && gk < p.kDim)
+            if (gm < p.mDim && gk < p.kReal)
             {
                 uint tap = gk / p.cin, ci = gk - tap * p.cin;
                 uint dy = tap / p.kW, dx = tap - dy * p.kW;
@@ -60,7 +60,7 @@ static inline void conv_mm_body(device const half* x,
                 else if (iy >= 0 && iy < int(p.inH) && ix >= 0 && ix < int(p.inW))
                     av = *(device const half4*)(x + (((uint(iy) * p.inW + uint(ix)) * (p.cin >> 2)) + (ci >> 2)) * 4u);
             }
-            *(threadgroup half4*)(tA + am * 17 + ak) = av;
+            *(threadgroup half4*)(tA + am * 20 + ak) = av;
         }
         else
         {
@@ -87,7 +87,7 @@ static inline void conv_mm_body(device const half* x,
                     else if (iy >= 0 && iy < int(p.inH) && ix >= 0 && ix < int(p.inW))
                         av = x[(uint(iy) * p.inW + uint(ix)) * p.cin + ci];
                 }
-                tA[am * 17 + ak] = av;
+                tA[am * 20 + ak] = av;
             }
         }
         // B stage: [N][Kd] rows, one half4 per thread covers 64x16; BN>64 loops
@@ -99,17 +99,17 @@ static inline void conv_mm_body(device const half* x,
             half4 wv = half4(0.0h);
             if (gn < p.nDim && gkB < p.kDim)
                 wv = *(device const half4*)(w + (ulong)gn * p.kDim + gkB);
-            *(threadgroup half4*)(tB + rr * 17 + bk) = wv;
+            *(threadgroup half4*)(tB + rr * 20 + bk) = wv;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint kk = 0u; kk < 16u; kk += 8u)
         {
             simdgroup_half8x8 a0, a1;
-            simdgroup_load(a0, tA + sm * 17 + kk, 17);
-            simdgroup_load(a1, tA + (sm + 8u) * 17 + kk, 17);
+            simdgroup_load(a0, tA + sm * 20 + kk, 20);
+            simdgroup_load(a1, tA + (sm + 8u) * 20 + kk, 20);
             simdgroup_half8x8 bfr[8];
             for (uint j = 0u; j < JN; j++)
-                simdgroup_load(bfr[j], tB + (sn + j * 8u) * 17 + kk, 17, ulong2(0, 0), true);
+                simdgroup_load(bfr[j], tB + (sn + j * 8u) * 20 + kk, 20, ulong2(0, 0), true);
             for (uint j = 0u; j < JN; j++)
             {
                 simdgroup_multiply_accumulate(acc[0][j], a0, bfr[j], acc[0][j]);
@@ -147,8 +147,8 @@ kernel void conv_mm_##BN##_##SCK(device const half* x [[buffer(0)]], \
     constant PcConvMm& p [[buffer(5)]], uint2 wg [[threadgroup_position_in_grid]], \
     uint2 tp [[thread_position_in_threadgroup]]) \
 { \
-    threadgroup half tA[64 * 17]; \
-    threadgroup half tB[BN * 17]; \
+    threadgroup half tA[64 * 20]; \
+    threadgroup half tB[BN * 20]; \
     threadgroup float outst[8 * 64]; \
     conv_mm_body<BN, SCK>(x, w, bias, res, o, p, wg, tp.x, tA, tB, outst); \
 }
