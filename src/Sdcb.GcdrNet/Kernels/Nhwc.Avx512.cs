@@ -156,68 +156,85 @@ internal static unsafe partial class Nhwc
         NhwcConvPlan kp, ReadOnlySpan<float> add, ActivationKind act)
     {
         int taps = kh * kw, nb = kp.Blocks, np = (nb + 1) / 2;
-        long wStep = (long)taps * ic * Ob;
         bool hasAdd = !add.IsEmpty;
-        // run[x]: output column x reads kw adjacent input pixels (no column pad/reflect), so one
-        // kernel row is a single kw*ic float run in the same order as the packed [tap][ic] weights;
-        // tiles of such columns walk kh "taps" of kw*ic channels (fewer pointers, longer k loops)
-        bool[] run = new bool[ow];
-        for (int x = 0; x < ow && kw > 1; x++)
-        {
-            bool ok = cm[x * kw] >= 0;
-            for (int kx = 1; kx < kw; kx++) ok &= cm[x * kw + kx] == cm[x * kw] + kx;
-            run[x] = ok;
-        }
         fixed (float* sp0 = src, dp0 = dst, ap0 = add, wp0 = kp.W, bp0 = kp.Bias, pv0 = padVec)
         fixed (int* rm0 = rm, cm0 = cm)
-        fixed (bool* run0 = run)
         {
-            float* sp = sp0, dp = dp0, ap = ap0, wp = wp0, bp = bp0, pv = pv0;
-            int* rmp = rm0, cmp = cm0;
-            bool* runp = run0;
+            var a = new DenseArgs(sp0, wp0, bp0, pv0, rm0, cm0, iw, ic, ow, oc, kh, kw, nb, act, true);
+            float* dp = dp0, ap = ap0;
             For(oh * np, (long)oh * ow * oc * taps * ic / 64, t =>
             {
-                int y = t / np, blk = t % np * 2, nblk = Math.Min(2, nb - blk);
-                float** ptrs = stackalloc float*[Tile5 * taps];
-                float* part = stackalloc float[Tile5 * 2 * Ob];
-                float* wb = wp + blk * wStep;
-                float* bb = bp + blk * Ob;
-                int lanes0 = Math.Min(Ob, oc - blk * Ob), lanes1 = nblk == 2 ? Math.Min(Ob, oc - (blk + 1) * Ob) : 0;
-                for (int x0 = 0; x0 < ow; x0 += Tile5)
-                {
-                    int rows = Math.Min(Tile5, ow - x0);
-                    bool merged = true;
-                    for (int i = 0; i < rows; i++) merged &= runp[x0 + i];
-                    long o = ((long)y * ow + x0) * oc + blk * Ob;
-                    if (merged)
-                    {
-                        for (int ky = 0; ky < kh; ky++)
-                        {
-                            int r = rmp[y * kh + ky];
-                            for (int i = 0; i < Tile5; i++)
-                            {
-                                int c = cmp[(x0 + Math.Min(i, rows - 1)) * kw];
-                                ptrs[ky * Tile5 + i] = r < 0 ? pv : sp + ((long)r * iw + c) * ic;
-                            }
-                        }
-                        Tile512(ptrs, nblk, kh, kw * ic, wb, wStep, bb, part);
-                    }
-                    else
-                    {
-                        for (int tap = 0; tap < taps; tap++)
-                        {
-                            int r = rmp[y * kh + tap / kw];
-                            for (int i = 0; i < Tile5; i++)
-                            {
-                                int c = cmp[(x0 + Math.Min(i, rows - 1)) * kw + tap % kw];
-                                ptrs[tap * Tile5 + i] = r < 0 || c < 0 ? pv : sp + ((long)r * iw + c) * ic;
-                            }
-                        }
-                        Tile512(ptrs, nblk, taps, ic, wb, wStep, bb, part);
-                    }
-                    Epilogue512(part, rows, nblk, dp + o, hasAdd ? ap + o : null, oc, lanes0, lanes1, act);
-                }
+                int y = t / np, blk = t % np * 2;
+                long o = (long)y * ow * oc;
+                Dense512Row(a, y, blk, dp + o, hasAdd ? ap + o : null);
             });
+        }
+    }
+
+    /// <summary>All oc blocks of direct-conv output row <paramref name="y"/> (the row-level entry of
+    /// the fused paths: conv+pool bands, UpHead skip recompute). AVX-512 tier: block pairs through
+    /// <see cref="Dense512Row"/> (needs a padVec of ic*kw + 16 floats); else <see cref="DenseRow"/>.</summary>
+    private static void ConvRow(in DenseArgs a, int y, float* orow, float* arow)
+    {
+        if (UseAvx512)
+            for (int blk = 0; blk < a.Nb; blk += 2) Dense512Row(a, y, blk, orow, arow);
+        else
+            for (int blk = 0; blk < a.Nb; blk++) DenseRow(a, y, blk, orow, arow);
+    }
+
+    /// <summary>Output row <paramref name="y"/>, oc blocks blk and blk+1 (if present) of a direct conv
+    /// into <paramref name="orow"/> (the row's first pixel; addend row likewise).</summary>
+    private static void Dense512Row(in DenseArgs a, int y, int blk, float* orow, float* arow)
+    {
+        int kh = a.Kh, kw = a.Kw, taps = kh * kw, ic = a.Ic, ow = a.Ow, oc = a.Oc, nblk = Math.Min(2, a.Nb - blk);
+        long wStep = (long)taps * ic * Ob;
+        float** ptrs = stackalloc float*[Tile5 * taps];
+        float* part = stackalloc float[Tile5 * 2 * Ob];
+        float* wb = a.W + blk * wStep;
+        float* bb = a.Bias + blk * Ob;
+        int lanes0 = Math.Min(Ob, oc - blk * Ob), lanes1 = nblk == 2 ? Math.Min(Ob, oc - (blk + 1) * Ob) : 0;
+        int* rm = a.Rm, cm = a.Cm;
+        for (int x0 = 0; x0 < ow; x0 += Tile5)
+        {
+            int rows = Math.Min(Tile5, ow - x0);
+            // every column of the tile reads kw adjacent input pixels (no column pad/reflect): one
+            // kernel row is then a single kw*ic float run in the order of the packed [tap][ic]
+            // weights, so the tile walks kh "taps" of kw*ic channels (fewer pointers, longer k loops)
+            bool merged = kw > 1;
+            for (int i = 0; i < rows && merged; i++)
+            {
+                int* cx = cm + (x0 + i) * kw;
+                merged = cx[0] >= 0;
+                for (int kx = 1; kx < kw; kx++) merged &= cx[kx] == cx[0] + kx;
+            }
+            if (merged)
+            {
+                for (int ky = 0; ky < kh; ky++)
+                {
+                    int r = rm[y * kh + ky];
+                    for (int i = 0; i < Tile5; i++)
+                    {
+                        int c = cm[(x0 + Math.Min(i, rows - 1)) * kw];
+                        ptrs[ky * Tile5 + i] = r < 0 ? a.PadVec : a.Src + ((long)r * a.Iw + c) * ic;
+                    }
+                }
+                Tile512(ptrs, nblk, kh, kw * ic, wb, wStep, bb, part);
+            }
+            else
+            {
+                for (int tap = 0; tap < taps; tap++)
+                {
+                    int r = rm[y * kh + tap / kw];
+                    for (int i = 0; i < Tile5; i++)
+                    {
+                        int c = cm[(x0 + Math.Min(i, rows - 1)) * kw + tap % kw];
+                        ptrs[tap * Tile5 + i] = r < 0 || c < 0 ? a.PadVec : a.Src + ((long)r * a.Iw + c) * ic;
+                    }
+                }
+                Tile512(ptrs, nblk, taps, ic, wb, wStep, bb, part);
+            }
+            long o = (long)x0 * oc + blk * Ob;
+            Epilogue512(part, rows, nblk, orow + o, arow != null ? arow + o : null, oc, lanes0, lanes1, a.Act);
         }
     }
 
@@ -330,7 +347,7 @@ internal static unsafe partial class Nhwc
             {
                 if (skipConv)
                 {
-                    SkipRow(ca, y, sb);   // the skip row, recomputed by the same conv kernel
+                    ConvRow(ca, y, sb, null);   // the skip row, recomputed by the same conv kernel
                     krow = sb;
                 }
                 for (int x = 0; x < ow; x += 4)
