@@ -1,0 +1,104 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "et.glsl"
+#extension GL_EXT_control_flow_attributes : require
+// convpool.comp specialised for 3x3 kernels (ic <= 7): the 4x4 input window is read one row
+// at a time into registers and each staged weight pair is applied to both pool columns, so
+// every input element is loaded once (16 vs 36 taps) and shared-memory weight reads halve.
+// Same thread mapping (pooled pixel, 8 output channels) and the same per-output accumulation
+// order (bias, then k = (ky*3 + kx)*ic + ci ascending) as convpool.comp:
+//   o[py][px][n] = [relu] max_{dy,dx<2} [relu](b[n] + sum_k x[2py+dy, 2px+dx; k] w[k][n])
+// flags: bit0 bias, bit1 reflect pad, bit2 conv relu, bit3 pool relu
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer X { ET x[]; };      // [ih][iw][ic]
+layout(set = 0, binding = 1) readonly buffer W { ET w[]; };      // [K][oc], k = (ky*3 + kx)*ic + ci
+layout(set = 0, binding = 2) readonly buffer B { float b[]; };   // [oc] (dummy if none)
+layout(set = 0, binding = 3) writeonly buffer O { ET o[]; };     // [ph][pw][oc]
+
+layout(push_constant) uniform PC {
+    uint ic, ih, iw, oc, ph, pw, kh, kw, pt, pl, flags;
+    float padv;
+} p;
+
+shared vec4 ws[1024];
+
+int mirror(int i, int d) { if (d <= 1) return 0; while (i < 0 || i >= d) i = i < 0 ? -i : 2 * d - 2 - i; return i; }
+
+void main()
+{
+    uint tid = gl_LocalInvocationID.x;
+    uint K = 9u * p.ic, oc4 = p.oc >> 2;
+    for (uint e = tid; e < K * p.oc; e += 256u) ws[e >> 2][e & 3u] = float(w[e]);
+    barrier();
+
+    uint groups = p.oc >> 3;
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= p.ph * p.pw * groups) return;
+    uint g = idx % groups, pp = idx / groups;
+    uint pxx = pp % p.pw, pyy = pp / p.pw;
+    bool reflect = (p.flags & 2u) != 0u, crelu = (p.flags & 4u) != 0u;
+    int ro[4], co[4];   // window rows (pre-multiplied by iw) / columns
+    bool rv[4], cv[4];
+    [[unroll]] for (uint r = 0u; r < 4u; r++)
+    {
+        int iy = int(pyy * 2u + r) - int(p.pt);
+        bool vy = iy >= 0 && iy < int(p.ih);
+        if (!vy && reflect) { iy = mirror(iy, int(p.ih)); vy = true; }
+        rv[r] = vy; ro[r] = vy ? iy * int(p.iw) : 0;
+        int ix = int(pxx * 2u + r) - int(p.pl);
+        bool vx = ix >= 0 && ix < int(p.iw);
+        if (!vx && reflect) { ix = mirror(ix, int(p.iw)); vx = true; }
+        cv[r] = vx; co[r] = vx ? ix : 0;
+    }
+    uint n0 = g * 8u;
+    vec4 b0 = vec4(0.0), b1 = vec4(0.0);
+    if ((p.flags & 1u) != 0u)
+    {
+        b0 = vec4(b[n0], b[n0 + 1u], b[n0 + 2u], b[n0 + 3u]);
+        b1 = vec4(b[n0 + 4u], b[n0 + 5u], b[n0 + 6u], b[n0 + 7u]);
+    }
+    vec4 a0[4], a1[4];
+    [[unroll]] for (uint d = 0u; d < 4u; d++) { a0[d] = b0; a1[d] = b1; }
+    [[unroll]] for (uint r = 0u; r < 4u; r++)
+    {
+        float xr[4][8];
+        [[unroll]] for (uint c = 0u; c < 4u; c++)
+        {
+            bool v = rv[r] && cv[c];
+            uint base = uint(ro[r] + co[c]) * p.ic;
+            [[unroll]] for (uint ci = 0u; ci < 8u; ci++)
+                xr[c][ci] = ci < p.ic ? (v ? float(x[base + ci]) : p.padv) : 0.0;
+        }
+        [[unroll]] for (uint dy = 0u; dy < 2u; dy++)
+        {
+            if (r < dy || r - dy > 2u) continue;
+            uint ky = r - dy;
+            [[unroll]] for (uint kx = 0u; kx < 3u; kx++)
+            {
+                uint kb = (ky * 3u + kx) * p.ic;
+                [[unroll]] for (uint ci = 0u; ci < 8u; ci++)
+                {
+                    if (ci >= p.ic) break;
+                    uint wr = (kb + ci) * oc4 + g * 2u;
+                    vec4 w0 = ws[wr], w1 = ws[wr + 1u];
+                    [[unroll]] for (uint dx = 0u; dx < 2u; dx++)
+                    {
+                        float xv = xr[kx + dx][ci];
+                        a0[dy * 2u + dx] += xv * w0;
+                        a1[dy * 2u + dx] += xv * w1;
+                    }
+                }
+            }
+        }
+    }
+    vec4 m0 = vec4(-3.4e38), m1 = vec4(-3.4e38);
+    [[unroll]] for (uint d = 0u; d < 4u; d++)
+    {
+        if (crelu) { a0[d] = max(a0[d], vec4(0.0)); a1[d] = max(a1[d], vec4(0.0)); }
+        m0 = max(m0, a0[d]); m1 = max(m1, a1[d]);
+    }
+    if ((p.flags & 8u) != 0u) { m0 = max(m0, vec4(0.0)); m1 = max(m1, vec4(0.0)); }
+    uint ob = pp * p.oc + n0;
+    [[unroll]] for (uint l = 0u; l < 4u; l++) { o[ob + l] = ET(m0[l]); o[ob + 4u + l] = ET(m1[l]); }
+}
