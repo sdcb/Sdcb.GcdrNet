@@ -46,7 +46,7 @@
     <PackageId>Sdcb.SimdGcdrNet.Models</PackageId>
     <Version>$(SdcbSimdGcdrNetModelsVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Embedded GCDRNet ONNX models (GC-Net + DR-Net) for Sdcb.SimdGcdrNet, no dependencies: GcdrEnhancer.FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet) with no model files to deploy.</Description>
+    <Description>Embedded GCDRNet ONNX models (GC-Net + DR-Net) for Sdcb.SimdGcdrNet, no dependencies: GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet), zero-copy, with no model files to deploy.</Description>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">

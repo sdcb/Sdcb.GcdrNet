@@ -25,7 +25,7 @@ async Task Main()
 
 	foreach (GcdrBackend backend in new[] { GcdrBackend.Cpu, GcdrBackend.Auto })
 	{
-		using GcdrEnhancer enhancer = GcdrEnhancer.FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet, backend);
+		using GcdrEnhancer enhancer = GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet, backend);
 		for (int run = 1; run <= 2; run++)
 		{
 			Stopwatch sw = Stopwatch.StartNew();

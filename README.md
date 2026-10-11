@@ -65,9 +65,9 @@ using Sdcb.SimdGcdrNet;
 using Sdcb.SimdGcdrNet.Models;
 
 // Auto: Metal on macOS Apple Silicon, else Vulkan, else CPU. Also: Cpu (default) / Vulkan / Metal.
-using GcdrEnhancer enh = GcdrEnhancer.FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet, GcdrBackend.Auto);
+using GcdrEnhancer enh = GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet, GcdrBackend.Auto);
 // without the models package: GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx", ...)
-// (models in tests/testdata/models), or FromBytes / FromStreams
+// (models in tests/testdata/models), or FromBytes(span, span) / FromStreams(stream, stream)
 
 byte[] dst = enh.Enhance(bgr, width: 1600, height: 1152);   // tightly packed BGR24, HWC
 // strided, any interleaved 8-bit layout, output in the same layout (alpha copied through):
@@ -196,9 +196,9 @@ using Sdcb.SimdGcdrNet;
 using Sdcb.SimdGcdrNet.Models;
 
 // Auto：macOS Apple Silicon 优先 Metal，否则 Vulkan，最后 CPU；也可显式 Cpu（默认）/ Vulkan / Metal
-using GcdrEnhancer enh = GcdrEnhancer.FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet, GcdrBackend.Auto);
+using GcdrEnhancer enh = GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet, GcdrBackend.Auto);
 // 不用模型包：GcdrEnhancer.FromFiles("gcdrnet_gcnet_sim.onnx", "gcdrnet_drnet_sim.onnx", ...)
-// （模型见 tests/testdata/models），或 FromBytes / FromStreams
+// （模型见 tests/testdata/models），或 FromBytes(span, span) / FromStreams(stream, stream)
 
 byte[] dst = enh.Enhance(bgrBytes, width: 1600, height: 1152);   // 紧密排列的 BGR24，HWC
 // 带 stride、任意 8 位交错格式，输出与输入同格式（alpha 原样拷回）：

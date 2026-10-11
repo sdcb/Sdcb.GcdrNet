@@ -18,7 +18,7 @@ async Task Main()
 	using HttpClient http = new();
 	byte[] webp = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/tests/testdata/realdae/10_color.webp");
 
-	using GcdrEnhancer enhancer = GcdrEnhancer.FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet, GcdrBackend.Auto);
+	using GcdrEnhancer enhancer = GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet, GcdrBackend.Auto);
 	using Image<Rgba32> image = Image.Load<Rgba32>(CreateDecoderOptions(), webp);
 	byte[] before = ToJpeg(image);
 

@@ -22,10 +22,16 @@ public sealed class OnnxModel
 
     public static OnnxModel Load(Stream source) => Build(OnnxProtoReader.Parse(source));
 
-    public static OnnxModel Load(ReadOnlyMemory<byte> source)
+    /// <summary>Parses the model straight from <paramref name="source"/> (pinned for the duration
+    /// of the call, no intermediate copy); weights are decoded into model-owned arrays, so the
+    /// memory may be released afterwards.</summary>
+    public static unsafe OnnxModel Load(ReadOnlySpan<byte> source)
     {
-        using var ms = new MemoryStream(source.ToArray(), writable: false);
-        return Load(ms);
+        fixed (byte* p = source)
+        {
+            using var ums = new UnmanagedMemoryStream(p, source.Length);
+            return Load(ums);
+        }
     }
 
     private static OnnxModel Build(OnnxModelData parsed)

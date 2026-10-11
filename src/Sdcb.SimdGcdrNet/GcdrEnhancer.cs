@@ -71,31 +71,20 @@ public sealed class GcdrEnhancer : IDisposable
         GcdrBackend backend = GcdrBackend.Cpu) =>
         new(OnnxModel.Load(gcnetOnnxPath), OnnxModel.Load(drnetOnnxPath), backend);
 
+    /// <summary>Parses both ONNX models directly from memory (no copy of the model bytes), e.g.
+    /// <c>FromBytes(GcdrModels.GcNet, GcdrModels.DrNet)</c> with the Sdcb.SimdGcdrNet.Models package.
+    /// The memory is only read during this call.</summary>
     public static GcdrEnhancer FromBytes(ReadOnlySpan<byte> gcnetOnnx, ReadOnlySpan<byte> drnetOnnx,
         GcdrBackend backend = GcdrBackend.Cpu) =>
-        new(OnnxModel.Load(gcnetOnnx.ToArray()), OnnxModel.Load(drnetOnnx.ToArray()), backend);
+        new(OnnxModel.Load(gcnetOnnx), OnnxModel.Load(drnetOnnx), backend);
 
-    /// <summary>Loads both ONNX models from streams (read to the end, not disposed). Avoids a
-    /// full in-memory copy, e.g. for embedded resources.</summary>
+    /// <summary>Loads both ONNX models from streams (read to the end, not disposed).</summary>
     public static GcdrEnhancer FromStreams(Stream gcnetOnnx, Stream drnetOnnx,
         GcdrBackend backend = GcdrBackend.Cpu)
     {
         ArgumentNullException.ThrowIfNull(gcnetOnnx);
         ArgumentNullException.ThrowIfNull(drnetOnnx);
         return new(OnnxModel.Load(gcnetOnnx), OnnxModel.Load(drnetOnnx), backend);
-    }
-
-    /// <summary>Opens, reads and disposes both ONNX model streams, e.g.
-    /// <c>FromStreams(GcdrModels.OpenGcNet, GcdrModels.OpenDrNet)</c> with the
-    /// Sdcb.SimdGcdrNet.Models package.</summary>
-    public static GcdrEnhancer FromStreams(Func<Stream> openGcnetOnnx, Func<Stream> openDrnetOnnx,
-        GcdrBackend backend = GcdrBackend.Cpu)
-    {
-        ArgumentNullException.ThrowIfNull(openGcnetOnnx);
-        ArgumentNullException.ThrowIfNull(openDrnetOnnx);
-        using Stream gc = openGcnetOnnx();
-        using Stream dr = openDrnetOnnx();
-        return FromStreams(gc, dr, backend);
     }
 
     // pipeline sessions keep I/O in plan layout: the glue kernels below read/write
