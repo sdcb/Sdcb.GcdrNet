@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.Wasm;
 using System.Runtime.Intrinsics.X86;
 using Sdcb.SimdGcdrNet.Engine;
 
@@ -35,7 +36,8 @@ internal sealed class UpHeadPlan
 /// (-1 = constant pad → a pad-value pixel vector), so the inner loops never
 /// branch on borders. Dense/pointwise conv: register-tiled 6 pixels × 16 oc
 /// AVX2 micro-kernel (after SimdPaddleOCR's Nhwc.Conv) with bias-init and a
-/// fused residual + activation epilogue; AVX-512 widens it to 10 × 32 (Nhwc.Avx512.cs);
+/// fused residual + activation epilogue; AVX-512 widens it to 10 × 32 (Nhwc.Avx512.cs),
+/// NEON keeps 6 × 16 (Nhwc.Neon.cs), WASM SIMD128 narrows it to 4 × 8 (Nhwc.PackedSimd.cs);
 /// other tiers use Vector&lt;float&gt;.
 /// </summary>
 internal static unsafe partial class Nhwc
@@ -130,6 +132,7 @@ internal static unsafe partial class Nhwc
         NhwcConvPlan kp, ActivationKind act)
     {
         if (UseAvx512) { Gemm512(a, m, k, dst, n, kp, act); return; }
+        if (UsePacked) { GemmPk(a, m, k, dst, n, kp, act); return; }
         const int G = 8;   // row tiles per task sharing one weight panel walk
         int nb = kp.Blocks, tiles = (m + Tile - 1) / Tile, groups = (tiles + G - 1) / G;
         bool avx = UseAvx;
@@ -216,6 +219,11 @@ internal static unsafe partial class Nhwc
         if (UseNeon)
         {
             DenseRowNeon(a, y, blk, orow, arow);
+            return;
+        }
+        if (UsePacked)
+        {
+            DenseRowPk(a, y, blk, orow, arow);
             return;
         }
         int taps = a.Kh * a.Kw, ic = a.Ic, ow = a.Ow, oc = a.Oc, kw = a.Kw;
@@ -446,6 +454,8 @@ internal static unsafe partial class Nhwc
                             Avx.Store(o + ch, Act8(acc, act));
                         }
                     }
+                    else if (UsePacked)
+                        ch = DepthwisePixelPk(ptrs, taps, c, wp, bp, ad, o, act);
                     else if (Vector.IsHardwareAccelerated && act is ActivationKind.None or ActivationKind.Relu)
                     {
                         for (; ch + VL <= c; ch += VL)
@@ -719,6 +729,7 @@ internal static unsafe partial class Nhwc
         bool relu = p.ResizeRelu, skipRelu = p.SkipRelu, avx = UseAvx;
         int oc = kp.Oc;
         bool neonUp = UseNeon && c % 4 == 0 && oc <= 4;
+        bool pkUp = UsePacked && c % 4 == 0 && oc <= 4;
         ActivationKind act = p.Act;
         int[] rm = [], cm = [];
         float[] padVec = [];
@@ -763,6 +774,13 @@ internal static unsafe partial class Nhwc
                         fixed (int* xa = x0, xb = x1)
                         fixed (float* wxp = wx)
                             UpHeadRowNeon(r0, r1, xa, xb, wxp, wY, krow, c, ow, wp, bp, orow, oc, relu, skipRelu, act);
+                        return;
+                    }
+                    if (pkUp)
+                    {
+                        fixed (int* xa = x0, xb = x1)
+                        fixed (float* wxp = wx)
+                            UpHeadRowPk(r0, r1, xa, xb, wxp, wY, krow, c, ow, wp, bp, orow, oc, relu, skipRelu, act);
                         return;
                     }
                     for (int x = 0; x < ow; x++)
@@ -815,6 +833,8 @@ internal static unsafe partial class Nhwc
             for (; i + 8 <= n; i += 8) Avx.Store(p + i, Act8(Avx.LoadVector256(p + i), act));
         else if (UseNeon)
             for (; i + 4 <= n; i += 4) AdvSimd.Store(p + i, Act4(AdvSimd.LoadVector128(p + i), act));
+        else if (UsePacked)
+            for (; i + 4 <= n; i += 4) PackedSimd.Store(p + i, ActP(LdP(p + i), act));
         else if (act == ActivationKind.Sigmoid)
         {
             var row = new Span<float>(p + i, n - i);

@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.Wasm;
 using System.Runtime.Intrinsics.X86;
 using Sdcb.SimdGcdrNet.Engine;
 using F32x8 = System.Runtime.Intrinsics.Vector256<float>;
@@ -71,7 +72,7 @@ internal static unsafe partial class Nhwc
     {
         public readonly float* Src, U, Bias, PadVec;
         public readonly int Ih, Iw, Ic, Oh, Ow, Oc, Tw, T, Nb, PadT, PadL;
-        public readonly bool Reflect, Avx, Avx512;
+        public readonly bool Reflect, Avx, Avx512, Pk;
         public readonly ActivationKind Act;
 
         public WinoArgs(float* src, float* u, float* bias, float* padVec, int ih, int iw, int ic,
@@ -81,13 +82,14 @@ internal static unsafe partial class Nhwc
             Ih = ih; Iw = iw; Ic = ic; Oh = oh; Ow = ow; Oc = oc; Nb = nb;
             Tw = (ow + 3) / 4;
             Avx512 = UseAvx512;
+            Avx = UseAvx;
+            Pk = UsePacked;
             // V block ~256 KB (AVX2); the AVX-512 tier (Tile5-row x 32-oc GEMM tiles) measured
             // best at ~64 KB on Zen 5, NEON at ~16 KB (one Tile row for ic >= 32: four RK3399 A53s share 512 KB L2)
-            int tr = Avx512 ? Tile5 : Tile, vBudget = Avx512 ? 16384 : UseNeon ? 4096 : 65536;
+            int tr = Avx512 ? Tile5 : Pk ? PkTile : Tile, vBudget = Avx512 ? 16384 : UseNeon ? 4096 : 65536;
             T = Math.Clamp(vBudget / (36 * ic) / tr * tr, tr, 60 / tr * tr);
             PadT = p.Pads[0]; PadL = p.Pads[1];
             Reflect = p.PadMode == PadMode.Reflect;
-            Avx = UseAvx;
             Act = p.Act;
         }
     }
@@ -124,9 +126,9 @@ internal static unsafe partial class Nhwc
     private static void WinoTiles(in WinoArgs a, int t0, int tn, float* dp, float* ap, int rowBase)
     {
         int ic = a.Ic, T = a.T, tw = a.Tw, nb = a.Nb, oc = a.Oc, ow = a.Ow, oh = a.Oh;
-        bool avx = a.Avx, avx512 = a.Avx512;
+        bool avx = a.Avx, avx512 = a.Avx512, pk = a.Pk;
         // AVX-512: Tile5-row x 32-oc GEMM tiles over block pairs; M rows hold both blocks
-        int tr = avx512 ? Tile5 : Tile, step = avx512 ? 2 : 1, mRow = step * Ob;
+        int tr = avx512 ? Tile5 : pk ? PkTile : Tile, step = avx512 ? 2 : 1, mRow = step * Ob;
         int vSize = 36 * T * ic, mSize = 36 * T * mRow;
         int need = vSize + mSize + 16 * Ob + 2 * Ob;
         float[] buf = t_wino is { } tb && tb.Length >= need ? tb : (t_wino = new float[need]);
@@ -164,10 +166,11 @@ internal static unsafe partial class Nhwc
                     {
                         int rows = Math.Min(tr, tn - r0);
                         for (int i = 0; i < tr; i++) ptrs[i] = vx + (long)(r0 + Math.Min(i, rows - 1)) * ic;
-                        // AVX2 / NEON write all Tile rows into M (T is a multiple of Tile); rows past tn are never read
+                        // AVX2 / NEON / PackedSimd write all tr rows into M (T is a multiple of tr); rows past tn are never read
                         if (avx512) Tile512(ptrs, nblk, 1, ic, wb, (long)ic * Ob, zero, mx + (long)r0 * mRow);
                         else if (avx) TileAvxK(ptrs, 1, ic, wb, zero, mx + (long)r0 * Ob, Ob);
                         else if (UseNeon) TileNeonK(ptrs, 1, ic, wb, zero, mx + (long)r0 * Ob, Ob);
+                        else if (pk) TilePkK(ptrs, PkTile, 1, ic, (long)ic * Ob, wb, zero, mx + (long)r0 * Ob, Ob);
                         else TileVec(ptrs, rows, 1, ic, wb, zero, mx + (long)r0 * Ob, null, Ob, Ob, ActivationKind.None);
                     }
                 }
@@ -189,6 +192,7 @@ internal static unsafe partial class Nhwc
         int lanes = Math.Min(Ob, oc - ocOff);
         bool fast512 = avx512 && lanes == Ob && act is ActivationKind.None or ActivationKind.Relu;
         bool fastNeon = UseNeon && lanes == Ob;
+        bool fastPk = UsePacked && lanes == Ob;
         for (int t = 0; t < tn; t++)
         {
             int ty = (t0 + t) / tw, tx = (t0 + t) % tw;
@@ -217,6 +221,13 @@ internal static unsafe partial class Nhwc
                             var v = AdvSimd.Add(AdvSimd.LoadVector128(tp + l), AdvSimd.LoadVector128(bb + l));
                             if (ap != null) v = AdvSimd.Add(v, AdvSimd.LoadVector128(ap + o + l));
                             AdvSimd.Store(dp + o + l, Act4(v, act));
+                        }
+                    else if (fastPk)
+                        for (int l = 0; l < Ob; l += 4)
+                        {
+                            var v = PackedSimd.Add(LdP(tp + l), LdP(bb + l));
+                            if (ap != null) v = PackedSimd.Add(v, LdP(ap + o + l));
+                            PackedSimd.Store(dp + o + l, ActP(v, act));
                         }
                     else if (avx)
                         Store16(dp + o, ap != null ? ap + o : null,

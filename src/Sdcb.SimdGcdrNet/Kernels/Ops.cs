@@ -564,6 +564,11 @@ internal static unsafe class Ops
             NeonKernels.LayerNorm(x, rows, c, w, b, dst, eps);
             return;
         }
+        if (Nhwc.UsePacked)
+        {
+            PackedKernels.LayerNorm(x, rows, c, w, b, dst, eps);
+            return;
+        }
         for (int r = 0; r < rows; r++)
         {
             ReadOnlySpan<float> xr = x.Slice(r * c, c);

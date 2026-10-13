@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Wasm;
 using System.Runtime.Intrinsics.X86;
 
 namespace Sdcb.SimdGcdrNet.Kernels;
@@ -202,6 +203,61 @@ internal static class SimdMath
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static Vector128<float> GeluCore(Vector128<float> x) =>
         Vector128.Create(0.5f) * x * (Vector128<float>.One + ErfCore(x * Vector128.Create(0.70710678118654752f)));
+
+    // ---------- WASM SIMD128 (PackedSimd) cores: Exp / SigmoidV / ErfV / Gelu above, op for op ----------
+    // WASM SIMD has no FMA (relaxed SIMD is off), and Vector128.FusedMultiplyAdd would fall back to
+    // scalar fmaf, so these keep the Vector<float> tier's separate multiply + add (same bits for finite x).
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<float> MulAddPk(Vector128<float> a, Vector128<float> b, Vector128<float> c) =>
+        PackedSimd.Add(PackedSimd.Multiply(a, b), c);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> ExpPk(Vector128<float> x)
+    {
+        // pmax/pmin: one maxps/minps in V8 (f32x4.max/min need a NaN fix-up sequence)
+        x = PackedSimd.PseudoMax(Vector128.Create(-87.3f), x);
+        x = PackedSimd.PseudoMin(Vector128.Create(88.7f), x);
+        var fx = MulAddPk(x, Vector128.Create(1.4426950408889634f), Vector128.Create(0.5f));
+        var nf = PackedSimd.ConvertToSingle(PackedSimd.ConvertToInt32Saturate(fx));
+        nf = PackedSimd.Subtract(nf, PackedSimd.And(Vector128<float>.One, PackedSimd.CompareGreaterThan(nf, fx)));
+        var r = PackedSimd.Subtract(PackedSimd.Subtract(x, PackedSimd.Multiply(nf, Vector128.Create(0.693359375f))),
+            PackedSimd.Multiply(nf, Vector128.Create(-0.00021219444005469058f)));
+        var p = Vector128.Create(1.9875691500e-4f);
+        p = MulAddPk(p, r, Vector128.Create(1.3981999507e-3f));
+        p = MulAddPk(p, r, Vector128.Create(8.3334519073e-3f));
+        p = MulAddPk(p, r, Vector128.Create(4.1665795894e-2f));
+        p = MulAddPk(p, r, Vector128.Create(1.6666665459e-1f));
+        p = MulAddPk(p, r, Vector128.Create(5.0000001201e-1f));
+        var y = PackedSimd.Add(PackedSimd.Add(PackedSimd.Multiply(p, PackedSimd.Multiply(r, r)), r), Vector128<float>.One);
+        var ni = PackedSimd.Add(PackedSimd.ConvertToInt32Saturate(nf), Vector128.Create(127));
+        return PackedSimd.Multiply(y, PackedSimd.ShiftLeft(ni, 23).AsSingle());
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> SigmoidPk(Vector128<float> x) =>
+        PackedSimd.Divide(Vector128<float>.One, PackedSimd.Add(Vector128<float>.One, ExpPk(PackedSimd.Negate(x))));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> ErfPk(Vector128<float> x)
+    {
+        var one = Vector128<float>.One;
+        var sign = Vector128.ConditionalSelect(PackedSimd.CompareLessThan(x, Vector128<float>.Zero), Vector128.Create(-1f), one);
+        var ax = PackedSimd.Abs(x);
+        var t = PackedSimd.Divide(one, PackedSimd.Add(one, PackedSimd.Multiply(Vector128.Create(0.3275911f), ax)));
+        var p = Vector128.Create(1.061405429f);
+        p = MulAddPk(p, t, Vector128.Create(-1.453152027f));
+        p = MulAddPk(p, t, Vector128.Create(1.421413741f));
+        p = MulAddPk(p, t, Vector128.Create(-0.284496736f));
+        p = MulAddPk(p, t, Vector128.Create(0.254829592f));
+        var y = PackedSimd.Subtract(one, PackedSimd.Multiply(PackedSimd.Multiply(p, t),
+            ExpPk(PackedSimd.Multiply(PackedSimd.Negate(ax), ax))));
+        return PackedSimd.Multiply(y, sign);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> GeluPk(Vector128<float> x) =>
+        PackedSimd.Multiply(PackedSimd.Multiply(Vector128.Create(0.5f), x),
+            PackedSimd.Add(Vector128<float>.One, ErfPk(PackedSimd.Multiply(x, Vector128.Create(0.70710678118654752f)))));
 
     internal static float ErfScalar(float x)
     {

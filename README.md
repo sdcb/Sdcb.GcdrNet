@@ -23,7 +23,7 @@ The model is a two-stage pipeline:
 - **Zero inference-engine dependency** — self-contained ONNX proto reader, graph compiler
   (shape specialization, constant folding, operator fusion, buffer-arena planning).
 - **CPU backend** with ISA tiered dispatch: AVX-512 → AVX2 (+FMA, multithreaded) → `Vector<float>` → Scalar on x64;
-  NEON (AArch64 AdvSimd) → Scalar on arm64.
+  NEON (AArch64 AdvSimd) → Scalar on arm64; PackedSimd (WASM SIMD128) → `Vector<float>` → Scalar on browser-wasm.
 - **Vulkan compute backend** (Windows/Linux/Android `libvulkan`): push-descriptors, ReBAR-aware
   staging, single-recorded-command-buffer graph execution, fused `bgr2nchw → GC → div6 → DR →
   nchw2bgr` pipeline with arbitrary source/destination strides.
@@ -52,6 +52,9 @@ Rockchip RK3399 (2× A72 + 4× A53, NEON, passively cooled): see [docs/rockchip-
 
 Snapdragon 8 Gen 3 (realme GT5 Pro, Android 16; Adreno 750 without coopmat, 64/128-lane waves): see [docs/snapdragon-8gen3.md](docs/snapdragon-8gen3.md)
 (Vulkan ~486 ms/img with register-tiled conv/GEMM kernels, 2.6× the shared-memory path; CPU NEON ~1.03 s/img on the same corpus).
+
+Browser (browser-wasm, WASM SIMD128, Web Workers threads, LLVM AOT): see [docs/wasm.md](docs/wasm.md)
+(Edge on a 5950X: CPU PackedSimd ~696 ms/img on the same corpus, 1.55× the generic `Vector<float>` path in the same browser).
 
 ### Quick start
 
@@ -100,6 +103,7 @@ matching the reference Python implementation.
   profile, CPU-vs-Metal per-node trace), `--vkprof` (per-shader/per-dispatch GPU timing), `--vkcheck` / `--vknodes`
   (Vulkan vs CPU, whole graph / per node)
 - `bench/Sdcb.SimdGcdrNet.AndroidBench` — the same modes inside an Android APK (`run.ps1`: build → adb install → push testdata → run → pull logs)
+- `bench/Sdcb.SimdGcdrNet.WasmBench` — `--corpus` / `--bench` / `--check` / `--tiers` in a browser (`run.ps1`: publish with LLVM AOT → `server.mjs` with COOP/COEP → headless Edge/Chrome); needs the `wasm-tools-net10` workload and Node.js
 - `src/Sdcb.SimdGcdrNet.Models` — `GcdrModels` over the embedded ONNX files (taken from `tests/testdata/models`)
 - `src/Sdcb.SimdGcdrNet/linqpad-samples` — LINQPad samples packed into `Sdcb.SimdGcdrNet` (tag `linqpad-samples`)
 - `build/` — LINQPad scripts to pack (`01-build-packages`) and publish (`02-publish-proget-nuget`) the
@@ -158,7 +162,7 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 ### 特性
 
 - **零推理引擎依赖**：自带 ONNX proto 读取 + 图编译（shape 特化、常量折叠、算子融合、arena 规划）
-- **CPU 后端**：x64 上 AVX-512 → AVX2+FMA 多线程 → `Vector<float>` → Scalar 四档 ISA 自动分发；arm64 上 NEON（AdvSimd）→ Scalar
+- **CPU 后端**：x64 上 AVX-512 → AVX2+FMA 多线程 → `Vector<float>` → Scalar 四档 ISA 自动分发；arm64 上 NEON（AdvSimd）→ Scalar；browser-wasm 上 PackedSimd（WASM SIMD128）→ `Vector<float>` → Scalar
 - **Vulkan 后端**：push-descriptor、ReBAR 感知 staging、单命令缓冲图执行、
   融合流水线（bgr2nchw→GC→div6→DR→nchw2bgr），支持任意 src/dst stride
 - 预留 Metal 后端接口位
@@ -183,6 +187,9 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 
 骁龙 8 Gen 3（真我 GT5 Pro，Android 16；Adreno 750 无 coopmat，64/128 lane wave）见 [docs/snapdragon-8gen3.md](docs/snapdragon-8gen3.md)
 （同一语料 Vulkan ~486 ms/张，寄存器分块卷积/GEMM 内核比共享内存路径快 2.6 倍；CPU NEON ~1.03 s/张）。
+
+浏览器（browser-wasm，WASM SIMD128，Web Workers 多线程，LLVM AOT）见 [docs/wasm.md](docs/wasm.md)
+（5950X 上的 Edge：同一语料 CPU PackedSimd ~696 ms/张，是同浏览器通用 `Vector<float>` 路径的 1.55 倍）。
 
 ### 快速上手
 

@@ -9,7 +9,8 @@ namespace Sdcb.SimdGcdrNet;
 /// <summary>Compute backend selection for <see cref="GcdrEnhancer"/>.</summary>
 public enum GcdrBackend
 {
-    /// <summary>CPU: Scalar → Vector&lt;float&gt; → AVX2 → AVX-512 dispatch on x64, NEON on arm64.</summary>
+    /// <summary>CPU: Scalar → Vector&lt;float&gt; → AVX2 → AVX-512 dispatch on x64, NEON on arm64,
+    /// PackedSimd (WASM SIMD128) on browser-wasm.</summary>
     Cpu,
     /// <summary>Vulkan compute (discrete GPU preferred; integrated and mobile GPUs otherwise).</summary>
     Vulkan,
@@ -178,8 +179,8 @@ public sealed class GcdrEnhancer : IDisposable
         if (dst.Length < (long)(height - 1) * dstStride + width * bpp)
             throw new ArgumentException($"dst holds {dst.Length} bytes, {height} rows of stride {dstStride} need more.", nameof(dst));
 
-        bool useMtl = _backend == GcdrBackend.Metal
-            || (_backend == GcdrBackend.Auto && s_metalOk.Value);
+        bool useMtl = GpuPossible && (_backend == GcdrBackend.Metal
+            || (_backend == GcdrBackend.Auto && s_metalOk.Value));
         if (useMtl)
         {
             var pool = MtlPool();
@@ -188,8 +189,8 @@ public sealed class GcdrEnhancer : IDisposable
             finally { pool.Return(pipe); }
             return;
         }
-        bool useVk = _backend == GcdrBackend.Vulkan
-            || (_backend == GcdrBackend.Auto && VulkanOk());
+        bool useVk = GpuPossible && (_backend == GcdrBackend.Vulkan
+            || (_backend == GcdrBackend.Auto && VulkanOk()));
         if (useVk)
         {
             var pool = VkPool();
@@ -262,6 +263,10 @@ public sealed class GcdrEnhancer : IDisposable
         long gcOff = o >= gc.ArenaFloats ? 0 : end;
         return (gcOff, Math.Max(dr.ArenaFloats, gcOff + gc.ArenaFloats));
     }
+
+    // browser/WASI: unlinked P/Invokes (vulkan-1, libobjc) trap the wasm module with
+    // "null function" instead of throwing, so every backend (Auto/Vulkan/Metal) resolves to CPU
+    private static bool GpuPossible => !OperatingSystem.IsBrowser() && !OperatingSystem.IsWasi();
 
     private static bool VulkanOk()
     {

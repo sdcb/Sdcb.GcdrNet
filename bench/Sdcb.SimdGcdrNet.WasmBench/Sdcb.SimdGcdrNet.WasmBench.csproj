@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+  <!--
+    Dev/bench host only: runs the library's net10.0 build (PackedSimd CPU kernels) in a
+    browser (browser-wasm, Web Workers threads, LLVM AOT). Needs `dotnet workload install
+    wasm-tools-net10` and Node.js; driven by run.ps1 (publish -> server.mjs -> headless Edge).
+    Not in the .slnx: building it requires the workload. Models and the RealDAE corpus are
+    fetched from tests/testdata over HTTP, not packaged.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Sdcb.SimdGcdrNet.WasmBench</AssemblyName>
+    <RootNamespace>Sdcb.SimdGcdrNet.WasmBench</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <WasmEnableThreads Condition="'$(WasmEnableThreads)' == ''">true</WasmEnableThreads>
+    <RunAOTCompilation Condition="'$(RunAOTCompilation)' == ''">true</RunAOTCompilation>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sdcb.SimdGcdrNet\Sdcb.SimdGcdrNet.csproj" />
+    <!-- 3.1.x: 3.2 adds a build-time license key check -->
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SimdGcdrNet WebAssembly Benchmark</title>
+    <style>
+        :root { --bg: #121417; --panel: #1b1e24; --border: #2a303c; --primary: #3b82f6; --text: #f3f4f6; --dim: #9ca3af;
+                --mono: 'JetBrains Mono', Consolas, Menlo, monospace; }
+        * { box-sizing: border-box; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+               max-width: 1100px; margin: 0 auto; padding: 24px; }
+        h1 { font-size: 1.4rem; font-weight: 600; margin: 0 0 16px; }
+        .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+        .stat { font-size: 0.9rem; color: var(--dim); margin: 4px 0; }
+        .stat b { font-family: var(--mono); color: #fff; font-weight: 500; }
+        label { font-size: 0.85rem; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
+        input { background: #111317; border: 1px solid var(--border); color: #fff; padding: 8px 10px; border-radius: 6px;
+                font-family: var(--mono); font-size: 0.85rem; }
+        button { background: var(--primary); color: #fff; border: 0; border-radius: 6px; padding: 9px 18px; font-weight: 600; cursor: pointer; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .bar { background: #222730; border-radius: 6px; height: 8px; overflow: hidden; margin: 8px 0; }
+        .fill { background: var(--primary); height: 100%; width: 0%; transition: width 0.15s; }
+        pre { background: #0d0f12; border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-family: var(--mono);
+              font-size: 0.8rem; line-height: 1.4; height: 460px; overflow-y: auto; color: #d1d5db; white-space: pre-wrap; margin: 0; }
+    </style>
+</head>
+<body>
+    <h1>SimdGcdrNet WebAssembly benchmark</h1>
+    <div class="card">
+        <div class="stat">crossOriginIsolated (COOP/COEP): <b id="coop">-</b></div>
+        <div class="stat">navigator.hardwareConcurrency: <b id="cores">-</b></div>
+        <div class="stat">status: <b id="status">ready</b></div>
+    </div>
+    <div class="card">
+        <div class="row">
+            <label>bench args
+                <input id="args" size="48" value="--corpus cpu" />
+            </label>
+            <label>env (K=V, comma separated)
+                <input id="env" size="32" value="" />
+            </label>
+            <button id="start">Run</button>
+        </div>
+        <div class="stat" style="margin-top:10px">--corpus [cpu] [--count N] | --bench h w reps | --benchcpu h w reps | --check [small|mid|pad] | --tiers [h] [w] | --vector (PackedSimd off)</div>
+    </div>
+    <div class="bar"><div id="fill" class="fill"></div></div>
+    <pre id="log"></pre>
+
+    <script type="module">
+        import { dotnet } from './_framework/dotnet.js';
+
+        const $ = id => document.getElementById(id);
+        const params = new URLSearchParams(location.search);
+        if (params.has('args')) $('args').value = params.get('args');
+        if (params.has('env')) $('env').value = params.getAll('env').join(',');
+        $('coop').textContent = String(window.crossOriginIsolated);
+        $('cores').textContent = navigator.hardwareConcurrency;
+
+        // relay to the harness console (server.mjs prints it)
+        const api = (url, init = {}) => fetch(url, { ...init, headers: { 'X-WasmBench': '1' } });
+        const relay = s => api('/api/log', { method: 'POST', body: s }).catch(() => {});
+
+        function log(msg) {
+            const el = $('log');
+            el.textContent += msg + '\n';
+            el.scrollTop = el.scrollHeight;
+            const m = msg.match(/^\[WASM\]\[(\d+)\/(\d+)\]/);
+            if (m) $('fill').style.width = Math.round(100 * m[1] / m[2]) + '%';
+        }
+
+        const origLog = console.log, origErr = console.error;
+        // worker console forwarding arrives as '{"method":..,"payload":..}' strings
+        const unwrap = s => {
+            if (!s.startsWith('{"method"')) return s;
+            try { return JSON.parse(s).payload ?? s; } catch { return s; }
+        };
+        const fmt = args => args.map(a => a instanceof Error ? (a.stack || a.message)
+            : typeof a === 'string' ? unwrap(a)
+            : typeof a === 'object' && a !== null ? (a.payload ?? JSON.stringify(a)) : String(a)).join(' ');
+        console.log = (...a) => { origLog.apply(console, a); const s = fmt(a); log(s); relay(s); };
+        console.error = (...a) => { origErr.apply(console, a); const s = fmt(a); log(s); relay(s); };
+        window.addEventListener('error', e => { const s = '[WINDOW ERROR] ' + (e.error?.stack || e.message); log(s); relay(s); });
+        window.addEventListener('unhandledrejection', e => { const s = '[UNHANDLED REJECTION] ' + (e.reason?.stack || e.reason); log(s); relay(s); });
+
+        async function start() {
+            $('start').disabled = true;
+            $('status').textContent = 'running';
+            $('fill').style.width = '0%';
+            $('log').textContent = '';
+            const cliArgs = ['--base-url', location.origin, ...$('args').value.trim().split(/\s+/).filter(Boolean)];
+            if (params.has('out')) cliArgs.push('--out', params.get('out'));
+            try {
+                let builder = dotnet.withConsoleForwarding().withApplicationArguments(...cliArgs);
+                for (const pair of $('env').value.split(',').map(s => s.trim()).filter(Boolean)) {
+                    const eq = pair.indexOf('=');
+                    if (eq <= 0) continue;
+                    builder = builder.withEnvironmentVariable(pair.substring(0, eq), pair.substring(eq + 1));
+                    console.log(`[BENCH] env ${pair}`);
+                }
+                const runtime = await builder.create();
+                const exitCode = await runtime.runMain();
+                // linear memory never shrinks: its size at exit is the run's peak wasm heap
+                const heap = runtime.Module?.HEAPU8?.buffer?.byteLength;
+                if (heap) console.log(`[BENCH] wasm linear memory at exit: ${(heap / 1048576).toFixed(0)} MB`);
+                $('status').textContent = `finished (${exitCode})`;
+                $('fill').style.width = '100%';
+                await api('/api/done?exitCode=' + (exitCode ?? 0));
+            } catch (err) {
+                console.error(`[BENCH] ERROR: ${err?.stack || err}`);
+                $('status').textContent = 'error';
+                await api('/api/done?exitCode=1&error=' + encodeURIComponent(err?.stack || String(err)));
+            }
+        }
+
+        $('start').addEventListener('click', start);
+        if (params.has('autorun')) start();
+    </script>
+</body>
+</html>
