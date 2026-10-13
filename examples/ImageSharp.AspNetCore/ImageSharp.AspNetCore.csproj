@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>ImageSharp.AspNetCore</RootNamespace>
+    <AssemblyName>ImageSharp.AspNetCore</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sdcb.SimdGcdrNet\Sdcb.SimdGcdrNet.csproj" />
+    <ProjectReference Include="..\..\src\Sdcb.SimdGcdrNet.Models\Sdcb.SimdGcdrNet.Models.csproj" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.12" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.18.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\example.jpg" Link="example.jpg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

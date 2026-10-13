@@ -1,0 +1,62 @@
+<Window x:Class="OpenCvSharp5.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Sdcb.SimdGcdrNet - OpenCvSharp5 WPF"
+        Width="1200"
+        Height="720"
+        MinWidth="820"
+        MinHeight="520"
+        WindowStartupLocation="CenterScreen"
+        AllowDrop="True"
+        Drop="Window_Drop">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <DockPanel Margin="0,0,0,10" LastChildFill="True">
+            <Button x:Name="SelectImageButton" DockPanel.Dock="Left" Padding="12,5" Content="选择图片" Click="SelectImage_Click" />
+            <Button x:Name="SaveButton" DockPanel.Dock="Right" Margin="8,0,0,0" Padding="12,5" Content="保存结果" IsEnabled="False" Click="Save_Click" />
+            <Button x:Name="RunButton"
+                    DockPanel.Dock="Right"
+                    Margin="8,0,0,0"
+                    Padding="18,5"
+                    Background="SteelBlue"
+                    BorderBrush="DodgerBlue"
+                    Foreground="White"
+                    FontWeight="Bold"
+                    Content="增强"
+                    Click="Enhance_Click" />
+            <ComboBox x:Name="BackendCombo" DockPanel.Dock="Right" Width="100" VerticalContentAlignment="Center" SelectionChanged="Backend_SelectionChanged" />
+            <TextBlock DockPanel.Dock="Right" Margin="12,0,6,0" VerticalAlignment="Center" Text="后端：" />
+            <TextBox x:Name="ImagePathText" Margin="8,0,0,0" VerticalContentAlignment="Center" IsReadOnly="True" />
+        </DockPanel>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="8" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <GroupBox Header="原图" Padding="4">
+                <Image x:Name="SourcePreview" Stretch="Uniform" />
+            </GroupBox>
+            <GroupBox Grid.Column="2" Header="增强后" Padding="4">
+                <Grid>
+                    <Image x:Name="ResultPreview" Stretch="Uniform" />
+                    <TextBlock x:Name="ResultPlaceholder"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Foreground="Gray"
+                               Text="点击「增强」查看去阴影效果（也可以把图片拖进窗口）" />
+                </Grid>
+            </GroupBox>
+        </Grid>
+
+        <Border Grid.Row="2" Margin="0,10,0,0" Padding="8,5" BorderBrush="LightGray" BorderThickness="1">
+            <TextBlock x:Name="Status" TextTrimming="CharacterEllipsis" />
+        </Border>
+    </Grid>
+</Window>

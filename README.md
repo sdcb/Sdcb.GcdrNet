@@ -83,6 +83,28 @@ Pixel formats: `Bgr24` (OpenCV `Mat`, GDI+ 24bpp), `Rgb24`, `Bgra32` (SkiaSharp,
 Input is padded to a multiple of 32 with top/left **replicate** padding and cropped back —
 matching the reference Python implementation.
 
+### Examples
+
+The three UI examples open `examples/example.jpg` (a phone photo of a hand-drawn poster with a hard hand shadow):
+
+- `examples/ImageSharp.AspNetCore` — ASP.NET Core + ImageSharp (`Rgba32`, in place): upload / drag-and-drop,
+  before-after slider, `auto` / `cpu` backend switch, timings; `POST /api/enhance` returns the enhanced image
+  (API docs at `/scalar`).
+- `examples/SkiaSharp.Avalonia` — cross-platform desktop (Windows / Linux / macOS, `Bgra32` `SKBitmap`):
+  side-by-side preview, `auto` / `cpu` / `vulkan` (`metal` on macOS) switch, save as JPEG / PNG.
+- `examples/OpenCvSharp5.Wpf` — WPF + OpenCvSharp5 (`Bgr24` `Mat`, any `Step()`): same UI, plus drag-and-drop.
+- `examples/PaddleOCR.Console` — enhance with SimdGcdrNet, then OCR the original and the enhanced image with
+  [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR); both take the same decoded RGBA buffer. Its default
+  `examples/ocr-example.jpg` (from RealDAE) has heavy show-through from the back of the page: OCR on the
+  original returns 56 lines (mostly garbage from the back side), on the enhanced image the 14 real lines.
+
+```bash
+dotnet run --project examples/ImageSharp.AspNetCore        # http://localhost:5190
+dotnet run --project examples/SkiaSharp.Avalonia -- [image]
+dotnet run --project examples/OpenCvSharp5.Wpf -- [image]
+dotnet run --project examples/PaddleOCR.Console -- [image] [output.jpg]
+```
+
 ### Layout
 
 - `src/Sdcb.SimdGcdrNet/Onnx` — minimal protobuf reader + ONNX model/graph objects
@@ -216,6 +238,26 @@ enh.Enhance(src, w, h, srcStride, dst, dstStride, GcdrPixelFormat.Rgba32);
 `Rgba32`（ImageSharp、浏览器 canvas）。`dst` 可以和 `src` 是同一块内存（stride 相同），即原地增强。
 
 输入补齐到 32 倍数（上/左 replicate padding），输出自动裁回，与参考 Python 实现一致。
+
+### 示例
+
+三个界面示例默认打开 `examples/example.jpg`（手机拍摄的手抄报，带一块很硬的手影）：
+
+- `examples/ImageSharp.AspNetCore`：ASP.NET Core + ImageSharp（`Rgba32` 原地增强），上传/拖拽图片、前后对比滑块、
+  `auto` / `cpu` 后端切换与耗时；`POST /api/enhance` 直接返回增强后的图片，API 文档在 `/scalar`。
+- `examples/SkiaSharp.Avalonia`：跨平台桌面（Windows / Linux / macOS，`Bgra32` 的 `SKBitmap`），左右对比预览，
+  可切换 `auto` / `cpu` / `vulkan`（macOS 上为 `metal`），结果可存为 JPEG / PNG。
+- `examples/OpenCvSharp5.Wpf`：WPF + OpenCvSharp5（`Bgr24` 的 `Mat`，按 `Step()` 传 stride），界面同上，支持拖拽。
+- `examples/PaddleOCR.Console`：先用 SimdGcdrNet 增强，再用 [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR)
+  分别识别原图和增强图；两者共用同一块解码后的 RGBA 像素。默认图片 `examples/ocr-example.jpg`（取自 RealDAE）
+  背面透字严重：原图 OCR 出 56 行（大部分是背面透过来的乱码），增强后只剩正文的 14 行。
+
+```bash
+dotnet run --project examples/ImageSharp.AspNetCore        # http://localhost:5190
+dotnet run --project examples/SkiaSharp.Avalonia -- [图片]
+dotnet run --project examples/OpenCvSharp5.Wpf -- [图片]
+dotnet run --project examples/PaddleOCR.Console -- [图片] [输出.jpg]
+```
 
 ### 构建 shader
 

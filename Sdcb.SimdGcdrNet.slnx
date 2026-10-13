@@ -3,5 +3,8 @@
   <Project Path="src/Sdcb.SimdGcdrNet.Models/Sdcb.SimdGcdrNet.Models.csproj" />
   <Project Path="bench/Sdcb.SimdGcdrNet.Benchmark/Sdcb.SimdGcdrNet.Benchmark.csproj" />
   <Project Path="tests/Sdcb.SimdGcdrNet.Tests/Sdcb.SimdGcdrNet.Tests.csproj" />
-  <Project Path="examples/EnhanceImage/EnhanceImage.csproj" />
+  <Project Path="examples/ImageSharp.AspNetCore/ImageSharp.AspNetCore.csproj" />
+  <Project Path="examples/PaddleOCR.Console/PaddleOCR.Console.csproj" />
+  <Project Path="examples/SkiaSharp.Avalonia/SkiaSharp.Avalonia.csproj" />
+  <Project Path="examples/OpenCvSharp5.Wpf/OpenCvSharp5.Wpf.csproj" />
 </Solution>

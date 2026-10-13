@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SimdGcdrNet 文档去阴影</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>SimdGcdrNet 文档去阴影</h1>
+      <p>纯 C# GCDRNet 推理（CPU SIMD / Vulkan / Metal），无 onnxruntime 依赖</p>
+    </div>
+    <a class="docs" href="/scalar" target="_blank">API 文档</a>
+  </header>
+
+  <section class="toolbar">
+    <label class="button primary">
+      选择图片
+      <input id="file" type="file" accept="image/*" hidden>
+    </label>
+    <button id="example" class="button" type="button">示例图片</button>
+    <label>后端
+      <select id="backend">
+        <option value="auto">auto（GPU 优先）</option>
+        <option value="cpu">cpu</option>
+      </select>
+    </label>
+    <label>输出
+      <select id="format">
+        <option value="jpeg">jpeg</option>
+        <option value="webp">webp</option>
+        <option value="png">png</option>
+      </select>
+    </label>
+    <button id="rerun" class="button" type="button" disabled>重新增强</button>
+    <a id="download" class="button" download hidden>下载结果</a>
+    <span id="status" class="status">拖拽图片到下方，或点击「示例图片」</span>
+  </section>
+
+  <main id="stage" class="stage">
+    <div id="compare" class="compare" hidden>
+      <img id="before" alt="原图">
+      <img id="after" alt="增强后">
+      <div id="divider" class="divider"></div>
+      <span class="tag left">原图</span>
+      <span class="tag right">增强后</span>
+      <input id="slider" type="range" min="0" max="100" value="50" aria-label="对比位置">
+    </div>
+    <div id="placeholder" class="placeholder">拖拽图片到这里</div>
+  </main>
+
+  <footer>
+    <a href="https://github.com/sdcb/SimdGcdrNet" target="_blank">github.com/sdcb/SimdGcdrNet</a>
+    · 每个新尺寸第一次增强包含计划编译，再点一次「重新增强」可看到稳态耗时
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

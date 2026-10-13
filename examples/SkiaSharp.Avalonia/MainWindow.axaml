@@ -1,0 +1,61 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="SkiaSharp.Avalonia.MainWindow"
+        Title="Sdcb.SimdGcdrNet - SkiaSharp/Avalonia"
+        Width="1200"
+        Height="720"
+        MinWidth="820"
+        MinHeight="520"
+        WindowStartupLocation="CenterScreen"
+        RequestedThemeVariant="Light"
+        Background="White"
+        Foreground="Black">
+    <Grid Margin="12" RowDefinitions="Auto,*,Auto">
+        <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto" ColumnSpacing="8" Margin="0,0,0,10">
+            <Button x:Name="SelectImageButton" Content="选择图片" Click="SelectImage_Click" />
+            <TextBox x:Name="ImagePathText" Grid.Column="1" IsReadOnly="True" TextWrapping="NoWrap" />
+            <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="后端：" />
+            <ComboBox x:Name="BackendCombo" Grid.Column="3" MinWidth="110" SelectionChanged="Backend_SelectionChanged" />
+            <Button x:Name="RunButton"
+                    Grid.Column="4"
+                    Padding="18,8"
+                    Background="SteelBlue"
+                    BorderBrush="DodgerBlue"
+                    BorderThickness="1"
+                    Click="Enhance_Click"
+                    Content="增强"
+                    FontWeight="Bold"
+                    Foreground="White" />
+            <Button x:Name="SaveButton" Grid.Column="5" Content="保存结果" IsEnabled="False" Click="Save_Click" />
+        </Grid>
+
+        <Grid Grid.Row="1" ColumnDefinitions="1*,1*" ColumnSpacing="8">
+            <Border BorderBrush="Gray" BorderThickness="1" Padding="4">
+                <Grid RowDefinitions="Auto,*">
+                    <TextBlock Text="原图" FontWeight="Bold" Margin="2,0,0,4" />
+                    <Image x:Name="SourcePreview" Grid.Row="1" Stretch="Uniform" />
+                </Grid>
+            </Border>
+            <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1" Padding="4">
+                <Grid RowDefinitions="Auto,*">
+                    <TextBlock Text="增强后" FontWeight="Bold" Margin="2,0,0,4" />
+                    <Image x:Name="ResultPreview" Grid.Row="1" Stretch="Uniform" />
+                    <TextBlock x:Name="ResultPlaceholder"
+                               Grid.Row="1"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Foreground="Gray"
+                               Text="点击「增强」查看去阴影效果" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <Border Grid.Row="2"
+                Margin="0,10,0,0"
+                Padding="8,5"
+                BorderBrush="LightGray"
+                BorderThickness="1">
+            <TextBlock x:Name="Status" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+        </Border>
+    </Grid>
+</Window>
