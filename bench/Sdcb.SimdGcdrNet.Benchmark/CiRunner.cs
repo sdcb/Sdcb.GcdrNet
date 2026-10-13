@@ -195,7 +195,7 @@ public static partial class Program
         string isa = RuntimeInformation.ProcessArchitecture switch
         {
             Architecture.X64 or Architecture.X86 =>
-                Kernels.Nhwc.UseAvx512 ? "avx512" : Avx2.IsSupported ? "avx2" : Avx.IsSupported ? "avx" :
+                Sdcb.SimdOnnx.Kernels.Nhwc.UseAvx512 ? "avx512" : Avx2.IsSupported ? "avx2" : Avx.IsSupported ? "avx" :
                 System.Numerics.Vector.IsHardwareAccelerated ? "sse" : "scalar",
             Architecture.Arm64 => AdvSimd.IsSupported ? "neon" : "scalar",
             _ => System.Numerics.Vector.IsHardwareAccelerated ? "vector" : "scalar",

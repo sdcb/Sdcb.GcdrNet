@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using Sdcb.SimdOnnx.Kernels;
 
 namespace Sdcb.SimdGcdrNet.Kernels;
 

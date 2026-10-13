@@ -5,9 +5,11 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.Wasm;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Sdcb.SimdGcdrNet.Engine;
+using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdGcdrNet.Extensions;
+using Sdcb.SimdOnnx.Kernels;
 using Sdcb.SimdGcdrNet.Kernels;
-using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdOnnx.Onnx;
 using Sdcb.SimdGcdrNet.Testing;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -274,8 +276,8 @@ public static class Program
     private static async Task<int> Bench(int h, int w, int reps, JsonObject doc)
     {
         var (gcBytes, drBytes) = await Models();
-        var gc = CompiledModel.Compile(OnnxModel.Load(gcBytes), [1, 3, h, w]);
-        var dr = CompiledModel.Compile(OnnxModel.Load(drBytes), [1, 6, h, w]);
+        var gc = new CompiledModel(GraphCompiler.Compile(OnnxModel.Load(gcBytes), [1, 3, h, w], CompileOptions.Default with { Extensions = GcdrExtensions.Instance }));
+        var dr = new CompiledModel(GraphCompiler.Compile(OnnxModel.Load(drBytes), [1, 6, h, w], CompileOptions.Default with { Extensions = GcdrExtensions.Instance }));
         using var s1 = gc.CreateSession();
         using var s2 = dr.CreateSession();
         new Random(0).NextBytes(MemoryMarshal.AsBytes(s1.Input));
@@ -381,7 +383,7 @@ public static class Program
         bool ok = true;
         foreach (var (tag, model, c) in new[] { ("gc", gcBytes, 3), ("dr", drBytes, 6) })
         {
-            var cm = CompiledModel.Compile(OnnxModel.Load(model), [1, c, h, w]);
+            var cm = new CompiledModel(GraphCompiler.Compile(OnnxModel.Load(model), [1, c, h, w], CompileOptions.Default with { Extensions = GcdrExtensions.Instance }));
             var outs = new float[2][];
             for (int pass = 0; pass < 2; pass++)
             {

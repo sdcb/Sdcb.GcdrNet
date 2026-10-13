@@ -1,6 +1,8 @@
+using Sdcb.SimdOnnx.Backends.Vulkan;
 using Sdcb.SimdGcdrNet.Backends.Vulkan;
-using Sdcb.SimdGcdrNet.Engine;
-using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdGcdrNet.Extensions;
+using Sdcb.SimdOnnx.Onnx;
 using Xunit;
 
 namespace Sdcb.SimdGcdrNet.Tests;
@@ -22,7 +24,7 @@ public class VulkanTests
         float[] expect = Golden.F32(tag, "shadow");
 
         OnnxModel m = OnnxModel.Load(GcPath);
-        using var sess = VkBackend.Default.NewSession(m, shape);
+        using var sess = VkBackend.Default.NewSession(m, shape, GcdrExtensions.Instance);
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
@@ -42,7 +44,7 @@ public class VulkanTests
         float[] expect = Golden.F32(tag, "output");
 
         OnnxModel m = OnnxModel.Load(DrPath);
-        using var sess = VkBackend.Default.NewSession(m, shape);
+        using var sess = VkBackend.Default.NewSession(m, shape, GcdrExtensions.Instance);
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
@@ -167,8 +169,8 @@ public class VulkanConvDotTests
         {
             // a fresh model instance: graphs are cached per model, so this compiles a new one
             OnnxModel m = OnnxModel.Load(which == "gc" ? GcPath : DrPath);
-            using var sess = VkBackend.Default.NewSession(m, shape);
-            Assert.Contains(VkBackend.Default.GraphFor(m, shape).Dispatches, d => d.Name!.StartsWith("conv_dot", StringComparison.Ordinal));
+            using var sess = VkBackend.Default.NewSession(m, shape, GcdrExtensions.Instance);
+            Assert.Contains(VkBackend.Default.GraphFor(m, shape, ext: GcdrExtensions.Instance).Dispatches, d => d.Name!.StartsWith("conv_dot", StringComparison.Ordinal));
             input.CopyTo(sess.Input);
             sess.Run();
             var (max, rmse, _) = Golden.Diff(sess.Output, expect);

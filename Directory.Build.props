@@ -4,8 +4,12 @@
     never force a models release). Edit here and keep build/00-common.linq in sync.
   -->
   <PropertyGroup>
-    <SdcbSimdGcdrNetVersion Condition="'$(SdcbSimdGcdrNetVersion)' == ''">0.1.0</SdcbSimdGcdrNetVersion>
+    <SdcbSimdGcdrNetVersion Condition="'$(SdcbSimdGcdrNetVersion)' == ''">2.0.0</SdcbSimdGcdrNetVersion>
     <SdcbSimdGcdrNetModelsVersion Condition="'$(SdcbSimdGcdrNetModelsVersion)' == ''">1.0.0</SdcbSimdGcdrNetModelsVersion>
+    <!-- Engine package (exact pin: the library builds against engine internals). UseLocalSimdOnnx=true
+         switches to ../Sdcb.SimdOnnx as a project reference for side-by-side development. -->
+    <SdcbSimdOnnxVersion Condition="'$(SdcbSimdOnnxVersion)' == ''">0.1.0-preview.1</SdcbSimdOnnxVersion>
+    <SimdOnnxProject>$(MSBuildThisFileDirectory)..\Sdcb.SimdOnnx\src\Sdcb.SimdOnnx\Sdcb.SimdOnnx.csproj</SimdOnnxProject>
   </PropertyGroup>
 
   <PropertyGroup>

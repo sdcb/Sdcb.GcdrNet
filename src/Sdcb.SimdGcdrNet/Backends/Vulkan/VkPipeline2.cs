@@ -1,5 +1,7 @@
-using Sdcb.SimdGcdrNet.Engine;
-using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdGcdrNet.Extensions;
+using Sdcb.SimdOnnx.Backends.Vulkan;
+using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdOnnx.Onnx;
 
 namespace Sdcb.SimdGcdrNet.Backends.Vulkan;
 
@@ -45,9 +47,9 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         _drModel = dr;
         _f16 = be.F16;
         string sfx = _f16 ? "_h" : "";
-        _pPre = _dev.GetPipeline("bgr2nhwc" + sfx, 2, 9 * 4);
-        _pDiv6 = _dev.GetPipeline("div6" + sfx, 3, 4);
-        _pPost = _dev.GetPipeline("nhwc2bgr" + sfx, 3, 9 * 4);
+        _pPre = _dev.GetPipeline("bgr2nhwc" + sfx, 2, 9 * 4, owner: GcdrExtensions.Owner);
+        _pDiv6 = _dev.GetPipeline("div6" + sfx, 3, 4, owner: GcdrExtensions.Owner);
+        _pPost = _dev.GetPipeline("nhwc2bgr" + sfx, 3, 9 * 4, owner: GcdrExtensions.Owner);
         _cmdPool = _dev.NewCommandPool();
         try
         {
@@ -80,9 +82,9 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         if (_gcG is null || h != _h || w != _w)
         {
             // a new size compiles two plans + graphs: build them side by side
-            var tg = Task.Run(() => _be.AcquireGraph(_gcModel, [1, 3, h, w], physIo: true));
+            var tg = Task.Run(() => _be.AcquireGraph(_gcModel, [1, 3, h, w], physIo: true, GcdrExtensions.Instance));
             VkGraphModel gd;
-            try { gd = _be.AcquireGraph(_drModel, [1, 6, h, w], physIo: true); }
+            try { gd = _be.AcquireGraph(_drModel, [1, 6, h, w], physIo: true, GcdrExtensions.Instance); }
             catch { try { tg.GetAwaiter().GetResult().Release(); } catch { } throw; }
             VkGraphModel gg;
             try { gg = tg.GetAwaiter().GetResult(); }

@@ -1,5 +1,6 @@
-using Sdcb.SimdGcdrNet.Engine;
-using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdGcdrNet.Extensions;
+using Sdcb.SimdOnnx.Onnx;
 using Xunit;
 
 namespace Sdcb.SimdGcdrNet.Tests;
