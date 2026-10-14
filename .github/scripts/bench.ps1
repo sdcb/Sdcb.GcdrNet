@@ -30,7 +30,7 @@ foreach ($case in $Cases.Split(';', [StringSplitOptions]::RemoveEmptyEntries)) {
     foreach ($kv in "$envs".Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) {
         $k, $v = $kv.Split('=', 2)
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
-        [Environment]::SetEnvironmentVariable($k, $v)
+        Set-Item "env:$k" $v
     }
     Write-Output "::group::$caseId (replica $Replica) $envs"
     try {
@@ -38,7 +38,8 @@ foreach ($case in $Cases.Split(';', [StringSplitOptions]::RemoveEmptyEntries)) {
         if ($LASTEXITCODE -ne 0) { $failed += $caseId }
     }
     finally {
-        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+        # PowerShell would pass $null as "" (an empty, still-set variable): remove instead
+        foreach ($k in $saved.Keys) { if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue } else { Set-Item "env:$k" $saved[$k] } }
         Write-Output '::endgroup::'
     }
 }
