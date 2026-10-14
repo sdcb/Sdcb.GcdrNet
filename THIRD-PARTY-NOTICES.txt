@@ -44,6 +44,7 @@ SOFTWARE.
 RealDAE dataset (repository test data only; not shipped in any package)
 ================================================================================
 
-tests/testdata/realdae/ and examples/ocr-example.jpg contain images from the RealDAE
+tests/testdata/realdae/ (fetched from https://github.com/sdcb/DocGainFixture by
+tools/fetch-fixture.ps1, not committed here) and examples/ocr-example.jpg contain images from the RealDAE
 dataset released with GCDRNet (same authors and paper as above), used for tests and
 benchmarks only.

@@ -20,11 +20,11 @@
 async Task Main()
 {
 	using HttpClient http = new();
-	byte[] webp = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/tests/testdata/realdae/10_color.webp");
+	byte[] jpeg = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/examples/ocr-example.jpg");
 
 	using GcdrEnhancer enhancer = GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet, GcdrBackend.Auto);
 	using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Default);
-	using SKBitmap original = DecodeBgra(webp);
+	using SKBitmap original = DecodeBgra(jpeg);
 	using SKBitmap enhanced = new(original.Info);
 
 	Stopwatch sw = Stopwatch.StartNew();

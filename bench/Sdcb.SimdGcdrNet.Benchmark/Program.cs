@@ -5,7 +5,7 @@ using Sdcb.SimdGcdrNet.Onnx;
 
 namespace Sdcb.SimdGcdrNet.Benchmark;
 
-public static class Program
+public static partial class Program
 {
     public static int Main(string[] args)
     {
@@ -13,6 +13,8 @@ public static class Program
         string gcPath = Path.Combine(dir, "models", "gcdrnet_gcnet_sim.onnx");
         string drPath = Path.Combine(dir, "models", "gcdrnet_drnet_sim.onnx");
 
+        if (args.Length > 0 && args[0] == "--ci")
+            return Ci(Path.Combine(dir, "realdae"), gcPath, drPath, args);
         if (args.Length > 0 && args[0] == "--check")
         {
             string tag = args.Length > 1 ? args[1] : "small";
@@ -317,6 +319,11 @@ public static class Program
         if (args.Length > 0 && args[0] == "--corpus")
         {
             string backend = args.Length > 1 ? args[1] : "auto";
+            if (!File.Exists(Path.Combine(dir, "realdae", "manifest.json")))
+            {
+                Console.Error.WriteLine("RealDAE corpus not found: run tools/fetch-fixture.ps1");
+                return 4;
+            }
             return Corpus(gcPath, drPath, Path.Combine(dir, "realdae"), backend);
         }
         if (args.Length > 0 && args[0] == "--flip")
@@ -372,7 +379,7 @@ public static class Program
             string pimg = args.Length > 1 ? args[1] : "18_shadow.webp";
             return Bisect(gcPath, drPath, Path.Combine(dir, "realdae", pimg), args.Skip(2).Select(int.Parse).ToArray());
         }
-        Console.WriteLine("usage: --check [tag] | --bench [h] [w] [reps] | --node gc|dr h w idx reps [u] | --benchvk [h] [w] [reps] | --vkprof [h] [w] | --vkcheck [h] [w] | --vknodes gc|dr [h] [w] | --corpus [cpu|vulkan|auto] | --flip [img] | --analyze [h] [w] | --vkdup [h] [w] [dr] | --probe [img] [px...]");
+        Console.WriteLine("usage: --ci smoke|bench [options] | --check [tag] | --bench [h] [w] [reps] | --node gc|dr h w idx reps [u] | --benchvk [h] [w] [reps] | --vkprof [h] [w] | --vkcheck [h] [w] | --vknodes gc|dr [h] [w] | --corpus [cpu|vulkan|auto] | --flip [img] | --analyze [h] [w] | --vkdup [h] [w] [dr] | --probe [img] [px...]");
         return 1;
     }
 
@@ -855,7 +862,10 @@ public static class Program
         }
         return w * h * 3;
 #else
-        using var bmp = SkiaSharp.SKBitmap.Decode(path);
+        using var decoded = SkiaSharp.SKBitmap.Decode(path) ?? throw new InvalidDataException($"cannot decode {path}");
+        // the platform color type is RGBA on Linux: force BGRA so the raw bytes below are B,G,R
+        using var bmp = decoded.ColorType == SkiaSharp.SKColorType.Bgra8888 ? decoded.Copy()
+            : decoded.Copy(SkiaSharp.SKColorType.Bgra8888) ?? throw new InvalidDataException($"cannot convert {path}");
         int w = bmp.Width, h = bmp.Height;
         var bgr = Grow(ref buf, w * h * 3);
         IntPtr px = bmp.GetPixels();
@@ -890,8 +900,11 @@ public static class Program
 
     private static int Check(string dir, string gcPath, string drPath, string tag)
     {
-        float[] input = File.ReadAllBytes(Path.Combine(dir, $"{tag}_input.f32")) is { } raw
-            ? ToF32(raw) : throw new Exception("no input");
+        // input / dr_in are derived from {tag}_src.png like the tests do (GoldenDerive)
+        var dims = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "manifest.json"))).RootElement.GetProperty(tag);
+        int oh = dims.GetProperty("orig_h").GetInt32(), ow = dims.GetProperty("orig_w").GetInt32();
+        int ph = dims.GetProperty("ph").GetInt32(), pw = dims.GetProperty("pw").GetInt32();
+        float[] input = Testing.GoldenDerive.Input(DecodeBgr(Path.Combine(dir, $"{tag}_src.png")), oh, ow, ph, pw);
         int[] shape = ReadShape(dir, tag, "input");
         float[] expect = ToF32(File.ReadAllBytes(Path.Combine(dir, $"{tag}_shadow.f32")));
 
@@ -916,7 +929,7 @@ public static class Program
         Console.WriteLine($"gcnet[{tag}] max diff = {max:E3} at {argmax} (got {outp[argmax]}, want {expect[argmax]})");
 
         // drnet
-        float[] drIn = ToF32(File.ReadAllBytes(Path.Combine(dir, $"{tag}_dr_in.f32")));
+        float[] drIn = Testing.GoldenDerive.DrIn(input, expect);
         float[] drExpect = ToF32(File.ReadAllBytes(Path.Combine(dir, $"{tag}_output.f32")));
         var m2 = OnnxModel.Load(drPath);
         var cm2 = CompiledModel.Compile(m2, ReadShape(dir, tag, "dr_in"));

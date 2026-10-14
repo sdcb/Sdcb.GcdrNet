@@ -16,10 +16,10 @@
 async Task Main()
 {
 	using HttpClient http = new();
-	byte[] webp = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/tests/testdata/realdae/10_color.webp");
+	byte[] jpeg = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/examples/ocr-example.jpg");
 
 	using GcdrEnhancer enhancer = GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet, GcdrBackend.Auto);
-	using Image<Rgba32> image = Image.Load<Rgba32>(CreateDecoderOptions(), webp);
+	using Image<Rgba32> image = Image.Load<Rgba32>(CreateDecoderOptions(), jpeg);
 	byte[] before = ToJpeg(image);
 
 	if (!image.DangerousTryGetSinglePixelMemory(out Memory<Rgba32> memory))

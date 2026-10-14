@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Merges the JSON results of the benchmark's CI smoke / bench modes into one markdown
+       report (the CI step summary); see Program.cs for usage. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Sdcb.SimdGcdrNet.TestReport</AssemblyName>
+    <RootNamespace>Sdcb.SimdGcdrNet.TestReport</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+</Project>

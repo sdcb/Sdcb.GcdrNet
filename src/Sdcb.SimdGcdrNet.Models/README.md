@@ -4,7 +4,7 @@ The [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet) models (simplified GC-Net +
 embedded resources, for [Sdcb.SimdGcdrNet](https://www.nuget.org/packages/Sdcb.SimdGcdrNet) — pure C#
 document-image shadow removal / appearance enhancement (CPU SIMD, Vulkan, Metal; no onnxruntime).
 
-No dependencies, versioned independently of the engine. The models are exposed as zero-copy
+Requires .NET 10 (`net10.0`). No dependencies, versioned independently of the engine. The models are exposed as zero-copy
 `ReadOnlySpan<byte>` views of the loaded assembly image, so there are no model files to deploy.
 
 ```csharp

@@ -32,7 +32,7 @@
 ## 命令
 
 ```bash
-# Windows 上编译，拷贝 bin/Release/net10.0 和 tests/testdata（含 realdae/）到板子
+# Windows 上编译，拷贝 bin/Release/net10.0 和 tests/testdata（含 tools/fetch-fixture.ps1 拉下来的 realdae/）到板子
 dotnet bench/Sdcb.SimdGcdrNet.Benchmark.dll --corpus cpu                 # NEON（默认）
 DOTNET_EnableHWIntrinsic=0 dotnet ... --corpus cpu                   # Scalar
 dotnet bench/Sdcb.SimdGcdrNet.Benchmark.dll --benchcpu 1152 1600 3       # 单尺寸 e2e（真实 Enhance 路径）

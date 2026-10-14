@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Sdcb.SimdGcdrNet.Testing;
+using SkiaSharp;
 
 namespace Sdcb.SimdGcdrNet.Tests;
 
@@ -22,14 +24,42 @@ internal static class Golden
         throw new DirectoryNotFoundException("testdata/manifest.json not found.");
     }
 
-    public static float[] F32(string tag, string name) =>
-        FromFile<float>(Path.Combine(Dir, $"{tag}_{name}.f32"));
+    /// <summary>"shadow" / "output" are the committed onnxruntime outputs; "input" / "dr_in"
+    /// are derived from the source png (see <see cref="GoldenDerive"/>).</summary>
+    public static float[] F32(string tag, string name)
+    {
+        var (_, _, ph, pw, oh, ow) = Dims(tag);
+        return name switch
+        {
+            "input" => GoldenDerive.Input(Bgr(tag), oh, ow, ph, pw),
+            "dr_in" => GoldenDerive.DrIn(F32(tag, "input"), F32(tag, "shadow")),
+            _ => FromFile<float>(Path.Combine(Dir, $"{tag}_{name}.f32")),
+        };
+    }
 
-    public static byte[] U8(string tag) =>
-        File.ReadAllBytes(Path.Combine(Dir, $"{tag}_final.u8"));
+    /// <summary>Expected final BGR24 output (cropped), derived from the DR-Net golden output.</summary>
+    public static byte[] U8(string tag)
+    {
+        var (_, _, ph, pw, oh, ow) = Dims(tag);
+        return GoldenDerive.FinalU8(F32(tag, "output"), oh, ow, ph, pw);
+    }
 
-    public static byte[] Bgr(string tag) =>
-        File.ReadAllBytes(Path.Combine(Dir, $"{tag}_src.bgr"));
+    /// <summary>Tight BGR24 pixels of <c>{tag}_src.png</c>.</summary>
+    public static byte[] Bgr(string tag)
+    {
+        using var bmp = SKBitmap.Decode(Path.Combine(Dir, $"{tag}_src.png"))
+            ?? throw new InvalidDataException($"cannot decode {tag}_src.png");
+        int w = bmp.Width, h = bmp.Height;
+        var bgr = new byte[w * h * 3];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                SKColor px = bmp.GetPixel(x, y);
+                int d = (y * w + x) * 3;
+                bgr[d] = px.Blue; bgr[d + 1] = px.Green; bgr[d + 2] = px.Red;
+            }
+        return bgr;
+    }
 
     public static int[] ShapeOf(string tag, string name)
     {

@@ -16,10 +16,10 @@
 async Task Main()
 {
 	using HttpClient http = new();
-	byte[] png = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/tests/testdata/mid_src.png");
+	byte[] jpeg = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/examples/ocr-example.jpg");
 
 	using GcdrEnhancer enhancer = GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet, GcdrBackend.Auto);
-	using MemoryStream stream = new(png);
+	using MemoryStream stream = new(jpeg);
 	using Bitmap original = new(stream);
 	using Bitmap enhanced = original.Clone(new Rectangle(0, 0, original.Width, original.Height), PixelFormat.Format24bppRgb);
 

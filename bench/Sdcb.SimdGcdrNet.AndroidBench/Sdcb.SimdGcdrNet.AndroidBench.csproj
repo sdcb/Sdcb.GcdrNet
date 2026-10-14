@@ -33,6 +33,8 @@
     <!-- images are decoded with Android's BitmapFactory (#if ANDROID in Program.cs):
          SkiaSharp 2.88's android lib fails the CoreCLR assembly rewrite (XALNS7015) -->
     <Compile Include="..\Sdcb.SimdGcdrNet.Benchmark\Program.cs" Link="Program.cs" />
+    <Compile Include="..\Sdcb.SimdGcdrNet.Benchmark\CiRunner.cs" Link="CiRunner.cs" />
+    <Compile Include="..\..\tests\GoldenDerive.cs" Link="GoldenDerive.cs" />
   </ItemGroup>
   <!-- Runtime switches (DOTNET_EnableHWIntrinsic=0, ...) are read before managed code
        runs, so they are baked into the APK: -p:GcdrEnv="K=V;K=V" -->

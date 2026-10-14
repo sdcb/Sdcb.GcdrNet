@@ -59,7 +59,7 @@ public class MetalTests
         Skip.IfNot(MetalAvailable());
         var (_, _, _, _, oh, ow) = Golden.Dims(tag);
         byte[] src = Golden.Bgr(tag);
-        byte[] expectU8 = File.ReadAllBytes(Path.Combine(Golden.Dir, $"{tag}_final.u8"));
+        byte[] expectU8 = Golden.U8(tag);
 
         using var enh = GcdrEnhancer.FromFiles(GcPath, DrPath, GcdrBackend.Metal);
         byte[] dst = new byte[ow * oh * 3];
@@ -84,7 +84,7 @@ public class MetalTests
         Skip.IfNot(MetalAvailable());
         var (_, _, _, _, oh, ow) = Golden.Dims(tag);
         byte[] tight = Golden.Bgr(tag);
-        byte[] expectU8 = File.ReadAllBytes(Path.Combine(Golden.Dir, $"{tag}_final.u8"));
+        byte[] expectU8 = Golden.U8(tag);
 
         int ss = ow * 3 + srcPad, ds = ow * 3 + dstPad;
         byte[] src = new byte[ss * oh];

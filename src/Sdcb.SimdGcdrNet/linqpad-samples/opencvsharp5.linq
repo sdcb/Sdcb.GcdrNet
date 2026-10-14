@@ -1,6 +1,8 @@
 <Query Kind="Program">
   <AllowUnsafe>true</AllowUnsafe>
   <NuGetReference>OpenCvSharp5</NuGetReference>
+  <NuGetReference>OpenCvSharp5.official.runtime.linux-arm64</NuGetReference>
+  <NuGetReference>OpenCvSharp5.official.runtime.linux-x64</NuGetReference>
   <NuGetReference>OpenCvSharp5.runtime.osx.arm64</NuGetReference>
   <NuGetReference>OpenCvSharp5.runtime.osx.x64</NuGetReference>
   <NuGetReference>OpenCvSharp5.runtime.win</NuGetReference>
@@ -18,8 +20,8 @@
 async Task Main()
 {
 	using HttpClient http = new();
-	byte[] webp = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/tests/testdata/realdae/10_color.webp");
-	using Mat src = Cv2.ImDecode(webp, ImreadModes.Color);
+	byte[] jpeg = await http.GetByteArrayAsync("https://raw.githubusercontent.com/sdcb/SimdGcdrNet/main/examples/ocr-example.jpg");
+	using Mat src = Cv2.ImDecode(jpeg, ImreadModes.Color);
 	if (src.Empty()) throw new InvalidDataException("Failed to decode image");
 	using Mat dst = new(src.Size(), MatType.CV_8UC3);
 

@@ -1,0 +1,217 @@
+name: test
+
+# Two waves run in parallel after the fixture download, then one report:
+#   smoke  - correctness: dotnet test + corpus smoke on every platform / ISA tier (+ Metal)
+#   bench  - performance: corpus benchmark (.github/scripts/bench.ps1), several replicas per platform
+#   report - merges every result into the run summary (tests/Sdcb.SimdGcdrNet.TestReport)
+# Job budget: 35 jobs (40 concurrent); macOS: 2 smoke + 3 bench (5 concurrent).
+
+on:
+  push:
+    paths:
+      - src/**
+      - tests/**
+      - bench/Sdcb.SimdGcdrNet.Benchmark/**
+      - tools/fetch-fixture.ps1
+      - Directory.Build.props
+      - .github/workflows/**
+  pull_request:
+    paths:
+      - src/**
+      - tests/**
+      - bench/Sdcb.SimdGcdrNet.Benchmark/**
+      - tools/fetch-fixture.ps1
+      - Directory.Build.props
+      - .github/workflows/**
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+jobs:
+  fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch RealDAE corpus (sdcb/DocGainFixture)
+        shell: pwsh
+        run: ./tools/fetch-fixture.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: realdae
+          path: tests/testdata/realdae
+          retention-days: 1
+          if-no-files-found: error
+
+  smoke:
+    needs: fixture
+    name: smoke ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: win-x64,            os: windows-2025,     count: 5 }
+          - { name: win-arm64,          os: windows-11-arm,   count: 5 }
+          - { name: linux-x64,          os: ubuntu-24.04,     count: 5, pack: true }
+          - { name: linux-arm64,        os: ubuntu-24.04-arm, count: 5 }
+          - { name: osx-x64,            os: macos-26-intel,   count: 5 }
+          - { name: osx-arm64,          os: macos-26,         count: 5, metal: true }
+          # ISA tiers: the library dispatches on the runtime's IsSupported flags
+          - { name: win-x64-noavx512,   os: windows-2025,     count: 3, isa: DOTNET_EnableAVX512=0 }
+          - { name: win-x64-noavx512f,  os: windows-2025,     count: 3, isa: DOTNET_EnableAVX512F=0 }
+          - { name: win-x64-noavx2,     os: windows-2025,     count: 3, isa: DOTNET_EnableAVX2=0 }
+          - { name: win-x64-noavx,      os: windows-2025,     count: 3, isa: DOTNET_EnableAVX=0 }
+          - { name: win-x64-scalar,     os: windows-2025,     count: 2, isa: DOTNET_EnableHWIntrinsic=0 }
+          - { name: linux-arm64-scalar, os: ubuntu-24.04-arm, count: 2, isa: DOTNET_EnableHWIntrinsic=0 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: realdae, path: tests/testdata/realdae }
+      - name: Build
+        id: build
+        shell: pwsh
+        run: |
+          dotnet build tests/Sdcb.SimdGcdrNet.Tests -c Release
+          if ($LASTEXITCODE -ne 0) { throw "test build failed: $LASTEXITCODE" }
+          dotnet build bench/Sdcb.SimdGcdrNet.Benchmark -c Release -o artifacts/bench
+          if ($LASTEXITCODE -ne 0) { throw "benchmark build failed: $LASTEXITCODE" }
+      # after the builds: only the test host and the benchmark run at the forced tier
+      - name: Select ISA tier
+        if: matrix.isa
+        shell: pwsh
+        run: '"${{ matrix.isa }}" >> $env:GITHUB_ENV'
+      - name: dotnet test
+        shell: pwsh
+        run: |
+          dotnet test tests/Sdcb.SimdGcdrNet.Tests -c Release --no-build --logger "trx;LogFileName=${{ matrix.name }}.trx" --results-directory results
+          if ($LASTEXITCODE -ne 0) { throw "dotnet test failed: $LASTEXITCODE" }
+      - name: Corpus smoke (CPU)
+        if: (success() || failure()) && steps.build.outcome == 'success'
+        shell: pwsh
+        run: |
+          dotnet artifacts/bench/Sdcb.SimdGcdrNet.Benchmark.dll --ci smoke --backend cpu --count ${{ matrix.count }} --case-id '${{ matrix.name }}' --out 'results/${{ matrix.name }}-smoke.json'
+          if ($LASTEXITCODE -ne 0) { throw "corpus smoke failed: $LASTEXITCODE" }
+      - name: Corpus smoke (Metal)
+        if: matrix.metal && (success() || failure()) && steps.build.outcome == 'success'
+        shell: pwsh
+        env: { GCDRNET_MTL_VERBOSE: 1 }
+        run: |
+          dotnet artifacts/bench/Sdcb.SimdGcdrNet.Benchmark.dll --ci smoke --backend metal --count ${{ matrix.count }} --case-id '${{ matrix.name }}-metal' --out 'results/${{ matrix.name }}-metal-smoke.json'
+          if ($LASTEXITCODE -ne 0) { throw "metal smoke failed: $LASTEXITCODE" }
+      - name: Pack
+        if: matrix.pack
+        shell: pwsh
+        run: |
+          foreach ($p in 'src/Sdcb.SimdGcdrNet', 'src/Sdcb.SimdGcdrNet.Models') {
+            dotnet pack $p -c Release -o artifacts/nupkg -warnaserror
+            if ($LASTEXITCODE -ne 0) { throw "pack $p failed: $LASTEXITCODE" }
+          }
+      - uses: actions/upload-artifact@v7
+        if: matrix.pack
+        with:
+          name: nupkg
+          path: artifacts/nupkg
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-${{ matrix.name }}
+          path: results
+          if-no-files-found: warn
+
+  bench:
+    needs: fixture
+    name: bench ${{ matrix.target.platform }} r${{ matrix.replica }}
+    runs-on: ${{ matrix.target.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # cases: id,backend,ENV=VALUE;... (.github/scripts/bench.ps1). All cases of one replica share a runner,
+        # so the report's ratios compare like with like.
+        target:
+          - { platform: win-x64,     os: windows-2025,     cases: 'default,cpu,;noavx512,cpu,DOTNET_EnableAVX512=0;noavx2,cpu,DOTNET_EnableAVX2=0' }
+          - { platform: linux-x64,   os: ubuntu-24.04,     cases: 'default,cpu,' }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm, cases: 'default,cpu,' }
+        replica: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: realdae, path: tests/testdata/realdae }
+      - name: Benchmark
+        shell: pwsh
+        run: ./.github/scripts/bench.ps1 -Platform '${{ matrix.target.platform }}' -Cases '${{ matrix.target.cases }}' -Replica ${{ matrix.replica }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-${{ matrix.target.platform }}-r${{ matrix.replica }}
+          path: results
+          if-no-files-found: warn
+
+  bench-osx:
+    needs: fixture
+    name: bench osx-arm64 r${{ matrix.replica }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      # macOS concurrency is 5: 3 replicas here + the 2 macOS smoke jobs
+      matrix: { replica: [1, 2, 3] }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: realdae, path: tests/testdata/realdae }
+      - name: Benchmark
+        shell: pwsh
+        run: ./.github/scripts/bench.ps1 -Platform osx-arm64 -Cases 'cpu,cpu,;metal,metal,' -Replica ${{ matrix.replica }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-osx-arm64-r${{ matrix.replica }}
+          path: results
+          if-no-files-found: warn
+
+  report:
+    needs: [smoke, bench, bench-osx]
+    if: always() && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: { actions: write, contents: read }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with: { pattern: smoke-*, path: results, merge-multiple: true }
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with: { pattern: bench-*, path: results, merge-multiple: true }
+      - name: Build markdown report
+        run: |
+          dotnet run --project tests/Sdcb.SimdGcdrNet.TestReport -c Release -- --in results --out results/report.md
+          cat results/report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: report
+          path: results
+          if-no-files-found: error
+      - name: Delete intermediate artifacts
+        continue-on-error: true   # best effort; fork PRs run with a read-only token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select((.name | startswith("bench-")) or (.name | startswith("smoke-")) or .name == "realdae") | .id' \
+            | while read -r id; do
+                [ -n "$id" ] && gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+              done

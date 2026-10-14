@@ -2,21 +2,20 @@
 // Usage (from repo root):
 //   dotnet run -c Release --project tools/GenGolden -- --models tests/testdata/models
 // For each tests/testdata/{tag}_src.png writes:
-//   {tag}_src.bgr    raw source bytes (tight HWC BGR)
-//   {tag}_input.f32  padded NCHW float input (GC-Net input)
 //   {tag}_shadow.f32 GC-Net output (shading map)
-//   {tag}_dr_in.f32  6-channel DR-Net input [src; corrected]
 //   {tag}_output.f32 DR-Net output (padded size)
-//   {tag}_final.u8   cropped BGR uint8 result
 //   manifest.json    dims + shapes per tag
+// The GC-Net input, the 6-channel DR-Net input and the final u8 image are pure functions of
+// the png and these outputs: tests/GoldenDerive.cs (shared with the tests) recomputes them.
 // Padding: top/left replicate to multiples of 32 (matches GCDRNet infer.py).
 
 using System.Text.Json;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using Sdcb.SimdGcdrNet.Testing;
 using SkiaSharp;
 
-const int Pad = 32;
+const int Pad = GoldenDerive.Pad;
 
 string? modelsDir = null;
 string dataDir = "tests/testdata";
@@ -53,54 +52,23 @@ foreach (string png in Directory.EnumerateFiles(dataDir, "*_src.png").OrderBy(p 
                 bgr[d] = px.Blue; bgr[d + 1] = px.Green; bgr[d + 2] = px.Red;
             }
     }
-    File.WriteAllBytes(Path.Combine(dataDir, $"{tag}_src.bgr"), bgr);
 
     int ph = (Pad - oh % Pad) % Pad, pw = (Pad - ow % Pad) % Pad;
     int h = oh + ph, w = ow + pw;
 
-    // [1,3,h,w] float, pad top/left by edge-replicate, /255
-    var x = new DenseTensor<float>(new[] { 1, 3, h, w });
-    for (int c = 0; c < 3; c++)
-        for (int y = 0; y < h; y++)
-            for (int xx = 0; xx < w; xx++)
-            {
-                int sy = Math.Max(y - ph, 0), sx = Math.Max(xx - pw, 0);
-                x[0, c, y, xx] = bgr[(sy * ow + sx) * 3 + c] / 255f;
-            }
-    WriteF32(Path.Combine(dataDir, $"{tag}_input.f32"), x);
+    var x = new DenseTensor<float>(GoldenDerive.Input(bgr, oh, ow, ph, pw), new[] { 1, 3, h, w });
 
     float[] shadow;
     using (var r = gc.Run([NamedOnnxValue.CreateFromTensor(gcIn, x)]))
         shadow = r[0].AsTensor<float>().ToArray();
     WriteF32(Path.Combine(dataDir, $"{tag}_shadow.f32"), shadow);
 
-    // corrected = clamp(x / max(shadow, 1e-6), 0, 1); dr_in = [x; corrected]
-    var drInT = new DenseTensor<float>(new[] { 1, 6, h, w });
-    for (int c = 0; c < 3; c++)
-        for (int i = 0; i < h * w; i++)
-        {
-            float v = x[0, c, i / w, i % w];
-            float s = shadow[c * h * w + i];
-            drInT[0, c, i / w, i % w] = v;
-            drInT[0, 3 + c, i / w, i % w] = Math.Clamp(v / Math.Max(s, 1e-6f), 0f, 1f);
-        }
-    WriteF32(Path.Combine(dataDir, $"{tag}_dr_in.f32"), drInT);
+    var drInT = new DenseTensor<float>(GoldenDerive.DrIn(x.Buffer.Span, shadow), new[] { 1, 6, h, w });
 
     float[] output;
     using (var r = dr.Run([NamedOnnxValue.CreateFromTensor(drIn, drInT)]))
         output = r[0].AsTensor<float>().ToArray();
     WriteF32(Path.Combine(dataDir, $"{tag}_output.f32"), output);
-
-    // u8 = clip(out*255+0.5) in HWC BGR, crop top/left pad
-    var u8 = new byte[oh * ow * 3];
-    for (int c = 0; c < 3; c++)
-        for (int y = 0; y < oh; y++)
-            for (int xx = 0; xx < ow; xx++)
-            {
-                double v = output[c * h * w + (y + ph) * w + xx + pw] * 255.0;
-                u8[(y * ow + xx) * 3 + c] = (byte)Math.Clamp((int)v, 0, 255);
-            }
-    File.WriteAllBytes(Path.Combine(dataDir, $"{tag}_final.u8"), u8);
 
     manifest[tag] = new
     {

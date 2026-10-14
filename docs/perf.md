@@ -30,7 +30,7 @@ $env:DOTNET_EnableHWIntrinsic = '0'; & $exe --corpus cpu  # CPU Scalar
 & $exe --benchvk 2304 1600 10   # Vulkan 单尺寸稳态（--vkprof 2304 1600 逐 shader）
 ```
 
-ISA 档位通过 JIT 开关强制降级，与 `test-all.ps1` 的矩阵一致。
+ISA 档位通过 JIT 开关强制降级，与 CI（`.github/workflows/test.yml`）的 ISA 矩阵一致。
 
 ## 结果汇总
 

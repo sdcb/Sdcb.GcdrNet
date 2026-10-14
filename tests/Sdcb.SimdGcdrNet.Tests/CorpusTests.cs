@@ -4,7 +4,8 @@ using SkiaSharp;
 namespace Sdcb.SimdGcdrNet.Tests;
 
 /// <summary>
-/// Throughput/robustness smoke over the RealDAE corpus (tests/testdata/realdae):
+/// Throughput/robustness smoke over the RealDAE corpus (tests/testdata/realdae, fetched from
+/// sdcb/DocGainFixture by tools/fetch-fixture.ps1; skipped when absent):
 /// decode webp -> enhance -> sanity-check the output. A spread of ~10 images
 /// covering small to 2600px inputs; not an oracle test (paired NN_gt.webp are
 /// dataset ground truths, not implementation golden — PSNR lives in bench --corpus).
@@ -24,7 +25,10 @@ public class CorpusTests
 
     internal static byte[] DecodeBgr(string path, out int w, out int h)
     {
-        using var bmp = SKBitmap.Decode(path);
+        using var decoded = SKBitmap.Decode(path) ?? throw new InvalidDataException($"cannot decode {path}");
+        // the platform color type is RGBA on Linux: force BGRA so the raw bytes below are B,G,R
+        using var bmp = decoded.ColorType == SKColorType.Bgra8888 ? decoded.Copy()
+            : decoded.Copy(SKColorType.Bgra8888) ?? throw new InvalidDataException($"cannot convert {path}");
         w = bmp.Width; h = bmp.Height;
         var bgr = new byte[w * h * 3];
         IntPtr px = bmp.GetPixels();
@@ -44,8 +48,15 @@ public class CorpusTests
         return bgr;
     }
 
+    internal static bool Present => File.Exists(Path.Combine(Golden.Dir, "realdae", "manifest.json"));
+
     public static IEnumerable<object[]> Picks()
     {
+        if (!Present)
+        {
+            yield return new object[] { "(missing)", 0, 0 };
+            yield break;
+        }
         var all = Entries();
         int step = Math.Max(1, all.Length / 10);
         for (int i = 0; i < all.Length; i += step)
@@ -56,8 +67,8 @@ public class CorpusTests
     [MemberData(nameof(Picks))]
     public void Corpus_Enhance_Smoke(string file, int w, int h)
     {
+        Skip.IfNot(Present, "RealDAE corpus not present: run tools/fetch-fixture.ps1");
         string path = Path.Combine(Golden.Dir, "realdae", file);
-        Skip.IfNot(File.Exists(path), $"corpus image {file} not present (local-only data)");
         byte[] bgr = DecodeBgr(path, out int dw, out int dh);
         Assert.Equal((w, h), (dw, dh));
 

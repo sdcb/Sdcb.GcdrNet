@@ -8,6 +8,7 @@ using System.Text.Json.Nodes;
 using Sdcb.SimdGcdrNet.Engine;
 using Sdcb.SimdGcdrNet.Kernels;
 using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdGcdrNet.Testing;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
@@ -326,7 +327,7 @@ public static class Program
         return 0;
     }
 
-    // PyTorch golden check (tests/testdata/{tag}_*.f32), same tolerance as the desktop --check
+    // onnxruntime golden check (tests/testdata/{tag}_*), same tolerance as the desktop --check
     private static async Task<int> Check(string tag, JsonObject doc)
     {
         var (gcBytes, drBytes) = await Models();
@@ -345,8 +346,14 @@ public static class Program
             for (int i = 0; i < o.Length; i++) max = MathF.Max(max, MathF.Abs(o[i] - expect[i]));
             return max;
         }
-        float gcMax = MaxDiff(gcBytes, Shape("input"), await F32("input"), await F32("shadow"));
-        float drMax = MaxDiff(drBytes, Shape("dr_in"), await F32("dr_in"), await F32("output"));
+        // input / dr_in are derived from {tag}_src.png like the tests do (GoldenDerive)
+        var dims = manifest.RootElement.GetProperty(tag);
+        byte[]? src = null;
+        var (ow, oh) = DecodeBgr(await Fetch($"{tag}_src.png"), ref src);
+        float[] input = GoldenDerive.Input(src!, oh, ow, dims.GetProperty("ph").GetInt32(), dims.GetProperty("pw").GetInt32());
+        float[] shadow = await F32("shadow");
+        float gcMax = MaxDiff(gcBytes, Shape("input"), input, shadow);
+        float drMax = MaxDiff(drBytes, Shape("dr_in"), GoldenDerive.DrIn(input, shadow), await F32("output"));
         Console.WriteLine($"gcnet[{tag}] max diff = {gcMax:E3}");
         Console.WriteLine($"drnet[{tag}] max diff = {drMax:E3}");
         doc["summary"] = new JsonObject { ["tag"] = tag, ["gcMaxDiff"] = gcMax, ["drMaxDiff"] = drMax };

@@ -59,6 +59,8 @@ Browser (browser-wasm, WASM SIMD128, Web Workers threads, LLVM AOT): see [docs/w
 
 ### Quick start
 
+Requires **.NET 10**: both packages target `net10.0` only.
+
 | Package | Contents |
 |---|---|
 | `Sdcb.SimdGcdrNet` | the engine (CPU / Vulkan / Metal); ships LINQPad samples (System.Drawing, ImageSharp, OpenCvSharp, SkiaSharp + SimdPaddleOCR) |
@@ -129,26 +131,41 @@ dotnet run --project examples/PaddleOCR.Console -- [image] [output.jpg]
 - `bench/Sdcb.SimdGcdrNet.WasmBench` — `--corpus` / `--bench` / `--check` / `--tiers` in a browser (`run.ps1`: publish with LLVM AOT → `server.mjs` with COOP/COEP → headless Edge/Chrome); needs the `wasm-tools-net10` workload and Node.js
 - `src/Sdcb.SimdGcdrNet.Models` — `GcdrModels` over the embedded ONNX files (taken from `tests/testdata/models`)
 - `src/Sdcb.SimdGcdrNet/linqpad-samples` — LINQPad samples packed into `Sdcb.SimdGcdrNet` (tag `linqpad-samples`)
+- `tests/Sdcb.SimdGcdrNet.Tests` — xUnit tests; `tests/GoldenDerive.cs` recomputes the derived golden data;
+  `tests/Sdcb.SimdGcdrNet.TestReport` merges CI results into a markdown report
+- `tools/fetch-fixture.ps1` — downloads the RealDAE corpus; `tools/GenGolden` regenerates the golden data
 - `build/` — LINQPad scripts to pack (`01-build-packages`) and publish (`02-publish-proget-nuget`) the
   packages; versions live in `00-common.linq` and `Directory.Build.props`
 
 ### Tests
 
 ```bash
+./tools/fetch-fixture.ps1                          # RealDAE corpus (~36 MB) -> tests/testdata/realdae
 dotnet test tests/Sdcb.SimdGcdrNet.Tests -c Release
 ```
 
-Golden outputs come from onnxruntime runs of the simplified models (CPU ≤ 1e-4 /
-Vulkan ≤ 5e-4); regenerate with `dotnet run --project tools/GenGolden` (pure C#:
-OnnxRuntime oracle + SkiaSharp decode). `tests/testdata/realdae/` holds a 50-image
-RealDAE corpus (`NN_<color|shadow|bleed>.webp` + paired `NN_gt.webp` ground truths);
-`CorpusTests` smoke-tests decode→enhance, and the benchmark's `--corpus [cpu|vulkan]`
-mode reports per-image ms, MP/s, memory and PSNR/MAE vs the `_gt` pairs.
-Kernel dispatch follows the runtime's
-`IsSupported` flags, so ISA tiers are exercised via the standard runtime knobs —
-`test-all.ps1` runs the default tier (AVX-512 where supported), `DOTNET_EnableAVX512=0` and
-`DOTNET_EnableAVX512F=0` (AVX2), `DOTNET_EnableAVX2=0` (128-bit `Vector<float>`),
-`DOTNET_EnableAVX=0` (SSE, no FMA) and `DOTNET_EnableHWIntrinsic=0` (scalar).
+Golden data comes from onnxruntime runs of the simplified models (CPU ≤ 1e-4 /
+Vulkan ≤ 5e-4): only the source `{tag}_src.png` and the two oracle outputs (`_shadow.f32`, `_output.f32`)
+are committed; the GC-Net input, the DR-Net input and the final u8 image are recomputed bit-exactly by
+`tests/GoldenDerive.cs`. Regenerate with `dotnet run --project tools/GenGolden -- --models tests/testdata/models`
+(pure C#: OnnxRuntime oracle + SkiaSharp decode).
+
+The 50-image RealDAE corpus (`NN_<color|shadow|bleed>.webp` + paired `NN_gt.webp` ground truths) lives in
+[sdcb/DocGainFixture](https://github.com/sdcb/DocGainFixture); without it `CorpusTests` are skipped.
+The benchmark's `--corpus [cpu|vulkan|metal]` mode reports per-image ms, MP/s, memory and PSNR/MAE vs the `_gt` pairs.
+
+Kernel dispatch follows the runtime's `IsSupported` flags, so ISA tiers are exercised via the standard
+runtime knobs: `DOTNET_EnableAVX512=0` / `DOTNET_EnableAVX512F=0` (AVX2), `DOTNET_EnableAVX2=0` (128-bit
+`Vector<float>`), `DOTNET_EnableAVX=0` (SSE, no FMA) and `DOTNET_EnableHWIntrinsic=0` (scalar).
+
+CI ([.github/workflows/test.yml](https://github.com/sdcb/SimdGcdrNet/blob/main/.github/workflows/test.yml))
+runs two waves in parallel, then merges them into one report (the run's summary page):
+
+- **smoke**: `dotnet test` plus a corpus smoke (`Benchmark --ci smoke`: sane, deterministic output that is
+  closer to the ground truth than the input; GPU output close to CPU) on win-x64, win-arm64, linux-x64,
+  linux-arm64, osx-x64 and osx-arm64 (CPU and Metal), plus the x64 ISA tiers above and arm64 scalar;
+- **bench**: `Benchmark --ci bench` on 20 corpus images, several replicas per case: win-x64 (default,
+  no AVX-512, no AVX2), linux-x64, linux-arm64 (NEON) and osx-arm64 (CPU, Metal).
 
 ### Notes
 
@@ -177,7 +194,8 @@ The inference engine (`Sdcb.SimdGcdrNet`, everything outside `src/Sdcb.SimdGcdrN
 `Sdcb.SimdGcdrNet.Models` is MIT, following the upstream [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)
 weights it embeds (Copyright (c) 2024 Jiaxin Zhang); see
 [THIRD-PARTY-NOTICES.txt](https://github.com/sdcb/SimdGcdrNet/blob/main/THIRD-PARTY-NOTICES.txt), also shipped in both packages.
-The test corpus in `tests/testdata/realdae` is from the RealDAE dataset of the same paper.
+The test corpus ([sdcb/DocGainFixture](https://github.com/sdcb/DocGainFixture)) and `examples/ocr-example.jpg`
+are from the RealDAE dataset of the same paper.
 
 ---
 
@@ -226,6 +244,8 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 （5950X 上的 Edge：同一语料 CPU PackedSimd ~696 ms/张，是同浏览器通用 `Vector<float>` 路径的 1.55 倍）。
 
 ### 快速上手
+
+需要 **.NET 10**：两个包都只面向 `net10.0`。
 
 | 包 | 内容 |
 |---|---|
@@ -279,19 +299,31 @@ dotnet run --project examples/PaddleOCR.Console -- [图片] [输出.jpg]
 ### 测试
 
 ```bash
+./tools/fetch-fixture.ps1                          # RealDAE 语料（约 36 MB）-> tests/testdata/realdae
 dotnet test tests/Sdcb.SimdGcdrNet.Tests -c Release
 ```
 
-golden 由 onnxruntime 对简化模型跑出（CPU 阈值 ≤1e-4 / Vulkan ≤5e-4）；
-重新生成用 `dotnet run --project tools/GenGolden`（纯 C#，OnnxRuntime oracle +
-SkiaSharp 解码）。`tests/testdata/realdae/` 存 50 张 RealDAE 语料
-（`NN_<color|shadow|bleed>.webp` 及配对 `NN_gt.webp` 基准图）；`CorpusTests`
-做 decode→enhance 冒烟，benchmark `--corpus [cpu|vulkan]` 按图报耗时、MP/s、
-内存及对照 `_gt` 的 PSNR/MAE。
-内核分发直接跟随 runtime 的 `IsSupported` 标志，
-改 CPU 内核请用 `test-all.ps1` 跑 ISA 矩阵：
-`DOTNET_EnableAVX2=0`（128 位 Vector）、`DOTNET_EnableAVX=0`（SSE 无 FMA）、
-`DOTNET_EnableHWIntrinsic=0`（纯标量），以及 `DOTNET_EnableAVX512=0` / `DOTNET_EnableAVX512F=0`（AVX2）。
+golden 由 onnxruntime 对简化模型跑出（CPU 阈值 ≤1e-4 / Vulkan ≤5e-4）：仓库里只提交源图 `{tag}_src.png`
+和两份 oracle 输出（`_shadow.f32`、`_output.f32`），GC-Net 输入、DR-Net 输入和最终 u8 图由
+`tests/GoldenDerive.cs` 逐位一致地现算。重新生成用
+`dotnet run --project tools/GenGolden -- --models tests/testdata/models`（纯 C#，OnnxRuntime oracle + SkiaSharp 解码）。
+
+50 张 RealDAE 语料（`NN_<color|shadow|bleed>.webp` 及配对 `NN_gt.webp` 基准图）放在
+[sdcb/DocGainFixture](https://github.com/sdcb/DocGainFixture)，没下载时 `CorpusTests` 自动跳过；
+benchmark `--corpus [cpu|vulkan|metal]` 按图报耗时、MP/s、内存及对照 `_gt` 的 PSNR/MAE。
+
+内核分发直接跟随 runtime 的 `IsSupported` 标志，ISA 档位用 runtime 开关强制降级：
+`DOTNET_EnableAVX512=0` / `DOTNET_EnableAVX512F=0`（AVX2）、`DOTNET_EnableAVX2=0`（128 位 Vector）、
+`DOTNET_EnableAVX=0`（SSE 无 FMA）、`DOTNET_EnableHWIntrinsic=0`（纯标量）。
+
+CI（[.github/workflows/test.yml](https://github.com/sdcb/SimdGcdrNet/blob/main/.github/workflows/test.yml)）
+两波并行，最后汇总成一份报告（显示在 run 的 Summary 页）：
+
+- **smoke（正确性）**：win-x64、win-arm64、linux-x64、linux-arm64、osx-x64、osx-arm64（CPU 与 Metal）上跑
+  `dotnet test` 和语料冒烟（`Benchmark --ci smoke`：输出正常、两次运行一致、比输入更接近 GT；GPU 与 CPU 输出接近），
+  另加 x64 上述各 ISA 档位与 arm64 纯标量；
+- **bench（性能）**：`Benchmark --ci bench` 跑 20 张语料图、每个 case 多个 replica：win-x64（默认、无 AVX-512、
+  无 AVX2）、linux-x64、linux-arm64（NEON）、osx-arm64（CPU、Metal）。
 
 ### Native AOT
 
@@ -310,4 +342,5 @@ SkiaSharp 解码）。`tests/testdata/realdae/` 存 50 张 RealDAE 语料
 推理引擎（`Sdcb.SimdGcdrNet`，即 `src/Sdcb.SimdGcdrNet.Models` 以外的全部代码）为 Apache-2.0；
 `Sdcb.SimdGcdrNet.Models` 沿用其内嵌的上游 [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet) 模型权重的 MIT 许可
 （Copyright (c) 2024 Jiaxin Zhang），详见 [THIRD-PARTY-NOTICES.txt](https://github.com/sdcb/SimdGcdrNet/blob/main/THIRD-PARTY-NOTICES.txt)（两个包内均附带）。
-`tests/testdata/realdae` 测试语料取自同一论文的 RealDAE 数据集。
+测试语料（[sdcb/DocGainFixture](https://github.com/sdcb/DocGainFixture)）和 `examples/ocr-example.jpg`
+取自同一论文的 RealDAE 数据集。

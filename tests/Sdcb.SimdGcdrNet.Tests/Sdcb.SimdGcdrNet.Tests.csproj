@@ -23,6 +23,9 @@
     <ProjectReference Include="..\..\src\Sdcb.SimdGcdrNet.Models\Sdcb.SimdGcdrNet.Models.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="..\GoldenDerive.cs" Link="GoldenDerive.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="..\testdata\**" CopyToOutputDirectory="PreserveNewest" Link="testdata\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

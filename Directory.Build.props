@@ -26,7 +26,7 @@
     <RepositoryUrl>https://github.com/sdcb/SimdGcdrNet.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <PackageTags>Sdcb;GCDRNet;document;shadow-removal;image-enhancement;SIMD</PackageTags>
+    <PackageTags>Sdcb;GCDRNet;document;document-enhancement;shadow-removal;image-enhancement;onnx;deep-learning</PackageTags>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
@@ -40,7 +40,7 @@
     <Version>$(SdcbSimdGcdrNetVersion)</Version>
     <IsPackable>true</IsPackable>
     <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX-512/AVX2/NEON/Vector) and GPU (Vulkan, Metal) backends; no onnxruntime dependency. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32. Models ship separately in Sdcb.SimdGcdrNet.Models.</Description>
-    <PackageTags>Sdcb;GCDRNet;document;shadow-removal;image-enhancement;SIMD;Vulkan;Metal;linqpad-samples</PackageTags>
+    <PackageTags>Sdcb;GCDRNet;document;document-enhancement;shadow-removal;image-enhancement;onnx;inference;deep-learning;SIMD;AVX512;NEON;wasm;AOT;Vulkan;Metal;linqpad-samples</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdGcdrNet.Models'">
     <PackageId>Sdcb.SimdGcdrNet.Models</PackageId>

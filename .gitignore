@@ -7,3 +7,4 @@ vstest*.log
 .windsurf/
 build/nupkgs/
 build/nuget.exe
+tests/testdata/realdae/
