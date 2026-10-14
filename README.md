@@ -9,8 +9,8 @@
 **Sdcb.SimdGcdrNet** is a pure C# implementation of [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)
 (*Appearance Enhancement for Camera-captured Document Images in the Wild*, IEEE TAI 2023) —
 document-image shadow removal and appearance enhancement **without onnxruntime or any other
-third-party inference engine**. It ships its own compiled-model inference engine, inspired by
-`Sdcb.SimdPaddleOCR`.
+third-party inference engine**. Inference runs on [Sdcb.SimdOnnx](https://github.com/sdcb/SimdOnnx),
+a pure C# engine shared with `Sdcb.SimdPaddleOCR` (it grew out of this repository's own engine).
 
 The model is a two-stage pipeline:
 
