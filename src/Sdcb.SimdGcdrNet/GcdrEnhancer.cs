@@ -5,6 +5,7 @@ using Sdcb.SimdGcdrNet.Kernels;
 using Sdcb.SimdOnnx.Engine;
 using Sdcb.SimdOnnx.Onnx;
 using VkBackend = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend;
+using VkDeviceLostException = Sdcb.SimdOnnx.Backends.Vulkan.VkDeviceLostException;
 using MetalBackend = Sdcb.SimdOnnx.Backends.Metal.MetalBackend;
 
 namespace Sdcb.SimdGcdrNet;
@@ -201,15 +202,23 @@ public sealed class GcdrEnhancer : IDisposable
             || (_backend == GcdrBackend.Auto && VulkanOk()));
         if (useVk)
         {
-            var pool = VkPool();
-            var pipe = pool.Rent();
-            try
+            for (int attempt = 0; ; attempt++)
             {
-                pipe.Enhance(src, height, width, srcStride, dst, dstStride, format);
-                DebugAfterEnhance?.Invoke(pipe);
+                var pool = VkPool();
+                var pipe = pool.Rent();
+                try
+                {
+                    pipe.Enhance(src, height, width, srcStride, dst, dstStride, format);
+                    DebugAfterEnhance?.Invoke(pipe);
+                    return;
+                }
+                catch (VkDeviceLostException) when (attempt == 0)
+                {
+                    // the backend re-creates its device on next use; this pool's pipelines are dead
+                    Interlocked.CompareExchange(ref _vkPool, null, pool);
+                }
+                finally { pool.Return(pipe); }
             }
-            finally { pool.Return(pipe); }
-            return;
         }
         int ph = (-height) & 31, pw = (-width) & 31;
         int h = height + ph, w = width + pw;

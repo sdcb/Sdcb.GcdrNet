@@ -126,26 +126,17 @@ public class EngineTests
         int[] shape = Golden.ShapeOf("small", "input");
         OnnxModel m = OnnxModel.Load(GcPath);
 
-        float[] Fused()
+        // per-compile option, not GCDRNET_NOFUSE: the env var would also unfuse graphs that tests
+        // running in parallel compile meanwhile (byte-exact Vulkan comparisons then fail)
+        float[] Run(bool fuse)
         {
-            Environment.SetEnvironmentVariable("GCDRNET_NOFUSE", null);
-            using var s = new InferenceSession(GraphCompiler.Compile(m, shape, CompileOptions.Default with { Extensions = GcdrExtensions.Instance }));
+            using var s = new InferenceSession(GraphCompiler.Compile(m, shape,
+                CompileOptions.Default with { Extensions = GcdrExtensions.Instance, Fuse = fuse }));
             input.CopyTo(s.Input); s.Run();
             return s.Output.ToArray();
         }
-        float[] Unfused()
-        {
-            Environment.SetEnvironmentVariable("GCDRNET_NOFUSE", "1");
-            try
-            {
-                using var s = new InferenceSession(GraphCompiler.Compile(m, shape, CompileOptions.Default with { Extensions = GcdrExtensions.Instance }));
-                input.CopyTo(s.Input); s.Run();
-                return s.Output.ToArray();
-            }
-            finally { Environment.SetEnvironmentVariable("GCDRNET_NOFUSE", null); }
-        }
 
-        var (max, rmse, _) = Golden.Diff(Fused(), Unfused());
+        var (max, rmse, _) = Golden.Diff(Run(fuse: true), Run(fuse: false));
         Assert.True(max < 1e-5f, $"fused vs unfused max diff {max} rmse {rmse}");
     }
 

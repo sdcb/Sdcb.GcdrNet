@@ -155,27 +155,31 @@ public class VulkanConvDotTests
     [InlineData("dr", "mid", "dr_in", "output")]
     public void ConvDotRoute_MatchesGolden(string which, string tag, string inName, string outName)
     {
-        VkDevice dev;
-        try { dev = VkBackend.Default.Dev; }
-        catch { dev = null!; }
-        Skip.If(dev is null || !VkBackend.Default.F16, "needs a Vulkan device with fp16 storage");
+        VkBackend? be = s_dotBackend.Value;
+        Skip.If(be is null || !be.F16, "needs a Vulkan device with fp16 storage");
 
         float[] input = Golden.F32(tag, inName);
         int[] shape = Golden.ShapeOf(tag, inName);
         float[] expect = Golden.F32(tag, outName);
-        bool saved = dev.ConvDot;
-        dev.ConvDot = true;
+        OnnxModel m = OnnxModel.Load(which == "gc" ? GcPath : DrPath);
+        using var sess = be.NewSession(m, shape, GcdrExtensions.Instance);
+        Assert.Contains(be.GraphFor(m, shape, ext: GcdrExtensions.Instance).Dispatches, d => d.Name!.StartsWith("conv_dot", StringComparison.Ordinal));
+        input.CopyTo(sess.Input);
+        sess.Run();
+        var (max, rmse, _) = Golden.Diff(sess.Output, expect);
+        Assert.True(max < 2e-2f, $"{which}-convdot[{tag}] max diff {max} rmse {rmse}");
+    }
+
+    // a private device with the conv_dot route forced on: flipping it on the shared default device
+    // would re-route graphs other tests compile concurrently (byte-exact comparisons then fail)
+    private static readonly Lazy<VkBackend?> s_dotBackend = new(() =>
+    {
         try
         {
-            // a fresh model instance: graphs are cached per model, so this compiles a new one
-            OnnxModel m = OnnxModel.Load(which == "gc" ? GcPath : DrPath);
-            using var sess = VkBackend.Default.NewSession(m, shape, GcdrExtensions.Instance);
-            Assert.Contains(VkBackend.Default.GraphFor(m, shape, ext: GcdrExtensions.Instance).Dispatches, d => d.Name!.StartsWith("conv_dot", StringComparison.Ordinal));
-            input.CopyTo(sess.Input);
-            sess.Run();
-            var (max, rmse, _) = Golden.Diff(sess.Output, expect);
-            Assert.True(max < 2e-2f, $"{which}-convdot[{tag}] max diff {max} rmse {rmse}");
+            var be = new VkBackend();
+            be.Dev.ConvDot = true;
+            return be;
         }
-        finally { dev.ConvDot = saved; }
-    }
+        catch { return null; }
+    });
 }
