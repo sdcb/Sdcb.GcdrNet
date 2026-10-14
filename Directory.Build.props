@@ -46,13 +46,14 @@
     <PackageId>Sdcb.SimdGcdrNet.Models</PackageId>
     <Version>$(SdcbSimdGcdrNetModelsVersion)</Version>
     <IsPackable>true</IsPackable>
-    <!-- wrapper code: Apache-2.0; embedded GCDRNet weights: MIT (THIRD-PARTY-NOTICES.txt) -->
-    <PackageLicenseExpression>Apache-2.0 AND MIT</PackageLicenseExpression>
+    <!-- follows the upstream GCDRNet weights (THIRD-PARTY-NOTICES.txt); the engine stays Apache-2.0 -->
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Description>Embedded GCDRNet ONNX models (GC-Net + DR-Net) for Sdcb.SimdGcdrNet, no dependencies: GcdrEnhancer.FromBytes(GcdrModels.GcNet, GcdrModels.DrNet), zero-copy, with no model files to deploy.</Description>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Copyright>Copyright (c) sdcb</Copyright>
   </PropertyGroup>
@@ -61,5 +62,7 @@
     <None Condition="!Exists('$(MSBuildProjectDirectory)\README.md')" Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="README.md" Visible="false" />
     <None Condition="Exists('$(MSBuildProjectDirectory)\README.md')" Include="$(MSBuildProjectDirectory)\README.md" Pack="true" PackagePath="README.md" />
     <None Include="$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="THIRD-PARTY-NOTICES.txt" Visible="false" />
+    <!-- regenerate with tools/gen_icon.py -->
+    <None Include="$(MSBuildThisFileDirectory)icon.png" Pack="true" PackagePath="icon.png" Visible="false" />
   </ItemGroup>
 </Project>

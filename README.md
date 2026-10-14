@@ -173,8 +173,9 @@ Kernel dispatch follows the runtime's
 
 ### License
 
-Apache-2.0. The network architecture and the model weights in `Sdcb.SimdGcdrNet.Models` come from
-[GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet) (MIT, Copyright (c) 2024 Jiaxin Zhang); see
+The inference engine (`Sdcb.SimdGcdrNet`, everything outside `src/Sdcb.SimdGcdrNet.Models`) is Apache-2.0.
+`Sdcb.SimdGcdrNet.Models` is MIT, following the upstream [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)
+weights it embeds (Copyright (c) 2024 Jiaxin Zhang); see
 [THIRD-PARTY-NOTICES.txt](https://github.com/sdcb/SimdGcdrNet/blob/main/THIRD-PARTY-NOTICES.txt), also shipped in both packages.
 The test corpus in `tests/testdata/realdae` is from the RealDAE dataset of the same paper.
 
@@ -306,6 +307,7 @@ SkiaSharp 解码）。`tests/testdata/realdae/` 存 50 张 RealDAE 语料
 
 ### 许可证
 
-Apache-2.0。网络结构与 `Sdcb.SimdGcdrNet.Models` 中的模型权重来自 [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)
-（MIT，Copyright (c) 2024 Jiaxin Zhang），详见 [THIRD-PARTY-NOTICES.txt](https://github.com/sdcb/SimdGcdrNet/blob/main/THIRD-PARTY-NOTICES.txt)（两个包内均附带）。
+推理引擎（`Sdcb.SimdGcdrNet`，即 `src/Sdcb.SimdGcdrNet.Models` 以外的全部代码）为 Apache-2.0；
+`Sdcb.SimdGcdrNet.Models` 沿用其内嵌的上游 [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet) 模型权重的 MIT 许可
+（Copyright (c) 2024 Jiaxin Zhang），详见 [THIRD-PARTY-NOTICES.txt](https://github.com/sdcb/SimdGcdrNet/blob/main/THIRD-PARTY-NOTICES.txt)（两个包内均附带）。
 `tests/testdata/realdae` 测试语料取自同一论文的 RealDAE 数据集。

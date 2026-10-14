@@ -19,8 +19,9 @@ See the [project README](https://github.com/sdcb/SimdGcdrNet#readme) for the ful
 
 ## License
 
-The model weights come from [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet) (MIT License, Copyright (c) 2024
-Jiaxin Zhang); the full notice is in `THIRD-PARTY-NOTICES.txt` in this package. If you use them, please cite:
+MIT, following the upstream [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet) weights (Copyright (c) 2024
+Jiaxin Zhang); the full notice is in `THIRD-PARTY-NOTICES.txt` in this package. The engine package
+`Sdcb.SimdGcdrNet` is Apache-2.0. If you use the models, please cite:
 
 ```text
 @article{zhang2023appearance,

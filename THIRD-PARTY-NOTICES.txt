@@ -1,5 +1,7 @@
-Sdcb.SimdGcdrNet uses third-party material listed below. The project's own code is
-licensed under the Apache License 2.0 (see LICENSE).
+Sdcb.SimdGcdrNet uses third-party material listed below. The inference engine
+(Sdcb.SimdGcdrNet) is licensed under the Apache License 2.0 (see LICENSE); the models
+package (Sdcb.SimdGcdrNet.Models, src/Sdcb.SimdGcdrNet.Models) is licensed under the
+MIT License, following the upstream weights it embeds (see src/Sdcb.SimdGcdrNet.Models/LICENSE).
 
 ================================================================================
 GCDRNet
