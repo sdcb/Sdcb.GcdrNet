@@ -10,16 +10,19 @@ public sealed class OnnxModel
         Initializers = initializers;
     }
 
+    /// <summary>The model's default-domain (<c>ai.onnx</c>) opset version.</summary>
     public int Opset { get; }
     internal OnnxGraphData Graph { get; }
     internal Dictionary<string, OnnxTensorData> Initializers { get; }
 
+    /// <summary>Loads an ONNX model from the file at <paramref name="path"/>.</summary>
     public static OnnxModel Load(string path)
     {
         using FileStream fs = File.OpenRead(path);
         return Load(fs);
     }
 
+    /// <summary>Loads an ONNX model by reading <paramref name="source"/> to its end.</summary>
     public static OnnxModel Load(Stream source) => Build(OnnxProtoReader.Parse(source));
 
     /// <summary>Parses the model straight from <paramref name="source"/> (pinned for the duration

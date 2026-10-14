@@ -194,6 +194,8 @@ internal sealed class ExecPlan
 }
 
 /// <summary>Plan compilation options.</summary>
+/// <param name="Nhwc">run the layout pass: rank-4 activations stored channels-last.</param>
+/// <param name="PhysicalIo">keep input/output in plan layout (no boundary relayout); else logical NCHW.</param>
 /// <param name="MemFuse">memory fusions (conv+pool, UpHead skip recompute; NHWC only).</param>
 /// <param name="Gpu">plan for the Vulkan backend (restricts fusions to what its shaders implement).</param>
 internal sealed record CompileOptions(bool Nhwc, bool PhysicalIo = false, bool MemFuse = true, bool Gpu = false)

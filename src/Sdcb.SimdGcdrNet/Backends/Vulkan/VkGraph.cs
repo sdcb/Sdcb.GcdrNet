@@ -55,6 +55,9 @@ internal sealed class VkGraphModel : IDisposable
     /// <summary>How a const is laid out on the device (decided by its consumer).</summary>
     private enum CK { Raw, F32, ConvW, DwW, ConvWT, GemmNK }
 
+    /// <param name="dev">Vulkan device the graph is lowered for.</param>
+    /// <param name="plan">Compiled execution plan to lower.</param>
+    /// <param name="f16">Store activations and (non-fp32) weights as fp16; math stays fp32.</param>
     /// <param name="constKey">Sharing key for the const store (the source model): graphs of the
     /// same model at other sizes reuse its uploaded weights. Null = private store.</param>
     internal VkGraphModel(VkDevice dev, ExecPlan plan, bool f16, object? constKey = null)

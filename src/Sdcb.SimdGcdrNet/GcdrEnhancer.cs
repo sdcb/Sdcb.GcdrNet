@@ -68,6 +68,8 @@ public sealed class GcdrEnhancer : IDisposable
         _backend = backend;
     }
 
+    /// <summary>Loads the GC-Net and DR-Net ONNX models from files (e.g.
+    /// <c>gcdrnet_gcnet_sim.onnx</c> / <c>gcdrnet_drnet_sim.onnx</c>).</summary>
     public static GcdrEnhancer FromFiles(string gcnetOnnxPath, string drnetOnnxPath,
         GcdrBackend backend = GcdrBackend.Cpu) =>
         new(OnnxModel.Load(gcnetOnnxPath), OnnxModel.Load(drnetOnnxPath), backend);
@@ -295,6 +297,7 @@ public sealed class GcdrEnhancer : IDisposable
         return dst;
     }
 
+    /// <summary>Releases all pooled CPU sessions and GPU workers.</summary>
     public void Dispose()
     {
         Interlocked.Exchange(ref _cpuPool, null)?.Dispose();

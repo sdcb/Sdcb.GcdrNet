@@ -140,6 +140,8 @@ internal sealed class MtlGraphModel : IDisposable
     /// <summary>How a const is laid out on the device (decided by its consumer).</summary>
     private enum CK { Raw, F32, ConvW, DwW, ConvWT, GemmNK }
 
+    /// <param name="dev">Metal device the graph is lowered for.</param>
+    /// <param name="plan">Compiled execution plan to lower.</param>
     /// <param name="constKey">Sharing key for the const store (the source model): graphs of the
     /// same model at other sizes reuse its uploaded weights. Null = private store.</param>
     internal MtlGraphModel(MtlDevice dev, ExecPlan plan, object? constKey = null)

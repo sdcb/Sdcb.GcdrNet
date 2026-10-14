@@ -20,6 +20,7 @@ public sealed unsafe class InferenceSession : IDisposable
     private readonly long[] _nodeTicks;
     private readonly int _inputValue, _outputValue;
 
+    /// <summary>Creates a session over <paramref name="model"/> that owns a fresh native arena.</summary>
     public InferenceSession(CompiledModel model) : this(model.Plan) { }
 
     internal InferenceSession(ExecPlan plan) : this(plan, 0) { }
@@ -51,6 +52,7 @@ public sealed unsafe class InferenceSession : IDisposable
     }
     /// <summary>Input tensor shape (e.g. [1,3,H,W]).</summary>
     public int[] InputShape => _plan.Values[_inputValue].Shape;
+    /// <summary>Output tensor shape (e.g. [1,3,H,W]).</summary>
     public int[] OutputShape => _plan.Values[_outputValue].Shape;
 
     /// <summary>The writable input window inside the arena (NCHW float).</summary>
@@ -305,12 +307,14 @@ public sealed unsafe class InferenceSession : IDisposable
 
     private float* Arena => _arena != 0 ? (float*)_arena : throw new ObjectDisposedException(nameof(InferenceSession));
 
+    /// <summary>Frees the native arena (if owned by this session).</summary>
     public void Dispose()
     {
         Free();
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>Frees the native arena if <see cref="Dispose"/> was not called.</summary>
     ~InferenceSession() => Free();
 
     private void Free()

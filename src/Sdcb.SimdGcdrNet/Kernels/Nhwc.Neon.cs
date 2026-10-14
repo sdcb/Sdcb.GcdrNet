@@ -34,7 +34,7 @@ internal static unsafe partial class Nhwc
         _ => v,
     };
 
-    /// <summary>6 × 16 tile: <see cref="TileNeonK"/> into a scratch tile, then the residual /
+    /// <summary>6 × 16 tile: <see cref="TileNeonK(float**, int, int, float*, float*, float*, int)"/> into a scratch tile, then the residual /
     /// activation epilogue per row.</summary>
     private static void TileNeon(float** ptrs, int rows, int taps, int ic, float* wb, float* bb,
         float* outp, float* addp, int oc, int lanes, ActivationKind act)

@@ -48,6 +48,7 @@ public sealed unsafe class MtlInferenceSession : IDisposable
 
     /// <summary>Input tensor shape (e.g. [1,3,H,W]).</summary>
     public int[] InputShape => _plan.Values[_plan.InputValue].Shape;
+    /// <summary>Output tensor shape (e.g. [1,3,H,W]).</summary>
     public int[] OutputShape => _plan.Values[_plan.OutputValue].Shape;
 
     /// <summary>The writable input window (staged into the arena on <see cref="Run"/>).</summary>
@@ -240,6 +241,7 @@ public sealed unsafe class MtlInferenceSession : IDisposable
         FromStorage((byte*)Arena.Contents + _outOff, _outHost);
     }
 
+    /// <summary>Releases the session's device arena and its reference to the shared graph.</summary>
     public void Dispose()
     {
         Arena.Dispose();

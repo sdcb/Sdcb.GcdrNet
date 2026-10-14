@@ -29,31 +29,32 @@ The model is a two-stage pipeline:
   nchw2bgr` pipeline with arbitrary source/destination strides.
 - **Metal compute backend** (macOS, Apple Silicon): pure C# ObjC P/Invoke (no Xamarin/Metal.NET),
   fp16 storage + fp32 math, simdgroup-MMA implicit-GEMM convolutions — see
-  [docs/apple-m4-metal.md](docs/apple-m4-metal.md) (~7.5× CPU on M4).
-- A NEON kernel slot is reserved in the ISA hierarchy.
+  [docs/apple-m4-metal.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/apple-m4-metal.md) (~7.5× CPU on M4).
+- **Any interleaved 8-bit layout** (`Bgr24` / `Rgb24` / `Bgra32` / `Rgba32`), arbitrary strides, in place;
+  thread-safe `GcdrEnhancer`; Native AOT compatible.
 
 ### Performance (RTX 3080 Ti, 1600×1152)
 
 | Path | Time | vs PyTorch baseline |
 |---|---|---|
 | Vulkan e2e (incl. upload/download + pre/post) | **~9.6 ms** | PyTorch pure inference 30.5 ms; with pre/post 57.2 ms |
-| Vulkan corpus (49 RealDAE, seq order) | **~28 ms/img** | methodology: [docs/corpus.md](docs/corpus.md), current numbers: [docs/perf.md](docs/perf.md) |
+| Vulkan corpus (49 RealDAE, seq order) | **~28 ms/img** | methodology: [docs/corpus.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/corpus.md), current numbers: [docs/perf.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/perf.md) |
 | CPU AVX2 corpus (same set) | ~722 ms/img | peak working set ~0.8 GB (Vulkan: 0.33 GB + 0.42 GB VRAM) |
 | CPU AVX2 (16 threads) gc+dr inference | ~365 ms | — |
 
-Ryzen AI 9 H 365 (AVX-512) + Radeon 880M (RDNA 3.5 iGPU): see [docs/amd-h365-880m.md](docs/amd-h365-880m.md)
+Ryzen AI 9 H 365 (AVX-512) + Radeon 880M (RDNA 3.5 iGPU): see [docs/amd-h365-880m.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/amd-h365-880m.md)
 (Vulkan ~100 ms/img, CPU AVX-512 ~285 ms/img on the same corpus).
 
-Ryzen 9 5950X (AVX2, 16C/32T) + Intel Arc B580 (Xe2, XMX via 8x16x16 coopmat): see [docs/amd-5950x-b580.md](docs/amd-5950x-b580.md)
+Ryzen 9 5950X (AVX2, 16C/32T) + Intel Arc B580 (Xe2, XMX via 8x16x16 coopmat): see [docs/amd-5950x-b580.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/amd-5950x-b580.md)
 (Vulkan ~36 ms/img, CPU AVX2 ~414 ms/img on the same corpus).
 
-Rockchip RK3399 (2× A72 + 4× A53, NEON, passively cooled): see [docs/rockchip-rk3399.md](docs/rockchip-rk3399.md)
+Rockchip RK3399 (2× A72 + 4× A53, NEON, passively cooled): see [docs/rockchip-rk3399.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/rockchip-rk3399.md)
 (CPU NEON ~9.0 s/img on the same corpus, 2.6× the generic `Vector<float>` path at a locked 1 GHz).
 
-Snapdragon 8 Gen 3 (realme GT5 Pro, Android 16; Adreno 750 without coopmat, 64/128-lane waves): see [docs/snapdragon-8gen3.md](docs/snapdragon-8gen3.md)
+Snapdragon 8 Gen 3 (realme GT5 Pro, Android 16; Adreno 750 without coopmat, 64/128-lane waves): see [docs/snapdragon-8gen3.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/snapdragon-8gen3.md)
 (Vulkan ~486 ms/img with register-tiled conv/GEMM kernels, 2.6× the shared-memory path; CPU NEON ~1.03 s/img on the same corpus).
 
-Browser (browser-wasm, WASM SIMD128, Web Workers threads, LLVM AOT): see [docs/wasm.md](docs/wasm.md)
+Browser (browser-wasm, WASM SIMD128, Web Workers threads, LLVM AOT): see [docs/wasm.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/wasm.md)
 (Edge on a 5950X: CPU PackedSimd ~696 ms/img on the same corpus, 1.55× the generic `Vector<float>` path in the same browser).
 
 ### Quick start
@@ -170,6 +171,13 @@ Kernel dispatch follows the runtime's
   The binary then refuses to start on CPUs without those extensions. arm64 needs nothing (NEON is in
   the baseline); GPU backends are unaffected.
 
+### License
+
+Apache-2.0. The network architecture and the model weights in `Sdcb.SimdGcdrNet.Models` come from
+[GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet) (MIT, Copyright (c) 2024 Jiaxin Zhang); see
+[THIRD-PARTY-NOTICES.txt](https://github.com/sdcb/SimdGcdrNet/blob/main/THIRD-PARTY-NOTICES.txt), also shipped in both packages.
+The test corpus in `tests/testdata/realdae` is from the RealDAE dataset of the same paper.
+
 ---
 
 ## 中文
@@ -187,30 +195,33 @@ IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方�
 - **CPU 后端**：x64 上 AVX-512 → AVX2+FMA 多线程 → `Vector<float>` → Scalar 四档 ISA 自动分发；arm64 上 NEON（AdvSimd）→ Scalar；browser-wasm 上 PackedSimd（WASM SIMD128）→ `Vector<float>` → Scalar
 - **Vulkan 后端**：push-descriptor、ReBAR 感知 staging、单命令缓冲图执行、
   融合流水线（bgr2nchw→GC→div6→DR→nchw2bgr），支持任意 src/dst stride
-- 预留 Metal 后端接口位
+- **Metal 后端**（macOS，Apple Silicon）：纯 C# ObjC P/Invoke（不依赖 Xamarin/Metal.NET），fp16 存储 + fp32 计算，
+  simdgroup-MMA 隐式 GEMM 卷积，见 [docs/apple-m4-metal.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/apple-m4-metal.md)（M4 上约为 CPU 的 7.5 倍）
+- **任意 8 位交错像素格式**（`Bgr24` / `Rgb24` / `Bgra32` / `Rgba32`），任意 stride，支持原地增强；
+  `GcdrEnhancer` 线程安全；兼容 Native AOT
 
 ### 性能（RTX 3080 Ti，1600×1152）
 
 | 路径 | 耗时 | 对比 PyTorch |
 |---|---|---|
 | Vulkan 端到端（含上下行+前后处理） | **~9.6 ms** | PyTorch 纯推理 30.5 ms / 含前后处理 57.2 ms |
-| Vulkan corpus（49 张 RealDAE，序号序） | **~28 ms/张** | 口径见 [docs/corpus.md](docs/corpus.md)，最新数据见 [docs/perf.md](docs/perf.md) |
+| Vulkan corpus（49 张 RealDAE，序号序） | **~28 ms/张** | 口径见 [docs/corpus.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/corpus.md)，最新数据见 [docs/perf.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/perf.md) |
 | CPU AVX2 corpus（同集） | ~722 ms/张 | 峰值 working set ~0.8 GB（Vulkan：0.33 GB + 显存 0.42 GB） |
 | CPU AVX2（16 线程）gc+dr 推理 | ~365 ms | — |
 
-锐龙 AI 9 H 365（AVX-512）+ Radeon 880M（RDNA 3.5 核显）见 [docs/amd-h365-880m.md](docs/amd-h365-880m.md)
+锐龙 AI 9 H 365（AVX-512）+ Radeon 880M（RDNA 3.5 核显）见 [docs/amd-h365-880m.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/amd-h365-880m.md)
 （同一语料 Vulkan ~100 ms/张，CPU AVX-512 ~285 ms/张）。
 
-锐龙 9 5950X（AVX2，16C/32T）+ Intel Arc B580（Xe2，8x16x16 coopmat 走 XMX）见 [docs/amd-5950x-b580.md](docs/amd-5950x-b580.md)
+锐龙 9 5950X（AVX2，16C/32T）+ Intel Arc B580（Xe2，8x16x16 coopmat 走 XMX）见 [docs/amd-5950x-b580.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/amd-5950x-b580.md)
 （同一语料 Vulkan ~36 ms/张，CPU AVX2 ~414 ms/张）。
 
-瑞芯微 RK3399（2× A72 + 4× A53，NEON，被动散热）见 [docs/rockchip-rk3399.md](docs/rockchip-rk3399.md)
+瑞芯微 RK3399（2× A72 + 4× A53，NEON，被动散热）见 [docs/rockchip-rk3399.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/rockchip-rk3399.md)
 （同一语料 CPU NEON ~9.0 s/张；锁 1 GHz 时是通用 `Vector<float>` 路径的 2.6 倍）。
 
-骁龙 8 Gen 3（真我 GT5 Pro，Android 16；Adreno 750 无 coopmat，64/128 lane wave）见 [docs/snapdragon-8gen3.md](docs/snapdragon-8gen3.md)
+骁龙 8 Gen 3（真我 GT5 Pro，Android 16；Adreno 750 无 coopmat，64/128 lane wave）见 [docs/snapdragon-8gen3.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/snapdragon-8gen3.md)
 （同一语料 Vulkan ~486 ms/张，寄存器分块卷积/GEMM 内核比共享内存路径快 2.6 倍；CPU NEON ~1.03 s/张）。
 
-浏览器（browser-wasm，WASM SIMD128，Web Workers 多线程，LLVM AOT）见 [docs/wasm.md](docs/wasm.md)
+浏览器（browser-wasm，WASM SIMD128，Web Workers 多线程，LLVM AOT）见 [docs/wasm.md](https://github.com/sdcb/SimdGcdrNet/blob/main/docs/wasm.md)
 （5950X 上的 Edge：同一语料 CPU PackedSimd ~696 ms/张，是同浏览器通用 `Vector<float>` 路径的 1.55 倍）。
 
 ### 快速上手
@@ -292,3 +303,9 @@ SkiaSharp 解码）。`tests/testdata/realdae/` 存 50 张 RealDAE 语料
 ```
 
 这样编出的程序在不支持这些扩展的 CPU 上无法启动。arm64 不用设（NEON 在基线里）；GPU 后端不受影响。
+
+### 许可证
+
+Apache-2.0。网络结构与 `Sdcb.SimdGcdrNet.Models` 中的模型权重来自 [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)
+（MIT，Copyright (c) 2024 Jiaxin Zhang），详见 [THIRD-PARTY-NOTICES.txt](https://github.com/sdcb/SimdGcdrNet/blob/main/THIRD-PARTY-NOTICES.txt)（两个包内均附带）。
+`tests/testdata/realdae` 测试语料取自同一论文的 RealDAE 数据集。

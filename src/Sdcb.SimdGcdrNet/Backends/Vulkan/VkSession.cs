@@ -83,6 +83,7 @@ public sealed unsafe class VkInferenceSession : IDisposable
 
     /// <summary>Input tensor shape (e.g. [1,3,H,W]).</summary>
     public int[] InputShape => _plan.Values[_plan.InputValue].Shape;
+    /// <summary>Output tensor shape (e.g. [1,3,H,W]).</summary>
     public int[] OutputShape => _plan.Values[_plan.OutputValue].Shape;
 
     /// <summary>The writable input window (host copy staged on <see cref="Run"/>).</summary>
@@ -377,6 +378,8 @@ public sealed unsafe class VkInferenceSession : IDisposable
         FromStorage(_stageOutMap, _outHost, F16);
     }
 
+    /// <summary>Releases the session's device buffers, fence and command buffer, and its
+    /// reference to the shared graph.</summary>
     public void Dispose()
     {
         if (_stageInMap != null) { _stageIn.Unmap(); _stageInMap = null; }

@@ -130,6 +130,9 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
     /// <summary>Device bytes held by this worker (arena + BGR staging).</summary>
     internal long DeviceBytes => (long)((_arena?.Size ?? 0) + (_bgrIn?.Size ?? 0) + (_bgrOut?.Size ?? 0));
 
+    /// <param name="buf">Buffer to (re)allocate; kept when already large enough (unless <paramref name="shrink"/>).</param>
+    /// <param name="need">Required size in bytes.</param>
+    /// <param name="shrink">Always reallocate at exactly <paramref name="need"/> bytes (releases an oversized buffer).</param>
     /// <param name="headDiv">0 = exact size, else allocate need * (1 + 1/headDiv).</param>
     private void Arena(ref VkBuffer? buf, ulong need, bool shrink, ulong headDiv)
     {
