@@ -43,6 +43,9 @@ public sealed class GcdrEnhancer : IDisposable
     // Cache Metal availability for the process: re-probing (incl. the MSL library
     // compile) per Enhance would re-throw on init failure for every frame.
     private static readonly Lazy<bool> s_metalOk = new(MetalOk);
+
+    /// <summary>Whether the Metal backend can run here (what <see cref="GcdrBackend.Auto"/> checks).</summary>
+    internal static bool MetalUsable => GpuPossible && s_metalOk.Value;
     private SizePool<CpuWorker>? _cpuPool;
     // Vulkan workers are size-agnostic (budgeted grow-only arenas, re-record on size
     // change): one pool serves every size; idle workers beyond the first are kept
@@ -282,8 +285,9 @@ public sealed class GcdrEnhancer : IDisposable
         {
             var dev = Backends.Metal.MetalBackend.Default.Dev;
             // Apple7+ (M1+) for simdgroup matrix ops; Pipe() forces the embedded
-            // MSL library compile now rather than mid-Enhance on macOS 13.
-            return dev.SupportsApple7 && dev.Pipe("bgr2nhwc") is not null;
+            // MSL library compile now rather than mid-Enhance on macOS 13. Intel Macs can
+            // claim Apple7 yet build the simdgroup-MMA conv with 0 threads/group (Pipe throws).
+            return dev.SupportsApple7 && dev.Pipe("bgr2nhwc") is not null && dev.Pipe("conv_mm_32_0") is not null;
         }
         catch { return false; }
     }

@@ -70,8 +70,9 @@ jobs:
           - { name: win-x64-noavx512f,  os: windows-2025,     count: 3, isa: DOTNET_EnableAVX512F=0 }
           - { name: win-x64-noavx2,     os: windows-2025,     count: 3, isa: DOTNET_EnableAVX2=0 }
           - { name: win-x64-noavx,      os: windows-2025,     count: 3, isa: DOTNET_EnableAVX=0 }
-          - { name: win-x64-scalar,     os: windows-2025,     count: 2, isa: DOTNET_EnableHWIntrinsic=0 }
-          - { name: linux-arm64-scalar, os: ubuntu-24.04-arm, count: 2, isa: DOTNET_EnableHWIntrinsic=0 }
+          # scalar is ~20x slower: two small (<= 1 MP) corpus images only
+          - { name: win-x64-scalar,     os: windows-2025,     count: 2, maxmp: 1, isa: DOTNET_EnableHWIntrinsic=0 }
+          - { name: linux-arm64-scalar, os: ubuntu-24.04-arm, count: 2, maxmp: 1, isa: DOTNET_EnableHWIntrinsic=0 }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -92,13 +93,14 @@ jobs:
       - name: dotnet test
         shell: pwsh
         run: |
-          dotnet test tests/Sdcb.SimdGcdrNet.Tests -c Release --no-build --logger "trx;LogFileName=${{ matrix.name }}.trx" --results-directory results
+          # CorpusTests are covered (faster) by the corpus smoke below
+          dotnet test tests/Sdcb.SimdGcdrNet.Tests -c Release --no-build --filter "FullyQualifiedName!~CorpusTests" --logger "trx;LogFileName=${{ matrix.name }}.trx" --results-directory results
           if ($LASTEXITCODE -ne 0) { throw "dotnet test failed: $LASTEXITCODE" }
       - name: Corpus smoke (CPU)
         if: (success() || failure()) && steps.build.outcome == 'success'
         shell: pwsh
         run: |
-          dotnet artifacts/bench/Sdcb.SimdGcdrNet.Benchmark.dll --ci smoke --backend cpu --count ${{ matrix.count }} --case-id '${{ matrix.name }}' --out 'results/${{ matrix.name }}-smoke.json'
+          dotnet artifacts/bench/Sdcb.SimdGcdrNet.Benchmark.dll --ci smoke --backend cpu --count ${{ matrix.count }} --max-mp ${{ matrix.maxmp || 1000 }} --case-id '${{ matrix.name }}' --out 'results/${{ matrix.name }}-smoke.json'
           if ($LASTEXITCODE -ne 0) { throw "corpus smoke failed: $LASTEXITCODE" }
       - name: Corpus smoke (Metal)
         if: matrix.metal && (success() || failure()) && steps.build.outcome == 'success'

@@ -115,7 +115,7 @@ public class PixelFormatTests
         else if (backend == GcdrBackend.Metal)
         {
             bool ok;
-            try { ok = MetalBackend.Default.Dev is not null; } catch { ok = false; }
+            try { ok = GcdrEnhancer.MetalUsable; } catch { ok = false; }
             Skip.IfNot(ok, "no Metal device");
         }
     }

@@ -9,7 +9,7 @@ namespace Sdcb.SimdGcdrNet.Benchmark;
 
 // CI entry point over the RealDAE corpus (tools/fetch-fixture.ps1), one JSON result per run
 // for tests/Sdcb.SimdGcdrNet.TestReport:
-//   --ci smoke --backend cpu|metal|vulkan|auto --count N --case-id ID --out file.json
+//   --ci smoke --backend cpu|metal|vulkan|auto --count N [--max-mp MP] --case-id ID --out file.json
 //       correctness: sane output, run-to-run determinism, enhancement brings the images closer
 //       to their ground truths; GPU backends must also match the CPU output.
 //   --ci bench --backend ... --count N --case-id ID --replica R --out file.json
@@ -32,7 +32,7 @@ public static partial class Program
         string outPath = Arg(args, "--out") ?? $"{caseId}.json";
         if (mode is not ("smoke" or "bench"))
         {
-            Console.Error.WriteLine("usage: --ci smoke|bench [--backend cpu|metal|vulkan|auto] [--count N] [--case-id ID] [--replica R] [--out file.json]");
+            Console.Error.WriteLine("usage: --ci smoke|bench [--backend cpu|metal|vulkan|auto] [--count N] [--max-mp MP] [--case-id ID] [--replica R] [--out file.json]");
             return 1;
         }
         string manifestPath = Path.Combine(corpusDir, "manifest.json");
@@ -42,8 +42,17 @@ public static partial class Program
             return 4;
         }
         GcdrBackend backend = ParseBackend(backendName);
+        // --max-mp: only images up to that many megapixels (slow tiers such as scalar)
+        double maxMp = double.Parse(Arg(args, "--max-mp") ?? "1e9", System.Globalization.CultureInfo.InvariantCulture);
         string[] all = JsonDocument.Parse(File.ReadAllText(manifestPath)).RootElement.GetProperty("images")
-            .EnumerateArray().Select(e => e.GetProperty("name").GetString()!).ToArray();
+            .EnumerateArray()
+            .Where(e => e.GetProperty("w").GetInt32() * (double)e.GetProperty("h").GetInt32() <= maxMp * 1e6)
+            .Select(e => e.GetProperty("name").GetString()!).ToArray();
+        if (all.Length == 0)
+        {
+            Console.Error.WriteLine($"no corpus image within --max-mp {maxMp}");
+            return 1;
+        }
         // evenly spaced over the manifest: the color / shadow / bleed groups and their sizes all show up
         count = Math.Clamp(count, 1, all.Length);
         string[] images = Enumerable.Range(0, count).Select(k => all[(int)((long)k * all.Length / count)]).ToArray();

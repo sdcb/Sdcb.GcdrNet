@@ -215,7 +215,7 @@ public unsafe class MtlKernelTests
 
     private static bool MetalOk()
     {
-        try { return MetalBackend.Default.Dev is not null; }
+        try { return GcdrEnhancer.MetalUsable; }
         catch { return false; }
     }
 }

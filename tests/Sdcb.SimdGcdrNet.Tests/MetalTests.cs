@@ -130,7 +130,7 @@ public class MetalTests
 
     private static bool MetalAvailable()
     {
-        try { return MetalBackend.Default.Dev is not null; }
+        try { return GcdrEnhancer.MetalUsable; }
         catch { return false; }
     }
 }
