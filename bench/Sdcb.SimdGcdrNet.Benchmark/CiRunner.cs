@@ -191,10 +191,11 @@ public static partial class Program
 
     private static JsonObject HostInfo()
     {
+        // the tier the CPU kernels actually dispatch to (the library also honours DOTNET_EnableAVX512F=0)
         string isa = RuntimeInformation.ProcessArchitecture switch
         {
             Architecture.X64 or Architecture.X86 =>
-                Avx512F.IsSupported ? "avx512" : Avx2.IsSupported ? "avx2" : Avx.IsSupported ? "avx" :
+                Kernels.Nhwc.UseAvx512 ? "avx512" : Avx2.IsSupported ? "avx2" : Avx.IsSupported ? "avx" :
                 System.Numerics.Vector.IsHardwareAccelerated ? "sse" : "scalar",
             Architecture.Arm64 => AdvSimd.IsSupported ? "neon" : "scalar",
             _ => System.Numerics.Vector.IsHardwareAccelerated ? "vector" : "scalar",
