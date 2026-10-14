@@ -25,7 +25,7 @@ static void Run(string exe, string args, Encoding encoding) => Util.Cmd(exe, arg
 // dependencies) only when the models change. Keep the Directory.Build.props defaults in sync.
 static ProjectVersion[] Projects =
 {
-	new("Sdcb.SimdGcdrNet", "0.1.0"),
+	new("Sdcb.SimdGcdrNet", "1.0.0"),
 	new("Sdcb.SimdGcdrNet.Models", "1.0.0"),
 };
 
