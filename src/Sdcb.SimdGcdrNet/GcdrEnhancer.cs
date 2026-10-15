@@ -329,7 +329,7 @@ public sealed class GcdrEnhancer : IDisposable
 
     /// <summary>
     /// Size-agnostic CPU worker: one native arena holding both stages (see
-    /// <see cref="StackArenas"/>), borrowed by per-call sessions. Within
+    /// <see cref="StackArenas(ExecPlan, ExecPlan, long)"/>), borrowed by per-call sessions. Within
     /// <see cref="CpuArenaBudget"/> it only grows (25% headroom on regrowth), so mixed sizes
     /// neither reallocate nor re-fault pages; an over-budget arena (one huge image) drops
     /// to exact size once a size that fits comes along.
