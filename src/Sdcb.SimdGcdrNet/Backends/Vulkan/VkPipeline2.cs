@@ -82,9 +82,9 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         if (_gcG is null || h != _h || w != _w)
         {
             // a new size compiles two plans + graphs: build them side by side
-            var tg = Task.Run(() => _be.AcquireGraph(_gcModel, [1, 3, h, w], physIo: true, GcdrExtensions.Instance));
+            var tg = Task.Run(() => _be.AcquireGraph(_gcModel, [1, 3, h, w], GraphOptions));
             VkGraphModel gd;
-            try { gd = _be.AcquireGraph(_drModel, [1, 6, h, w], physIo: true, GcdrExtensions.Instance); }
+            try { gd = _be.AcquireGraph(_drModel, [1, 6, h, w], GraphOptions); }
             catch { try { tg.GetAwaiter().GetResult().Release(); } catch { } throw; }
             VkGraphModel gg;
             try { gg = tg.GetAwaiter().GetResult(); }
@@ -102,7 +102,9 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
 
         ulong es = (ulong)Es;
         // gc base aligned to 256 B (any minStorageBufferOffsetAlignment)
-        var (gcOff, total) = GcdrEnhancer.StackArenas(GcPlan, DrPlan, (long)(256 / es));
+        // the graphs' full arenas: the plan's values plus scratch / tile-read slack past them
+        var (gcOff, total) = GcdrEnhancer.StackArenas((long)((_gcG!.ArenaBytes + es - 1) / es), DrPlan,
+            (long)((_drG!.ArenaBytes + es - 1) / es), (long)(256 / es));
         _gcBase = (ulong)gcOff * es;
         ulong need = (ulong)total * es + 64;
         // the arena only grows while within ArenaBudget; an over-budget one (huge image)
@@ -119,6 +121,12 @@ internal sealed unsafe class VkGcdrPipeline : IDisposable
         Record((uint)(_iw * Bpp));   // _bgrIn is always tightly packed (we de-stride on upload)
         _recorded = true;
     }
+
+    /// <summary>Fused-pipeline graphs: physical I/O, the GcdrNet extension ops, and the staged
+    /// tensor-core convs on SG16 (Intel Xe2) devices — twice as fast here as the direct family and
+    /// stress-clean on this model (the OCR models are not; see CompileOptions.StagedCoopConv).</summary>
+    private static CompileOptions GraphOptions { get; } =
+        VkBackend.PipeOptions with { Extensions = GcdrExtensions.Instance, StagedCoopConv = true };
 
     /// <summary>Per-worker device-arena budget (gc + dr). Within it the arena is grow-only
     /// (12.5% headroom on the first allocation, 25% on regrowth) so mixed sizes don't reallocate.

@@ -9,7 +9,7 @@
     <!-- Engine package (exact pin: the library builds against engine internals). UseLocalSimdOnnx=true
          switches to ../Sdcb.SimdOnnx as a project reference for side-by-side development. -->
     <SdcbSimdOnnxVersion Condition="'$(SdcbSimdOnnxVersion)' == ''">0.1.0-preview.3</SdcbSimdOnnxVersion>
-    <SimdOnnxProject>$(MSBuildThisFileDirectory)..\Sdcb.SimdOnnx\src\Sdcb.SimdOnnx\Sdcb.SimdOnnx.csproj</SimdOnnxProject>
+    <SimdOnnxProject Condition="'$(SimdOnnxProject)' == ''">$(MSBuildThisFileDirectory)..\Sdcb.SimdOnnx\src\Sdcb.SimdOnnx\Sdcb.SimdOnnx.csproj</SimdOnnxProject>
   </PropertyGroup>
 
   <PropertyGroup>

@@ -273,12 +273,17 @@ public sealed class GcdrEnhancer : IDisposable
     /// stage-2 glue that writes the dr input, and dr then reuses everything above.
     /// Returns the gc arena offset and the total size, in floats.
     /// </summary>
-    internal static (long gcOff, long total) StackArenas(ExecPlan gc, ExecPlan dr, long align = 16)
+    internal static (long gcOff, long total) StackArenas(ExecPlan gc, ExecPlan dr, long align = 16) =>
+        StackArenas(gc.ArenaFloats, dr, dr.ArenaFloats, align);
+
+    /// <summary><see cref="StackArenas(ExecPlan, ExecPlan, long)"/> over each stage's full arena
+    /// (GPU graphs append scratch / tile-read slack past the plan's values).</summary>
+    internal static (long gcOff, long total) StackArenas(long gcArena, ExecPlan dr, long drArena, long align = 16)
     {
         CValue din = dr.Values[dr.InputValue];
         long o = dr.BufOffset[din.Buf], end = (o + din.ElementCount + align - 1) / align * align;
-        long gcOff = o >= gc.ArenaFloats ? 0 : end;
-        return (gcOff, Math.Max(dr.ArenaFloats, gcOff + gc.ArenaFloats));
+        long gcOff = o >= gcArena ? 0 : end;
+        return (gcOff, Math.Max(drArena, gcOff + gcArena));
     }
 
     // browser/WASI: unlinked P/Invokes (vulkan-1, libobjc) trap the wasm module with
