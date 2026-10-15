@@ -110,19 +110,20 @@ dotnet run --project examples/PaddleOCR.Console -- [image] [output.jpg]
 
 ### Layout
 
-- `src/Sdcb.SimdGcdrNet/Onnx` — minimal protobuf reader + ONNX model/graph objects
-- `src/Sdcb.SimdGcdrNet/Engine` — `GraphCompiler` (specialize → fold → fuse → arena-plan),
-  `InferenceSession`
-- `src/Sdcb.SimdGcdrNet/Kernels` — Scalar / `Vector<float>` / AVX2 / AVX-512 kernels (`Ops`, `Avx2Kernels`, `Nhwc`,
-  `PixelOps`, `SimdMath`)
-- `src/Sdcb.SimdGcdrNet/Backends/Vulkan` — `Vk` P/Invoke layer, `VkDevice`, `VkShaders` (embedded
-  SPIR-V), `VkGraph` dispatch lowering, `VkSession`, `VkPipeline2` (fused pipeline), `VkBackend`
-- `src/Sdcb.SimdGcdrNet/Backends/Vulkan/Shaders` — GLSL sources; `tools/build-shaders.bat`
-  recompiles `.comp` → `.spv` (committed; dev-time only, not part of `dotnet build`)
-- `src/Sdcb.SimdGcdrNet/Backends/Metal` — `ObjC`/`Metal` P/Invoke layer, `MtlGraph` dispatch
-  lowering, `MtlSession`, `MtlPipeline` (fused pipeline), `MetalBackend`
-- `src/Sdcb.SimdGcdrNet/Backends/Metal/Shaders` — MSL sources (`.metal`, embedded resources,
-  compiled to PSOs at run time — no pre-build step)
+The ONNX engine (protobuf reader, graph compiler, CPU SIMD kernels, Vulkan / Metal backends) is
+[Sdcb.SimdOnnx](https://github.com/sdcb/SimdOnnx); this library holds the GCDRNet-specific parts:
+
+- `src/Sdcb.SimdGcdrNet/GcdrEnhancer.cs` — public API: backend selection, per-size session pools,
+  gc → dr stitching, arena stacking
+- `src/Sdcb.SimdGcdrNet/Extensions` — engine extensions (`GcdrExtensions`): fused operators
+  (`UpHeadOp`, `ChannelShiftOp`) with their CPU kernels (Vector / AVX-512 / NEON / WASM SIMD) and
+  graph passes
+- `src/Sdcb.SimdGcdrNet/Kernels` — `PixelOps` (interleaved pixels ↔ tensors, padding)
+- `src/Sdcb.SimdGcdrNet/Backends/Vulkan` — `VkPipeline2` (fused gc + dr pipeline on SimdOnnx's
+  Vulkan backend); `Shaders` holds the GCDRNet GLSL kernels, `tools/build-shaders.bat` recompiles
+  `.comp` → `.spv` (committed; dev-time only, not part of `dotnet build`)
+- `src/Sdcb.SimdGcdrNet/Backends/Metal` — `MtlPipeline` (fused pipeline on SimdOnnx's Metal
+  backend); `Shaders` holds MSL sources (embedded, compiled to PSOs at run time)
 - `bench/Sdcb.SimdGcdrNet.Benchmark` — `--check`, `--bench` (CPU), `--benchvk` (Vulkan e2e),
   `--benchmtl` / `--checkgpu` / `--mtlprof` / `--mtrace` (Metal e2e, diff check, per-shader
   profile, CPU-vs-Metal per-node trace), `--vkprof` (per-shader/per-dispatch GPU timing), `--vkcheck` / `--vknodes`
@@ -173,8 +174,10 @@ runs two waves in parallel, then merges them into one report (the run's summary 
 - Metal path requires macOS on Apple Silicon with Apple7+ (simdgroup-MMA, i.e. M1+; an x64 process
   under Rosetta also qualifies); `Auto` checks `SupportsApple7` before choosing it,
   `GcdrBackend.Metal` selects it unconditionally. Set `GCDRNET_MTL_VERBOSE=1` to print the chosen device.
-- Thread-safety: `GcdrEnhancer` is thread-safe (CPU: per-size session pools; Vulkan: size-agnostic worker pool); individual
-  `InferenceSession`/`VkInferenceSession` objects are not.
+- Thread-safety: `GcdrEnhancer` is thread-safe (CPU: per-size session pools; Vulkan: size-agnostic worker pool).
+- 2.0 moved the engine out: `InferenceSession`, `CompiledModel`, `OnnxModel`, `VkInferenceSession` and
+  `MtlInferenceSession` are no longer in `Sdcb.SimdGcdrNet.*`; use the same types from
+  `Sdcb.SimdOnnx.*` (a dependency of this package). `GcdrEnhancer`'s API is unchanged.
 - Not covered: batched inference (N>1), fp16/int8.
 - Native AOT works (`IsAotCompatible`, no trim/AOT warnings; CPU and Vulkan output verified identical to JIT). On **x64** the executable
   project must set the instruction set, otherwise ILC compiles for the SSE baseline, folds
@@ -202,8 +205,8 @@ are from the RealDAE dataset of the same paper.
 ## 中文
 
 **Sdcb.SimdGcdrNet** 是 [GCDRNet](https://github.com/ZZZHANG-jx/GCDRNet)（相机拍摄文档去阴影/外观增强，
-IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方推理引擎，像 `Sdcb.SimdPaddleOCR`
-一样自带 CompiledModel 推理引擎。
+IEEE TAI 2023）的**纯 C# 推理库**——不依赖 onnxruntime 等第三方推理引擎，与 `Sdcb.SimdPaddleOCR`
+共用纯 C# 推理引擎 [Sdcb.SimdOnnx](https://github.com/sdcb/SimdOnnx)（2.0 起引擎类型移到 `Sdcb.SimdOnnx.*`）。
 
 模型为两级串联：**GC-Net** 估计逐像素光照/阴影图 `I_sm` → `I_GC = clamp(I_s/I_sm)` 除法校正 →
 **DR-Net** 消费 6 通道 `[I_s; I_GC]` 输出增强图。

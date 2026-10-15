@@ -43,7 +43,7 @@
     <PackageId>Sdcb.SimdGcdrNet</PackageId>
     <Version>$(SdcbSimdGcdrNetVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX-512/AVX2/NEON/Vector) and GPU (Vulkan, Metal) backends; no onnxruntime dependency. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32. Models ship separately in Sdcb.SimdGcdrNet.Models.</Description>
+    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Runs on the pure C# Sdcb.SimdOnnx engine (CPU SIMD AVX-512/AVX2/NEON/Vector, GPU Vulkan/Metal) with GCDRNet-specific fused kernels; no onnxruntime dependency. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32. Models ship separately in Sdcb.SimdGcdrNet.Models.</Description>
     <PackageTags>Sdcb;GCDRNet;document;document-enhancement;shadow-removal;image-enhancement;onnx;inference;deep-learning;SIMD;AVX512;NEON;wasm;AOT;Vulkan;Metal;linqpad-samples</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdGcdrNet.Models'">

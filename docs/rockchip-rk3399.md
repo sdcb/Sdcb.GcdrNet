@@ -84,7 +84,7 @@ CPU 档位（`--bench 512 512`，gc+dr 推理，锁 1008 MHz）：
 
 NEON 档位（`Nhwc.UseNeon = AdvSimd.Arm64.IsSupported`）沿用 x86 各档的算子结构，以下是只在 NEON 上走的部分：
 
-1. **6×16 micro-kernel `TileNeonK`**（`Kernels/Nhwc.Neon.cs`）
+1. **6×16 micro-kernel `TileNeonK`**（Sdcb.SimdOnnx `src/Sdcb.SimdOnnx/Kernels/Nhwc.Neon.cs`）
    - 每像素一次 128 位读入 4 个输入通道，`fmla` by element 累加到 24 个寄存器累加器（共 32 个向量寄存器）。
    - 下一组权重向量提前一组读入，照顾按序执行的 A53。`ic % 4` 的余数用 `ld1r` 广播。
    - 单核微基准（`taps × ic` 次累加，L1 内）：A72 6.3–7.1 GFLOP/s，约为峰值 7.5 的 85–95%；A53 3.5–3.8 GFLOP/s，约为峰值的 55%。
@@ -97,7 +97,7 @@ NEON 档位（`Nhwc.UseNeon = AdvSimd.Arm64.IsSupported`）沿用 x86 各档的�
 3. **Winograd**
    - GEMM 走 `TileNeonK`，输出 epilogue 改为向量化。
    - V 块预算降到 16 KB（ic ≥ 32 时 T = 6）。4 个 A53 共享 512 KB L2，块大了会互相挤出。
-   - U（36·oc·ic）超过 2 MB 的深层改走三阶段分组调度 `WinogradGrouped`（`Kernels/NhwcWinograd.Neon.cs`）：输入变换 → 每个 (xi, oc 块) 一个 GEMM 任务，每块 U 每组只读一次 → 输出变换。原来是每 6 个 tile 就把整块 U 从 DRAM 流一遍。
+   - U（36·oc·ic）超过 2 MB 的深层改走三阶段分组调度 `WinogradGrouped`（Sdcb.SimdOnnx `src/Sdcb.SimdOnnx/Kernels/NhwcWinograd.Neon.cs`）：输入变换 → 每个 (xi, oc 块) 一个 GEMM 任务，每块 U 每组只读一次 → 输出变换。原来是每 6 个 tile 就把整块 U 从 DRAM 流一遍。
    - 分组调度与原调度逐位相同：变换、k 序都一样。512→256 层（1600×1152，锁频）从 105 ms 降到 83 ms，256→128 从 120 ms 降到 93 ms。
 4. **向量化激活**：`SimdMath` 增加 Vector128 版 Exp / Sigmoid / Erf / GELU，公式与 AVX2 版一致，用 FMA。
    - 深度卷积 + GELU 原来在非 AVX 档逐元素走标量 `ErfScalar`，现在向量化：gc 128 通道那一层从 21.6 ms 降到 8.5 ms（512²，锁频）。
