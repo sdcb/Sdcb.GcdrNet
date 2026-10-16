@@ -1,6 +1,8 @@
+using Sdcb.SimdOnnx.Backends.Metal;
 using Sdcb.SimdGcdrNet.Backends.Metal;
-using Sdcb.SimdGcdrNet.Engine;
-using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdGcdrNet.Extensions;
+using Sdcb.SimdOnnx.Onnx;
 using Xunit;
 
 namespace Sdcb.SimdGcdrNet.Tests;
@@ -22,7 +24,7 @@ public class MetalTests
         float[] expect = Golden.F32(tag, "shadow");
 
         OnnxModel m = OnnxModel.Load(GcPath);
-        using var sess = MetalBackend.Default.NewSession(m, shape);
+        using var sess = MetalBackend.Default.NewSession(m, shape, GcdrExtensions.Instance);
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);
@@ -42,7 +44,7 @@ public class MetalTests
         float[] expect = Golden.F32(tag, "output");
 
         OnnxModel m = OnnxModel.Load(DrPath);
-        using var sess = MetalBackend.Default.NewSession(m, shape);
+        using var sess = MetalBackend.Default.NewSession(m, shape, GcdrExtensions.Instance);
         input.CopyTo(sess.Input);
         sess.Run();
         var (max, rmse, _) = Golden.Diff(sess.Output, expect);

@@ -1,7 +1,8 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using Sdcb.SimdGcdrNet.Engine;
-using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdGcdrNet.Extensions;
+using Sdcb.SimdOnnx.Onnx;
 
 namespace Sdcb.SimdGcdrNet.Benchmark;
 
@@ -44,7 +45,7 @@ public static partial class Program
             var m = OnnxModel.Load(mpath);
             int c = which == "gc" ? 3 : 6;
             // run the SAME (gpu-layout) plan on CPU and Metal so node indices align
-            var cpuPlan = GraphCompiler.Compile(m, [1, c, h, w], Sdcb.SimdGcdrNet.Backends.Metal.MetalBackend.PlanOptions);
+            var cpuPlan = GraphCompiler.Compile(m, [1, c, h, w], Sdcb.SimdOnnx.Backends.Metal.MetalBackend.PlanOptions with { Extensions = GcdrExtensions.Instance });
             using var cpu = new InferenceSession(cpuPlan);
             var rng = new Random(0);
             if (args.Length > 4)
@@ -56,9 +57,9 @@ public static partial class Program
             }
             else
                 for (int i = 0; i < cpu.Input.Length; i++) cpu.Input[i] = rng.NextSingle();
-            var mbe = Sdcb.SimdGcdrNet.Backends.Metal.MetalBackend.Default;
-            var mPlan = GraphCompiler.Compile(m, [1, c, h, w], Sdcb.SimdGcdrNet.Backends.Metal.MetalBackend.PlanOptions);
-            using var mtl = mbe.NewSession(m, [1, c, h, w]);
+            var mbe = Sdcb.SimdOnnx.Backends.Metal.MetalBackend.Default;
+            var mPlan = GraphCompiler.Compile(m, [1, c, h, w], Sdcb.SimdOnnx.Backends.Metal.MetalBackend.PlanOptions with { Extensions = GcdrExtensions.Instance });
+            using var mtl = mbe.NewSession(m, [1, c, h, w], GcdrExtensions.Instance);
             cpu.Input.CopyTo(mtl.Input);
             mtl.DebugUploadInput();
             if (Environment.GetEnvironmentVariable("MTRACE_NODES") == "1")
@@ -106,9 +107,9 @@ public static partial class Program
                     var exp = new float[wsrc.Length];
                     for (int o2 = 0; o2 < oc_; o2++) for (int c2 = 0; c2 < ic_; c2++) for (int t = 0; t < taps; t++)
                         exp[(t * ic_ + c2) * oc_ + o2] = wsrc[(o2 * ic_ + c2) * taps + t];
-                    var mw = mtl.DebugConst(nd_.In[1], 2, wsrc.Length);
+                    var mw = mtl.DebugConst(nd_.In[1], ConstKind.ConvW, wsrc.Length);
                     int wb = -1; for (int k = 0; k < exp.Length; k++) if (Math.Abs(mw[k] - exp[k]) > 1e-3) { wb = k; break; }
-                    Console.WriteLine($"    w-check: pack len {exp.Length} off {mtl.DebugConstOff(nd_.In[1], 2)} first-diff {wb} head {string.Join(' ', mw.Take(8).Select(x => $"{x:F3}"))} vs exp {string.Join(' ', exp.Take(8).Select(x => $"{x:F3}"))}");
+                    Console.WriteLine($"    w-check: pack len {exp.Length} off {mtl.DebugConstOff(nd_.In[1], ConstKind.ConvW)} first-diff {wb} head {string.Join(' ', mw.Take(8).Select(x => $"{x:F3}"))} vs exp {string.Join(' ', exp.Take(8).Select(x => $"{x:F3}"))}");
                     if (wb >= 0) Console.WriteLine($"      @{wb}: got {mw[wb]:F4} exp {exp[wb]:F4}; around got {string.Join(' ', mw.Skip(wb).Take(6).Select(x => $"{x:F3}"))} exp {string.Join(' ', exp.Skip(wb).Take(6).Select(x => $"{x:F3}"))}");
                 }
                 if (bad < 0 && (rmse > 1e-2 || nan > 0 || nanw > 0))
@@ -177,7 +178,7 @@ public static partial class Program
             // --node gc|dr h w idx reps : time one node in isolation (after a full warmup run)
             bool isDr = args[1] == "dr";
             int nh = int.Parse(args[2]), nw = int.Parse(args[3]), idx = int.Parse(args[4]), nreps = int.Parse(args[5]);
-            var cm = CompiledModel.Compile(OnnxModel.Load(isDr ? drPath : gcPath), [1, isDr ? 6 : 3, nh, nw]);
+            var cm = new CompiledModel(GraphCompiler.Compile(OnnxModel.Load(isDr ? drPath : gcPath), [1, isDr ? 6 : 3, nh, nw], CompileOptions.Default with { Extensions = GcdrExtensions.Instance }));
             var ss = cm.CreateSession();
             new Random(0).NextBytes(MemoryMarshal.AsBytes(ss.Input));
             if (args.Length > 6 && args[6] == "u") { var rr = new Random(0); var inp = ss.Input; for (int i = 0; i < inp.Length; i++) inp[i] = rr.NextSingle(); }
@@ -202,8 +203,8 @@ public static partial class Program
             foreach ((string tag, string mp, int cin) in new[] { ("gc", gcPath, 3), ("dr", drPath, 6) })
             {
                 var m = OnnxModel.Load(mp);
-                var cpu = CompiledModel.Compile(m, [1, cin, ch, cw]).CreateSession();
-                using var vk = Backends.Vulkan.VkBackend.Default.NewSession(m, [1, cin, ch, cw]);
+                var cpu = new CompiledModel(GraphCompiler.Compile(m, [1, cin, ch, cw], CompileOptions.Default with { Extensions = GcdrExtensions.Instance })).CreateSession();
+                using var vk = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default.NewSession(m, [1, cin, ch, cw], GcdrExtensions.Instance);
                 var rng = new Random(7);
                 for (int i = 0; i < cpu.Input.Length; i++) cpu.Input[i] = vk.Input[i] = rng.NextSingle();
                 cpu.Run(); vk.Run();
@@ -227,14 +228,14 @@ public static partial class Program
             int nh = args.Length > 2 ? int.Parse(args[2]) : 128, nw = args.Length > 3 ? int.Parse(args[3]) : 192;
             var m = OnnxModel.Load(isDr ? drPath : gcPath);
             int[] shape = [1, isDr ? 6 : 3, nh, nw];
-            var plan = GraphCompiler.Compile(m, shape, Backends.Vulkan.VkBackend.PlanOptions);
+            var plan = GraphCompiler.Compile(m, shape, Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.PlanOptions with { Extensions = GcdrExtensions.Instance });
             using var cpu = new InferenceSession(plan);
-            using var gpu = Backends.Vulkan.VkBackend.Default.NewSession(m, shape);
+            using var gpu = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default.NewSession(m, shape, GcdrExtensions.Instance);
             var rng = new Random(7);
             for (int i = 0; i < cpu.Input.Length; i++) cpu.Input[i] = gpu.Input[i] = rng.NextSingle();
             gpu.DebugUploadInput();
-            var ranges = Backends.Vulkan.VkBackend.Default.GraphFor(m, shape).NodeRanges;
-            var gd = Backends.Vulkan.VkBackend.Default.GraphFor(m, shape).Dispatches;
+            var ranges = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default.GraphFor(m, shape, ext: GcdrExtensions.Instance).NodeRanges;
+            var gd = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default.GraphFor(m, shape, ext: GcdrExtensions.Instance).Dispatches;
             for (int i = 0; i < plan.Nodes.Length; i++)
             {
                 var nd = plan.Nodes[i];
@@ -304,11 +305,11 @@ public static partial class Program
         {
             int h = args.Length > 1 ? int.Parse(args[1]) : 1152;
             int w = args.Length > 2 ? int.Parse(args[2]) : 1600;
-            var be = Backends.Metal.MetalBackend.Default;
+            var be = Sdcb.SimdOnnx.Backends.Metal.MetalBackend.Default;
             foreach ((string tag, string mp, int cin) in new[] { ("gc", gcPath, 3), ("dr", drPath, 6) })
             {
                 var m = OnnxModel.Load(mp);
-                using var s = be.NewSession(m, [1, cin, h, w]);
+                using var s = be.NewSession(m, [1, cin, h, w], GcdrExtensions.Instance);
                 s.Run(); // warm
                 var agg = s.DebugProfile();
                 Console.WriteLine($"--- {tag} metal per-shader (total {agg.Values.Sum():F1} ms) ---");
@@ -387,7 +388,7 @@ public static partial class Program
     // destroy, recreate — any hash change = stale-read/nondeterminism at session level.
     private static int VkDup(string gcPath, string drPath, int h, int w, bool useDr)
     {
-        var be = Backends.Vulkan.VkBackend.Default;
+        var be = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default;
         string path = useDr ? drPath : gcPath;
         int c = useDr ? 6 : 3;
         var m = OnnxModel.Load(path);
@@ -399,7 +400,7 @@ public static partial class Program
         }
         for (int round = 0; round < 4; round++)
         {
-            using var s = be.NewSession(m, [1, c, h, w]);
+            using var s = be.NewSession(m, [1, c, h, w], GcdrExtensions.Instance);
             var rng = new Random(42);
             for (int i = 0; i < s.Input.Length; i++) s.Input[i] = rng.NextSingle();
             s.Run();
@@ -409,7 +410,7 @@ public static partial class Program
             // interleave: run smaller sessions to churn memory
             foreach (int cs in new[] { 1024, 1312, 1152 })
             {
-                using var s2 = be.NewSession(m, [1, c, cs, cs]);
+                using var s2 = be.NewSession(m, [1, c, cs, cs], GcdrExtensions.Instance);
                 new Random(0).NextBytes(System.Runtime.InteropServices.MemoryMarshal.AsBytes(s2.Input));
                 s2.Run();
             }
@@ -423,7 +424,7 @@ public static partial class Program
     {
         foreach (var (path, c) in new[] { (gcPath, 3), (drPath, 6) })
         {
-            var plan = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, h, w]);
+            var plan = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, h, w], CompileOptions.Default with { Extensions = GcdrExtensions.Instance });
             var written = new List<(long s, long e)>();
             bool Covered(long s, long e) =>
                 written.Any(r => r.s <= s && r.e >= e);
@@ -463,7 +464,7 @@ public static partial class Program
     // stage first diverges.
     private static int Probe(string gcPath, string drPath, string imgPath, int[] churnPx)
     {
-        var be = Backends.Vulkan.VkBackend.Default;
+        var be = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default;
         var gc = OnnxModel.Load(gcPath); var dr = OnnxModel.Load(drPath);
         int iw, ih; byte[] bgr;
         (iw, ih) = ImageSize(imgPath);
@@ -488,10 +489,10 @@ public static partial class Program
         {
             p.Enhance(bgr, iw * 3, dst, iw * 3);
             p.DebugIntermediates(gcI, gcO, drI);
-            Console.WriteLine($"{tag}: dst={Fb(dst):x16} gcIn={Ff(gcI):x16} gcOut={Ff(gcO):x16} drIn={Ff(drI):x16} live={Backends.Vulkan.VkDevice.LiveDeviceBytes >> 20}MB");
+            Console.WriteLine($"{tag}: dst={Fb(dst):x16} gcIn={Ff(gcI):x16} gcOut={Ff(gcO):x16} drIn={Ff(drI):x16} live={Sdcb.SimdOnnx.Backends.Vulkan.VkDevice.LiveDeviceBytes >> 20}MB");
         }
 
-        var p1 = be.NewPipe(gc, dr, ih, iw);
+        var p1 = NewVkPipe(be, gc, dr, ih, iw);
         Run(p1, "p1-run1");
         Run(p1, "p1-run2");
         var churn = new List<Backends.Vulkan.VkGcdrPipeline>();
@@ -499,7 +500,7 @@ public static partial class Program
         {
             int cw = Math.Max(64, (int)Math.Sqrt(px * 16.0 / 9) / 32 * 32);
             int chh = Math.Max(64, px / Math.Max(cw, 1) / 32 * 32);
-            var cp = be.NewPipe(gc, dr, chh, cw);
+            var cp = NewVkPipe(be, gc, dr, chh, cw);
             byte[] cb = new byte[chh * cw * 3]; new Random(px).NextBytes(cb);
             byte[] cd = new byte[chh * cw * 3];
             cp.Enhance(cb, cw * 3, cd, cw * 3);
@@ -507,7 +508,7 @@ public static partial class Program
             if (churn.Count > 1) { churn[0].Dispose(); churn.RemoveAt(0); }
         }
         foreach (var c in churn) c.Dispose();
-        var p2 = be.NewPipe(gc, dr, ih, iw);
+        var p2 = NewVkPipe(be, gc, dr, ih, iw);
         Run(p2, "p2-after-churn");
         p2.Dispose(); p1.Dispose();
         return 0;
@@ -516,14 +517,14 @@ public static partial class Program
     // bisect which plan value first diverges between two pipeline instances.
     private static int Bisect(string gcPath, string drPath, string imgPath, int[] churnPx)
     {
-        var be = Backends.Vulkan.VkBackend.Default;
+        var be = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default;
         var gc = OnnxModel.Load(gcPath); var dr = OnnxModel.Load(drPath);
         int iw, ih;
         (iw, ih) = ImageSize(imgPath);
         byte[] bgr = DecodeBgr(imgPath);
         byte[] dst = new byte[bgr.Length];
 
-        var p1 = be.NewPipe(gc, dr, ih, iw);
+        var p1 = NewVkPipe(be, gc, dr, ih, iw);
         p1.Enhance(bgr, iw * 3, dst, iw * 3);
         // replicate corpus allocation history: run every corpus image sorted by px
         // (up to `churnPx[0]` predecessors, or all when empty) with real (h,w) sizes
@@ -537,7 +538,7 @@ public static partial class Program
         var alive = new List<Backends.Vulkan.VkGcdrPipeline>();
         foreach (var e in seq.Take(take))
         {
-            var cp = be.NewPipe(gc, dr, e.h, e.w);
+            var cp = NewVkPipe(be, gc, dr, e.h, e.w);
             byte[] cb = new byte[e.h * e.w * 3]; new Random(e.w * e.h).NextBytes(cb);
             byte[] cd = new byte[e.h * e.w * 3];
             cp.Enhance(cb, e.w * 3, cd, e.w * 3);
@@ -545,7 +546,7 @@ public static partial class Program
             if (alive.Count > 1) { alive[0].Dispose(); alive.RemoveAt(0); }
         }
         foreach (var c in alive) c.Dispose();
-        var p2 = be.NewPipe(gc, dr, ih, iw);
+        var p2 = NewVkPipe(be, gc, dr, ih, iw);
         p2.Enhance(bgr, iw * 3, dst, iw * 3);
 
         // dump BOTH whole gc arenas in one shot each, diff per plan value on host
@@ -749,7 +750,7 @@ public static partial class Program
             };
         }
 
-        Backends.Vulkan.VkDevice.ResetPeakDeviceBytes();
+        Sdcb.SimdOnnx.Backends.Vulkan.VkDevice.ResetPeakDeviceBytes();
         long gc0 = GC.GetTotalMemory(true);
         double wsLast = wsLoaded;
         var hashes = new Dictionary<string, ulong>();
@@ -824,8 +825,8 @@ public static partial class Program
         Console.WriteLine($"  ws: init {wsInit0:F0} -> loaded {wsLoaded:F0} MB ({wsLoaded - wsInit0:+0;-0}), " +
             $"loaded -> last {wsLast:F0} MB (delta {wsLast - wsLoaded:+0;-0} MB), peak {wsPeak:F0} MB");
         Console.WriteLine($"  mem: managed {gcD / 1048576.0:+0;-0} MB (after forced GC), " +
-            $"vkDevice live {Backends.Vulkan.VkDevice.LiveDeviceBytes / 1048576.0:F0} MB " +
-            $"(peak {Backends.Vulkan.VkDevice.PeakDeviceBytes / 1048576.0:F0} MB)");
+            $"vkDevice live {Sdcb.SimdOnnx.Backends.Vulkan.VkDevice.LiveDeviceBytes / 1048576.0:F0} MB " +
+            $"(peak {Sdcb.SimdOnnx.Backends.Vulkan.VkDevice.PeakDeviceBytes / 1048576.0:F0} MB)");
         return 0;
     }
 
@@ -948,7 +949,7 @@ public static partial class Program
     {
         foreach (var (path, c) in new[] { (gcPath, 3), (drPath, 6) })
         {
-            var plan = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, h, w]);
+            var plan = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, h, w], CompileOptions.Default with { Extensions = GcdrExtensions.Instance });
             long maxT = plan.Values.Max(v => v.Shape.Aggregate(1L, (a, x) => a * x));
             Console.WriteLine($"max tensor {maxT * 4 / 1048576.0:F0} MB, arena {plan.ArenaFloats * 4L / 1048576.0:F0} MB");
             using var s = new InferenceSession(plan);
@@ -972,8 +973,8 @@ public static partial class Program
 
     private static int Bench(string gcPath, string drPath, int h, int w, int reps)
     {
-        var gc = CompiledModel.Compile(OnnxModel.Load(gcPath), [1, 3, h, w]);
-        var dr = CompiledModel.Compile(OnnxModel.Load(drPath), [1, 6, h, w]);
+        var gc = new CompiledModel(GraphCompiler.Compile(OnnxModel.Load(gcPath), [1, 3, h, w], CompileOptions.Default with { Extensions = GcdrExtensions.Instance }));
+        var dr = new CompiledModel(GraphCompiler.Compile(OnnxModel.Load(drPath), [1, 6, h, w], CompileOptions.Default with { Extensions = GcdrExtensions.Instance }));
         var s1 = gc.CreateSession(); var s2 = dr.CreateSession();
         new Random(0).NextBytes(MemoryMarshal.AsBytes(s1.Input));
         new Random(1).NextBytes(MemoryMarshal.AsBytes(s2.Input));
@@ -1033,11 +1034,11 @@ public static partial class Program
 
     private static int VkProf(string gcPath, string drPath, int h, int w)
     {
-        var be = Backends.Vulkan.VkBackend.Default;
+        var be = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.Default;
         foreach ((string tag, string mp, int cin) in new[] { ("gc", gcPath, 3), ("dr", drPath, 6) })
         {
             var m = OnnxModel.Load(mp);
-            using var s = be.NewSession(m, [1, cin, h, w]);
+            using var s = be.NewSession(m, [1, cin, h, w], GcdrExtensions.Instance);
             s.Run(); // warm
             var agg = s.DebugProfile();
             double tot = agg.Values.Sum();
@@ -1077,5 +1078,12 @@ public static partial class Program
             d = d.Parent;
         }
         throw new DirectoryNotFoundException("testdata not found");
+    }
+
+    private static Backends.Vulkan.VkGcdrPipeline NewVkPipe(Sdcb.SimdOnnx.Backends.Vulkan.VkBackend be, OnnxModel gc, OnnxModel dr, int ih, int iw)
+    {
+        var p = new Backends.Vulkan.VkGcdrPipeline(be, gc, dr);
+        try { p.Bind(ih, iw); return p; }
+        catch { p.Dispose(); throw; }
     }
 }

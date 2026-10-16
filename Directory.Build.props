@@ -4,8 +4,15 @@
     never force a models release). Edit here and keep build/00-common.linq in sync.
   -->
   <PropertyGroup>
-    <SdcbSimdGcdrNetVersion Condition="'$(SdcbSimdGcdrNetVersion)' == ''">1.0.0</SdcbSimdGcdrNetVersion>
+    <SdcbSimdGcdrNetVersion Condition="'$(SdcbSimdGcdrNetVersion)' == ''">2.0.0</SdcbSimdGcdrNetVersion>
     <SdcbSimdGcdrNetModelsVersion Condition="'$(SdcbSimdGcdrNetModelsVersion)' == ''">1.0.0</SdcbSimdGcdrNetModelsVersion>
+    <!-- Engine package (exact pin: the library builds against engine internals). UseLocalSimdOnnx=true
+         switches to ../Sdcb.SimdOnnx as a project reference for side-by-side development. -->
+    <SdcbSimdOnnxVersion Condition="'$(SdcbSimdOnnxVersion)' == ''">0.1.0-preview.4</SdcbSimdOnnxVersion>
+    <SimdOnnxProject Condition="'$(SimdOnnxProject)' == ''">$(MSBuildThisFileDirectory)..\Sdcb.SimdOnnx\src\Sdcb.SimdOnnx\Sdcb.SimdOnnx.csproj</SimdOnnxProject>
+    <!-- a stable package pinned to an engine preview (NU5104): accepted while the engine is a preview on
+         the ProGet test feed; a nuget.org release of this package needs the engine released first -->
+    <NoWarn Condition="$(SdcbSimdOnnxVersion.Contains('-'))">$(NoWarn);NU5104</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -39,7 +46,7 @@
     <PackageId>Sdcb.SimdGcdrNet</PackageId>
     <Version>$(SdcbSimdGcdrNetVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Self-contained ONNX graph engine with CPU SIMD (AVX-512/AVX2/NEON/Vector) and GPU (Vulkan, Metal) backends; no onnxruntime dependency. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32. Models ship separately in Sdcb.SimdGcdrNet.Models.</Description>
+    <Description>Pure C# GCDRNet inference: document image shadow removal / appearance enhancement. Runs on the pure C# Sdcb.SimdOnnx engine (CPU SIMD AVX-512/AVX2/NEON/Vector, GPU Vulkan/Metal) with GCDRNet-specific fused kernels; no onnxruntime dependency. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32. Models ship separately in Sdcb.SimdGcdrNet.Models.</Description>
     <PackageTags>Sdcb;GCDRNet;document;document-enhancement;shadow-removal;image-enhancement;onnx;inference;deep-learning;SIMD;AVX512;NEON;wasm;AOT;Vulkan;Metal;linqpad-samples</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdGcdrNet.Models'">

@@ -1,8 +1,12 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
-using Sdcb.SimdGcdrNet.Engine;
+using Sdcb.SimdGcdrNet.Extensions;
 using Sdcb.SimdGcdrNet.Kernels;
-using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdOnnx.Onnx;
+using VkBackend = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend;
+using VkDeviceLostException = Sdcb.SimdOnnx.Backends.Vulkan.VkDeviceLostException;
+using MetalBackend = Sdcb.SimdOnnx.Backends.Metal.MetalBackend;
 
 namespace Sdcb.SimdGcdrNet;
 
@@ -51,7 +55,7 @@ public sealed class GcdrEnhancer : IDisposable
     // change): one pool serves every size; idle workers beyond the first are kept
     // only while their device memory fits the budget
     // (3 GB; integrated GPUs: at most a quarter of the shared device-local heap)
-    private static long VkIdleBudget => (long)Backends.Vulkan.VkGcdrPipeline.BudgetFor(Backends.Vulkan.VkBackend.Default.Dev);
+    private static long VkIdleBudget => (long)Backends.Vulkan.VkGcdrPipeline.BudgetFor(VkBackend.Default.Dev);
     private SizePool<Backends.Vulkan.VkGcdrPipeline>? _vkPool;
     private SizePool<Backends.Metal.MtlGcdrPipeline>? _mtlPool;
     private long _poolsCreated, _workersCreated, _poolsEvicted;
@@ -95,7 +99,7 @@ public sealed class GcdrEnhancer : IDisposable
 
     // pipeline sessions keep I/O in plan layout: the glue kernels below read/write
     // channels-last directly, so the plan has no boundary relayouts
-    private static readonly CompileOptions CpuPlan = new(CompileOptions.DefaultNhwc, PhysicalIo: true);
+    private static readonly CompileOptions CpuPlan = new(CompileOptions.DefaultNhwc, PhysicalIo: true, Extensions: GcdrExtensions.Instance);
     private static bool CpuNhwc => CpuPlan.Nhwc;
 
     private static long Key(int h, int w) => (long)h * 65536 + w;
@@ -143,7 +147,7 @@ public sealed class GcdrEnhancer : IDisposable
     {
         if (_vkPool is { } p) return p;
         p = new SizePool<Backends.Vulkan.VkGcdrPipeline>(MaxPerSize,
-            () => { Interlocked.Increment(ref _workersCreated); return Backends.Vulkan.VkBackend.Default.NewWorker(_gcModel, _drModel); },
+            () => { Interlocked.Increment(ref _workersCreated); return new Backends.Vulkan.VkGcdrPipeline(VkBackend.Default, _gcModel, _drModel); },
             w => w.DeviceBytes, VkIdleBudget);
         if (Interlocked.CompareExchange(ref _vkPool, p, null) is { } won) { p.Dispose(); return won; }
         Interlocked.Increment(ref _poolsCreated);
@@ -154,7 +158,7 @@ public sealed class GcdrEnhancer : IDisposable
     {
         if (_mtlPool is { } p) return p;
         p = new SizePool<Backends.Metal.MtlGcdrPipeline>(MaxPerSize,
-            () => { Interlocked.Increment(ref _workersCreated); return Backends.Metal.MetalBackend.Default.NewWorker(_gcModel, _drModel); },
+            () => { Interlocked.Increment(ref _workersCreated); return new Backends.Metal.MtlGcdrPipeline(MetalBackend.Default, _gcModel, _drModel); },
             w => w.DeviceBytes, (long)Backends.Metal.MtlGcdrPipeline.ArenaBudget);
         if (Interlocked.CompareExchange(ref _mtlPool, p, null) is { } won) { p.Dispose(); return won; }
         Interlocked.Increment(ref _poolsCreated);
@@ -198,15 +202,23 @@ public sealed class GcdrEnhancer : IDisposable
             || (_backend == GcdrBackend.Auto && VulkanOk()));
         if (useVk)
         {
-            var pool = VkPool();
-            var pipe = pool.Rent();
-            try
+            for (int attempt = 0; ; attempt++)
             {
-                pipe.Enhance(src, height, width, srcStride, dst, dstStride, format);
-                DebugAfterEnhance?.Invoke(pipe);
+                var pool = VkPool();
+                var pipe = pool.Rent();
+                try
+                {
+                    pipe.Enhance(src, height, width, srcStride, dst, dstStride, format);
+                    DebugAfterEnhance?.Invoke(pipe);
+                    return;
+                }
+                catch (VkDeviceLostException) when (attempt == 0)
+                {
+                    // the backend re-creates its device on next use; this pool's pipelines are dead
+                    Interlocked.CompareExchange(ref _vkPool, null, pool);
+                }
+                finally { pool.Return(pipe); }
             }
-            finally { pool.Return(pipe); }
-            return;
         }
         int ph = (-height) & 31, pw = (-width) & 31;
         int h = height + ph, w = width + pw;
@@ -261,12 +273,17 @@ public sealed class GcdrEnhancer : IDisposable
     /// stage-2 glue that writes the dr input, and dr then reuses everything above.
     /// Returns the gc arena offset and the total size, in floats.
     /// </summary>
-    internal static (long gcOff, long total) StackArenas(ExecPlan gc, ExecPlan dr, long align = 16)
+    internal static (long gcOff, long total) StackArenas(ExecPlan gc, ExecPlan dr, long align = 16) =>
+        StackArenas(gc.ArenaFloats, dr, dr.ArenaFloats, align);
+
+    /// <summary><see cref="StackArenas(ExecPlan, ExecPlan, long)"/> over each stage's full arena
+    /// (GPU graphs append scratch / tile-read slack past the plan's values).</summary>
+    internal static (long gcOff, long total) StackArenas(long gcArena, ExecPlan dr, long drArena, long align = 16)
     {
         CValue din = dr.Values[dr.InputValue];
         long o = dr.BufOffset[din.Buf], end = (o + din.ElementCount + align - 1) / align * align;
-        long gcOff = o >= gc.ArenaFloats ? 0 : end;
-        return (gcOff, Math.Max(dr.ArenaFloats, gcOff + gc.ArenaFloats));
+        long gcOff = o >= gcArena ? 0 : end;
+        return (gcOff, Math.Max(drArena, gcOff + gcArena));
     }
 
     // browser/WASI: unlinked P/Invokes (vulkan-1, libobjc) trap the wasm module with
@@ -275,7 +292,7 @@ public sealed class GcdrEnhancer : IDisposable
 
     private static bool VulkanOk()
     {
-        try { _ = Sdcb.SimdGcdrNet.Backends.Vulkan.VkBackend.Default.Dev.DeviceName; return true; }
+        try { _ = VkBackend.Default.Dev.DeviceName; return true; }
         catch { return false; }
     }
 
@@ -283,11 +300,11 @@ public sealed class GcdrEnhancer : IDisposable
     {
         try
         {
-            var dev = Backends.Metal.MetalBackend.Default.Dev;
+            var dev = MetalBackend.Default.Dev;
             // Apple7+ (M1+) for simdgroup matrix ops; Pipe() forces the embedded
             // MSL library compile now rather than mid-Enhance on macOS 13. Intel Macs can
             // claim Apple7 yet build the simdgroup-MMA conv with 0 threads/group (Pipe throws).
-            return dev.SupportsApple7 && dev.Pipe("bgr2nhwc") is not null && dev.Pipe("conv_mm_32_0") is not null;
+            return dev.SupportsApple7 && dev.Pipe("bgr2nhwc", GcdrExtensions.Owner) is not null && dev.Pipe("conv_mm_32_0") is not null;
         }
         catch { return false; }
     }
@@ -312,7 +329,7 @@ public sealed class GcdrEnhancer : IDisposable
 
     /// <summary>
     /// Size-agnostic CPU worker: one native arena holding both stages (see
-    /// <see cref="StackArenas"/>), borrowed by per-call sessions. Within
+    /// <see cref="StackArenas(ExecPlan, ExecPlan, long)"/>), borrowed by per-call sessions. Within
     /// <see cref="CpuArenaBudget"/> it only grows (25% headroom on regrowth), so mixed sizes
     /// neither reallocate nor re-fault pages; an over-budget arena (one huge image) drops
     /// to exact size once a size that fits comes along.

@@ -4,7 +4,7 @@ name: test
 #   smoke  - correctness: dotnet test + corpus smoke on every platform / ISA tier (+ Metal)
 #   bench  - performance: corpus benchmark (.github/scripts/bench.ps1), several replicas per platform
 #   report - merges every result into the run summary (tests/Sdcb.SimdGcdrNet.TestReport)
-# Job budget: 35 jobs (40 concurrent); macOS: 2 smoke + 3 bench (5 concurrent).
+# Job budget: 36 jobs (40 concurrent); macOS: 2 smoke + 3 bench (5 concurrent).
 
 on:
   push:
@@ -33,6 +33,9 @@ concurrency:
 
 env:
   DOTNET_NOLOGO: 1
+  # jobs build against the pinned Sdcb.SimdOnnx package (what ships); the engine-head smoke builds
+  # sdcb/SimdOnnx main from source next to this checkout (MSBuild reads env vars as properties)
+  SimdOnnxProject: ${{ github.workspace }}/_simdonnx/src/Sdcb.SimdOnnx/Sdcb.SimdOnnx.csproj
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
 
@@ -57,11 +60,15 @@ jobs:
     name: smoke ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      UseLocalSimdOnnx: ${{ matrix.enginehead && 'true' || 'false' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - { name: win-x64,            os: windows-2025,     count: 5 }
+          # the same tests against sdcb/SimdOnnx main from source: engine changes that break this library
+          - { name: linux-x64-engine-head, os: ubuntu-24.04, count: 2, enginehead: true }
           - { name: win-arm64,          os: windows-11-arm,   count: 5 }
           - { name: linux-x64,          os: ubuntu-24.04,     count: 5, pack: true }
           - { name: linux-arm64,        os: ubuntu-24.04-arm, count: 5 }
@@ -77,6 +84,9 @@ jobs:
           - { name: linux-arm64-scalar, os: ubuntu-24.04-arm, count: 2, maxmp: 1, isa: DOTNET_EnableHWIntrinsic=0 }
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        if: matrix.enginehead
+        with: { repository: sdcb/SimdOnnx, path: _simdonnx }
       - uses: actions/download-artifact@v8
         with: { name: realdae, path: tests/testdata/realdae }
       - name: Build

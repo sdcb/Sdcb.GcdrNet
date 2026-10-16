@@ -1,6 +1,8 @@
-using Sdcb.SimdGcdrNet.Engine;
+using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdGcdrNet.Extensions;
+using Sdcb.SimdOnnx.Kernels;
 using Sdcb.SimdGcdrNet.Kernels;
-using Sdcb.SimdGcdrNet.Onnx;
+using Sdcb.SimdOnnx.Onnx;
 using Xunit;
 
 namespace Sdcb.SimdGcdrNet.Tests;
@@ -16,11 +18,11 @@ public class EngineTests
     {
         // fused plan must contain the ChannelShift nodes and fused conv residual adds —
         // if a model export change breaks the FuseShift pattern, this fails loudly
-        ExecPlan dr = GraphCompiler.Compile(OnnxModel.Load(DrPath), [1, 6, 96, 128]);
-        Assert.Equal(8, dr.Nodes.Count(n => n.Op == ExecOp.ChannelShift));
+        ExecPlan dr = GraphCompiler.Compile(OnnxModel.Load(DrPath), [1, 6, 96, 128], CompileOptions.Default with { Extensions = GcdrExtensions.Instance });
+        Assert.Equal(8, dr.Nodes.Count(n => n.Ext == ChannelShiftOp.Instance));
 
-        ExecPlan gc = GraphCompiler.Compile(OnnxModel.Load(GcPath), [1, 3, 96, 128]);
-        Assert.True(gc.Nodes.Count(n => n.Op == ExecOp.ChannelShift) >= 4,
+        ExecPlan gc = GraphCompiler.Compile(OnnxModel.Load(GcPath), [1, 3, 96, 128], CompileOptions.Default with { Extensions = GcdrExtensions.Instance });
+        Assert.True(gc.Nodes.Count(n => n.Ext == ChannelShiftOp.Instance) >= 4,
             "gc plan lost its ChannelShift fusion");
     }
 
@@ -30,7 +32,7 @@ public class EngineTests
         // the gelu decomposition commutes before its producer transpose, then
         // fuses into the 1x1 conv via the reshape Buf-alias — the plan must
         // contain no Gelu node and the conv must carry the epilogue
-        ExecPlan gc = GraphCompiler.Compile(OnnxModel.Load(GcPath), [1, 3, 96, 128]);
+        ExecPlan gc = GraphCompiler.Compile(OnnxModel.Load(GcPath), [1, 3, 96, 128], CompileOptions.Default with { Extensions = GcdrExtensions.Instance });
         Assert.DoesNotContain(gc.Nodes, n => n.Op == ExecOp.Gelu);
         Assert.True(gc.Nodes.Count(n => n.Op == ExecOp.Conv &&
                 ((ConvP)n.P!).Act == ActivationKind.Gelu) >= 2,
@@ -47,7 +49,7 @@ public class EngineTests
         foreach (var (path, c) in new[] { (GcPath, 3), (DrPath, 6) })
         {
             ExecPlan p = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, 96, 128],
-                new CompileOptions(Nhwc: true, PhysicalIo: physicalIo));
+                new CompileOptions(Nhwc: true, PhysicalIo: physicalIo, Extensions: GcdrExtensions.Instance));
             int n = p.Nodes.Count(m => m.Op == ExecOp.Transpose);
             Assert.True(n <= 8, $"{Path.GetFileName(path)}: {n} transposes");
             Assert.Equal(expected, n);
@@ -65,7 +67,7 @@ public class EngineTests
             OnnxModel m = OnnxModel.Load(path);
             float[] Run(bool nhwc)
             {
-                using var s = new InferenceSession(GraphCompiler.Compile(m, shape, new CompileOptions(nhwc)));
+                using var s = new InferenceSession(GraphCompiler.Compile(m, shape, new CompileOptions(nhwc, Extensions: GcdrExtensions.Instance)));
                 input.CopyTo(s.Input); s.Run();
                 return s.Output.ToArray();
             }
@@ -87,7 +89,7 @@ public class EngineTests
             float[] input = Enumerable.Range(0, c * 96 * 128).Select(_ => (float)rnd.NextDouble()).ToArray();
             (float[] y, ExecPlan p) Run(bool fuse)
             {
-                ExecPlan p = GraphCompiler.Compile(m, shape, new CompileOptions(Nhwc: true, PhysicalIo: true, MemFuse: fuse));
+                ExecPlan p = GraphCompiler.Compile(m, shape, new CompileOptions(Nhwc: true, PhysicalIo: true, MemFuse: fuse, Extensions: GcdrExtensions.Instance));
                 using var s = new InferenceSession(p);
                 input.CopyTo(s.Input); s.Run();
                 return (s.Output.ToArray(), p);
@@ -110,7 +112,7 @@ public class EngineTests
         foreach (var (path, c) in new[] { (GcPath, 3), (DrPath, 6) })
         {
             ExecPlan p = GraphCompiler.Compile(OnnxModel.Load(path), [1, c, 96, 128],
-                new CompileOptions(Nhwc: true, PhysicalIo: true, Gpu: true));
+                new CompileOptions(Nhwc: true, PhysicalIo: true, Target: PlanTarget.Vulkan, Extensions: GcdrExtensions.Instance));
             Assert.Single(p.Nodes, n => n.P is ConvP { Pool: not null });
             Assert.Equal(2, p.Nodes.Count(n => n.Op == ExecOp.MaxPool));
             Assert.Contains(p.Nodes, n => n.P is UpHeadP { SkipConv: not null, SkipW: >= 0 });
@@ -124,26 +126,17 @@ public class EngineTests
         int[] shape = Golden.ShapeOf("small", "input");
         OnnxModel m = OnnxModel.Load(GcPath);
 
-        float[] Fused()
+        // per-compile option, not GCDRNET_NOFUSE: the env var would also unfuse graphs that tests
+        // running in parallel compile meanwhile (byte-exact Vulkan comparisons then fail)
+        float[] Run(bool fuse)
         {
-            Environment.SetEnvironmentVariable("GCDRNET_NOFUSE", null);
-            using var s = new InferenceSession(GraphCompiler.Compile(m, shape));
+            using var s = new InferenceSession(GraphCompiler.Compile(m, shape,
+                CompileOptions.Default with { Extensions = GcdrExtensions.Instance, Fuse = fuse }));
             input.CopyTo(s.Input); s.Run();
             return s.Output.ToArray();
         }
-        float[] Unfused()
-        {
-            Environment.SetEnvironmentVariable("GCDRNET_NOFUSE", "1");
-            try
-            {
-                using var s = new InferenceSession(GraphCompiler.Compile(m, shape));
-                input.CopyTo(s.Input); s.Run();
-                return s.Output.ToArray();
-            }
-            finally { Environment.SetEnvironmentVariable("GCDRNET_NOFUSE", null); }
-        }
 
-        var (max, rmse, _) = Golden.Diff(Fused(), Unfused());
+        var (max, rmse, _) = Golden.Diff(Run(fuse: true), Run(fuse: false));
         Assert.True(max < 1e-5f, $"fused vs unfused max diff {max} rmse {rmse}");
     }
 
@@ -176,116 +169,14 @@ public class EngineTests
     }
 
     [Fact]
-    public void Transpose_NonIdentityLeadingPerm_Correct()
-    {
-        // perm [1,0,3,2] must NOT take the last-two-dim fast path (would be wrong);
-        // it should fall through to the generic permute and still be correct
-        var rng = new Random(5);
-        int d0 = 2, d1 = 3, d2 = 4, d3 = 5;
-        float[] src = rng.Array(d0 * d1 * d2 * d3);
-        float[] got = new float[src.Length];
-        Ops.Transpose(src, [d0, d1, d2, d3], got, [d1, d0, d3, d2], [1, 0, 3, 2]);
-        for (int i0 = 0; i0 < d0; i0++)
-            for (int i1 = 0; i1 < d1; i1++)
-                for (int i2 = 0; i2 < d2; i2++)
-                    for (int i3 = 0; i3 < d3; i3++)
-                        Assert.Equal(
-                            src[((i0 * d1 + i1) * d2 + i2) * d3 + i3],
-                            got[((i1 * d0 + i0) * d3 + i3) * d2 + i2]);
-    }
-
-    [Fact]
     public void ChannelShift_OffsetBeyondWidth_Zeros()
     {
         // |off| >= w must produce a fully zeroed group, not a negative Slice
         float[] src = Enumerable.Repeat(1f, 2 * 4 * 5).ToArray();   // c=2,h=4,w=5
         float[] dst = Enumerable.Repeat(-1f, src.Length).ToArray();
         var p = new ShiftP { Axis = 3, Offsets = [5], GroupEnds = [2] };
-        Ops.ChannelShift(src, [1, 2, 4, 5], dst, [1, 2, 4, 5], p);
+        GcdrKernels.ChannelShiftNchw(src, [1, 2, 4, 5], dst, [1, 2, 4, 5], p);
         Assert.All(dst, v => Assert.Equal(0f, v));
-    }
-
-    [Fact]
-    public void Conv_GroupedNonDepthwise_MatchesReference()
-    {
-        // group=2 with ic=4 (not depthwise) routes to the scalar path — check vs manual
-        var rng = new Random(11);
-        int ic = 4, oc = 4, ih = 5, iw = 6, g = 2;
-        float[] x = rng.Array(ic * ih * iw);
-        float[] w = rng.Array(oc * (ic / g) * 9);
-        float[] dst = new float[oc * ih * iw];
-        var p = new ConvP { Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3], Group = g };
-        Ops.Conv(x, [1, ic, ih, iw], w, [oc, ic / g, 3, 3], ReadOnlySpan<float>.Empty,
-            dst, [1, oc, ih, iw], p);
-
-        for (int o = 0; o < oc; o++)
-            for (int y = 0; y < ih; y++)
-                for (int xx = 0; xx < iw; xx++)
-                {
-                    float acc = 0;
-                    int gi = o / (oc / g) * (ic / g);
-                    for (int c = 0; c < ic / g; c++)
-                        for (int ky = 0; ky < 3; ky++)
-                            for (int kx = 0; kx < 3; kx++)
-                            {
-                                int sy = y + ky - 1, sx = xx + kx - 1;
-                                if ((uint)sy < (uint)ih && (uint)sx < (uint)iw)
-                                    acc += x[(gi + c) * ih * iw + sy * iw + sx] *
-                                           w[((o * (ic / g) + c) * 3 + ky) * 3 + kx];
-                            }
-                    Assert.Equal(acc, dst[o * ih * iw + y * iw + xx], 5);
-                }
-    }
-
-    [Fact]
-    public void Conv_ResidualAdd_MatchesManual()
-    {
-        // unit-level check of the Conv+Add epilogue (the fused path has no model coverage)
-        var rng = new Random(7);
-        int ic = 4, oc = 8, ih = 9, iw = 11;
-        float[] x = rng.Array(ic * ih * iw);
-        float[] w = rng.Array(oc * ic * 9);
-        float[] b = rng.Array(oc);
-        float[] res = rng.Array(oc * ih * iw);
-        float[] want = new float[oc * ih * iw], got = new float[oc * ih * iw];
-
-        var p = new ConvP { Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3] };
-        Ops.Conv(x, [1, ic, ih, iw], w, [oc, ic, 3, 3], b, want, [1, oc, ih, iw], p);
-        for (int i = 0; i < want.Length; i++) want[i] += res[i];
-
-        Ops.Conv(x, [1, ic, ih, iw], w, [oc, ic, 3, 3], b, got, [1, oc, ih, iw], p, res);
-        var (max, _, _) = Golden.Diff(want, got);
-        Assert.True(max < 1e-4f, $"conv+add max diff {max}");
-    }
-
-    [SkippableTheory]
-    [InlineData(16, 16, 9, 11, 0, 0f, false, 0)]   // constant pad
-    [InlineData(24, 20, 13, 6, 1, 0f, true, 1)]    // reflect, residual, relu, oc lane tail, odd tiles
-    [InlineData(32, 48, 4, 4, 0, 0.5f, false, 3)]  // nonzero pad value, gelu
-    [InlineData(64, 16, 17, 23, 1, 0f, true, 0)]
-    public void Conv_Winograd_MatchesDirect(int ic, int oc, int h, int w, int mode, float padValue,
-        bool residual, int act)
-    {
-        var rng = new Random(ic * 31 + oc);
-        float[] x = rng.Array(h * w * ic);           // NHWC
-        float[] wt = rng.Array(oc * ic * 9);
-        float[] b = rng.Array(oc);
-        float[] res = residual ? rng.Array(h * w * oc) : [];
-        var p = new ConvP
-        {
-            Pads = [1, 1, 1, 1], Strides = [1, 1], Dilations = [1, 1], Kernel = [3, 3],
-            PadMode = (PadMode)mode, PadValue = padValue, Act = (ActivationKind)act,
-        };
-        Skip.IfNot(Nhwc.WinogradEligible(p, [oc, ic, 3, 3], ic), "Winograd disabled or ISA tier without it");
-        NhwcConvPlan direct = Nhwc.Pack(wt, [oc, ic, 3, 3], b, 1, ic);
-        NhwcConvPlan wino = Nhwc.Pack(wt, [oc, ic, 3, 3], b, 1, ic);
-        wino.WinoU = Nhwc.PackWinograd(wt, oc, ic);
-        float[] want = new float[h * w * oc], got = new float[h * w * oc];
-        Nhwc.Conv(x, h, w, ic, want, h, w, oc, p, direct, res);
-        Nhwc.Conv(x, h, w, ic, got, h, w, oc, p, wino, res);
-        var (max, _, _) = Golden.Diff(want, got);
-        float scale = want.Max(MathF.Abs);
-        Assert.True(max < 1e-4f * scale, $"winograd max diff {max} (|out| max {scale})");
     }
 
     [Fact]
