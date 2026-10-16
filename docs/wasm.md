@@ -89,7 +89,7 @@ Transpose 现在是 gc / dr 里仅次于 Conv 的算子（未优化，两档相�
 
 各平台的 CPU 档位：x64 上 AVX-512 / AVX2，arm64 上 NEON，browser-wasm 上 **PackedSimd**；没有专门内核的算子（Transpose、Resize、MaxPool 等）仍走 `Vector<float>`，再往下是标量。PackedSimd 档（`Nhwc.UsePacked = PackedSimd.IsSupported`）参照 SimdPaddleOCR 的 WASM 优化（`Nhwc.Conv.PackedSimd`），结构上对应本仓库 NEON 档已有的特化点：
 
-1. **4 像素 × 8 输出通道 micro-kernel `TilePkK`**（`Kernels/Nhwc.PackedSimd.cs`）
+1. **4 像素 × 8 输出通道 micro-kernel `TilePkK`**（Sdcb.SimdOnnx `src/Sdcb.SimdOnnx/Kernels/Nhwc.PackedSimd.cs`）
    - V8 在 x64 上最多给 v128 分 15 个 XMM 寄存器，6 行 tile 会在内层循环溢出。改为 8 个累加器 + 2 个权重 + 1 个 splat，每个 16 通道打包块跑两遍。
    - 输入直接 `v128.load32_splat` 从内存广播，乘、加分开（WASM SIMD 无 FMA），按 k 升序累加：与 `Vector<float>` 档逐 lane 运算顺序相同。
    - 用于 1×1 / Gemm（`GemmPk`）、直接卷积（`DenseRowPk`）和 Winograd 的 36 个小 GEMM（tile 行数随之改为 4）。
