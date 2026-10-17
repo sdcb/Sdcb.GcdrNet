@@ -118,7 +118,8 @@ The ONNX engine (protobuf reader, graph compiler, CPU SIMD kernels, Vulkan / Met
 - `src/Sdcb.SimdGcdrNet/Extensions` — engine extensions (`GcdrExtensions`): fused operators
   (`UpHeadOp`, `ChannelShiftOp`) with their CPU kernels (Vector / AVX-512 / NEON / WASM SIMD) and
   graph passes
-- `src/Sdcb.SimdGcdrNet/Kernels` — `PixelOps` (interleaved pixels ↔ tensors, padding)
+- `src/Sdcb.SimdGcdrNet/Kernels` — `PixelOps` (glue between the two nets — division correction / concat — and the
+  Metal pipeline's BGR24 rows; pixels ↔ tensors go through `Sdcb.SimdOnnx.Imaging.ImageTensor`)
 - `src/Sdcb.SimdGcdrNet/Backends/Vulkan` — `VkPipeline2` (fused gc + dr pipeline on SimdOnnx's
   Vulkan backend); `Shaders` holds the GCDRNet GLSL kernels, `tools/build-shaders.bat` recompiles
   `.comp` → `.spv` (committed; dev-time only, not part of `dotnet build`)

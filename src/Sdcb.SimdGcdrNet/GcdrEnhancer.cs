@@ -3,6 +3,8 @@ using System.Runtime.InteropServices;
 using Sdcb.SimdGcdrNet.Extensions;
 using Sdcb.SimdGcdrNet.Kernels;
 using Sdcb.SimdOnnx.Engine;
+using Sdcb.SimdOnnx.Imaging;
+using Sdcb.SimdOnnx.Kernels;
 using Sdcb.SimdOnnx.Onnx;
 using VkBackend = Sdcb.SimdOnnx.Backends.Vulkan.VkBackend;
 using VkDeviceLostException = Sdcb.SimdOnnx.Backends.Vulkan.VkDeviceLostException;
@@ -99,6 +101,8 @@ public sealed class GcdrEnhancer : IDisposable
 
     // pipeline sessions keep I/O in plan layout: the glue kernels below read/write
     // channels-last directly, so the plan has no boundary relayouts
+    // the network sees B,G,R in [0, 1]
+    private static readonly PixelNormalization s_unit = PixelNormalization.Unit();
     private static readonly CompileOptions CpuPlan = new(CompileOptions.DefaultNhwc, PhysicalIo: true, Extensions: GcdrExtensions.Instance);
     private static bool CpuNhwc => CpuPlan.Nhwc;
 
@@ -178,7 +182,6 @@ public sealed class GcdrEnhancer : IDisposable
         Span<byte> dst, int dstStride, GcdrPixelFormat format = GcdrPixelFormat.Bgr24)
     {
         int bpp = format.BytesPerPixel();
-        bool swap = format.SwapRB();
         ArgumentOutOfRangeException.ThrowIfLessThan(width, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(srcStride, width * bpp);
@@ -235,8 +238,9 @@ public sealed class GcdrEnhancer : IDisposable
 
             // stage 0: fill GC input — BGR u8 → float /255, top/left replicate pad
             Span<float> x = gc.Input;
-            if (CpuNhwc) PixelOps.BgrToNhwcPad(src, width, height, srcStride, x, h, w, ph, pw, bpp, swap);
-            else PixelOps.BgrToNchwPad(src, width, height, srcStride, x, h, w, ph, pw, bpp, swap);
+            TensorLayout layout = CpuNhwc ? TensorLayout.Nhwc : TensorLayout.Nchw;
+            ImageTensor.FromPixels(src, width, height, srcStride, (PixelFormat)format, x, layout, s_unit,
+                w, h, padLeft: pw, padTop: ph, threads: Avx2Kernels.Threads);
 
             // stage 1: GC-Net → shading map
             gc.Run();
@@ -259,10 +263,9 @@ public sealed class GcdrEnhancer : IDisposable
             dr.Run();
 
             // stage 4: crop pad → u8 in the caller's format (alpha from src)
-            if (CpuNhwc)
-                PixelOps.NhwcToBgrCrop(dr.Output, h, w, ph, pw, dst, width, height, dstStride, bpp, swap, src, srcStride);
-            else
-                PixelOps.NchwToBgrCrop(dr.Output, h, w, ph, pw, dst, width, height, dstStride, bpp, swap, src, srcStride);
+            ImageTensor.ToPixels(dr.Output, layout, w, h, dst, width, height, dstStride, (PixelFormat)format,
+                cropLeft: pw, cropTop: ph, alphaSource: bpp == 4 ? src : default, alphaStride: srcStride,
+                threads: Avx2Kernels.Threads);
         }
         finally { cpuPool.Return(worker); }
     }
