@@ -182,7 +182,6 @@ public sealed class GcdrEnhancer : IDisposable
         Span<byte> dst, int dstStride, GcdrPixelFormat format = GcdrPixelFormat.Bgr24)
     {
         int bpp = format.BytesPerPixel();
-        bool swap = format.SwapRB();
         ArgumentOutOfRangeException.ThrowIfLessThan(width, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(srcStride, width * bpp);
